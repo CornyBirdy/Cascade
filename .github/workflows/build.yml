@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Size
+        shell: pwsh
+        run: "(Get-Item target/release/cascade.exe).Length / 1KB | ForEach-Object { \"cascade.exe: {0:N0} KB\" -f $_ }"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cascade
+          path: target/release/cascade.exe
