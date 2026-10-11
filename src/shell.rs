@@ -240,7 +240,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = GetCursorPos(&mut p);
         // Required so the menu closes when clicking elsewhere.
         let _ = SetForegroundWindow(hwnd);
-        let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, hwnd, None);
+        let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         IDS.get(id.0 as usize).copied().unwrap_or(MenuCmd::None)

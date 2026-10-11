@@ -41,6 +41,9 @@ const TIMER_PEEK: usize = 3;
 const TIMER_TICK: usize = 4;
 const TIMER_FLYOUT: usize = 5;
 
+/// Not exported by the `windows` crate features we enable.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
 const BLACK: Color = Color(0.0, 0.0, 0.0, 1.0);
 
 #[derive(Clone, Copy, PartialEq, Debug)]

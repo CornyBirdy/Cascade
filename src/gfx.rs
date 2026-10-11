@@ -5,7 +5,7 @@
 use std::ffi::c_void;
 
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
@@ -233,8 +233,8 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
     D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }
 }
 
-fn pt(x: f32, y: f32) -> D2D_POINT_2F {
-    D2D_POINT_2F { x, y }
+fn pt(x: f32, y: f32) -> windows_numerics::Vector2 {
+    windows_numerics::Vector2 { X: x, Y: y }
 }
 
 /// Immediate-mode drawing helpers for one frame.

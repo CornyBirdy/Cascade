@@ -3,6 +3,7 @@
 
 use windows::core::{w, Result, BSTR};
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
 use windows::Win32::System::Variant::{VariantClear, VARIANT};
 use windows::Win32::System::Wmi::*;
 
@@ -45,7 +46,7 @@ unsafe fn watch() -> Result<()> {
     loop {
         let mut row = [None::<IWbemClassObject>; 1];
         let mut returned = 0u32;
-        events.Next(WBEM_INFINITE.0, &mut row, &mut returned).ok()?;
+        events.Next(WBEM_INFINITE, &mut row, &mut returned).ok()?;
         let Some(obj) = row[0].take() else { continue };
         let mut v = VARIANT::default();
         if obj.Get(w!("Brightness"), 0, &mut v, None, None).is_ok() {
