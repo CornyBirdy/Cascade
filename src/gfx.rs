@@ -31,7 +31,6 @@ impl Color {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Align {
     Left,
-    Center,
     Right,
 }
 
@@ -288,7 +287,6 @@ impl Painter<'_> {
         let wide: Vec<u16> = s.encode_utf16().collect();
         let a = match align {
             Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-            Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
         };
         unsafe {

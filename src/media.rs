@@ -316,7 +316,7 @@ impl Watcher {
 /// Saturation-weighted average colour, brightened so it reads on black.
 fn accent(px: &[u8]) -> [f32; 3] {
     let (mut r, mut g, mut b, mut wsum) = (0f32, 0f32, 0f32, 0f32);
-    for p in px.chunks_exact(4 * 7) {
+    for p in px.chunks_exact(4).step_by(7) {
         let (pb, pg, pr) = (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
         let max = pr.max(pg).max(pb);
         let min = pr.min(pg).min(pb);
