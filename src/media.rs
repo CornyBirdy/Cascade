@@ -106,25 +106,24 @@ fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
     w.resubscribe(&tx);
     w.refresh();
 
+    // Returns (refresh, resubscribe) after running any player action.
+    let handle = |cmd: MediaCmd, w: &Watcher| match cmd {
+        MediaCmd::Refresh => (true, false),
+        MediaCmd::Resubscribe => (true, true),
+        action => {
+            w.act(action);
+            (true, false)
+        }
+    };
     while let Ok(cmd) = rx.recv() {
-        let mut resubscribe = false;
-        let mut refresh = false;
-        let mut handle = |cmd: MediaCmd, w: &Watcher| match cmd {
-            MediaCmd::Refresh => refresh = true,
-            MediaCmd::Resubscribe => {
-                resubscribe = true;
-                refresh = true;
-            }
-            action => w.act(action),
-        };
-        handle(cmd, &w);
+        let (mut refresh, mut resubscribe) = handle(cmd, &w);
         // Players fire several events per track change (title, then art,
         // then timeline). Let them land, then refresh once.
-        if refresh || resubscribe {
-            std::thread::sleep(Duration::from_millis(120));
-        }
+        std::thread::sleep(Duration::from_millis(120));
         while let Ok(more) = rx.try_recv() {
-            handle(more, &w);
+            let (a, b) = handle(more, &w);
+            refresh |= a;
+            resubscribe |= b;
         }
         if resubscribe {
             w.resubscribe(&tx);
