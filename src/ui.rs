@@ -806,6 +806,7 @@ impl App {
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.arm_stats();
         self.apply_edges(false);
+        mouseedge::raise();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
             (true, None) => {
@@ -975,9 +976,13 @@ impl App {
                         self.preview.hide();
                     }
                     mouseedge::pause(self.fullscreen);
+                    mouseedge::raise();
                     self.arm_stats();
                 }
-                ABN_POSCHANGED if hwnd == self.dock.hwnd => self.dock.reposition(),
+                ABN_POSCHANGED if hwnd == self.dock.hwnd => {
+                    self.dock.reposition();
+                    mouseedge::raise();
+                }
                 _ => {}
             }
             return Some(LRESULT(0));
