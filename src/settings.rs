@@ -20,6 +20,9 @@ const CH: f32 = 620.0;
 const SIDEBAR: f32 = 220.0;
 const ROW_H: f32 = 58.0;
 const ROW_GAP: f32 = 8.0;
+/// A group heading, and a row with no description (e.g. a sidebar shortcut).
+const HEAD_H: f32 = 38.0;
+const COMPACT_H: f32 = 44.0;
 const TOP: f32 = 84.0;
 const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
@@ -55,6 +58,8 @@ enum Ctl {
     Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
     Note,
+    /// A group title with no control.
+    Heading,
 }
 
 struct Row {
@@ -66,6 +71,24 @@ struct Row {
 
 const fn row(key: &'static str, title: &'static str, desc: &'static str, ctl: Ctl) -> Row {
     Row { key, title, desc, ctl }
+}
+
+fn heading(key: &'static str, title: &'static str) -> Row {
+    row(key, title, "", Ctl::Heading)
+}
+
+fn row_h(r: &Row) -> f32 {
+    match r.ctl {
+        Ctl::Heading => HEAD_H,
+        Ctl::Note => ROW_H,
+        _ if r.desc.is_empty() => COMPACT_H,
+        _ => ROW_H,
+    }
+}
+
+/// Distance from the top of the first row to the top of row `i` of a section.
+fn row_offset(section: usize, i: usize) -> f32 {
+    rows(section).iter().take(i).map(|r| row_h(r) + ROW_GAP).sum()
 }
 
 fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
@@ -171,6 +194,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
         ],
         3 => vec![
+            heading("h_open", "Opening"),
             row("launcher", "Cascade Start menu", "Opened by the Start button on the taskbar.", Toggle),
             row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
             row(
@@ -179,6 +203,7 @@ fn rows(section: usize) -> Vec<Row> {
                 "So the Win key works over Task Manager. Asks for permission once.",
                 Toggle,
             ),
+            heading("h_look", "Look"),
             row(
                 "start_position",
                 "Position",
@@ -186,25 +211,29 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("auto", "Auto"), ("center", "Centre"), ("left", "Left")]),
             ),
             row("start_height", "Height", "How tall the menu is.", slider(500.0, 800.0, 10.0, Unit::Px)),
+            row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
+            heading("h_parts", "What it shows"),
+            row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_columns", "Pinned columns", "Apps per row in Pinned.", slider(3.0, 6.0, 1.0, Unit::Count)),
             row("start_pinned_rows", "Pinned rows", "Rows of pinned apps.", slider(1.0, 4.0, 1.0, Unit::Count)),
-            row("start_show_sidebar", "Sidebar", "Account, folders, settings and power.", Toggle),
-            row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_show_recent", "Recent files", "Under the pinned apps.", Toggle),
+            row("start_show_all_apps", "All apps list", "Every app A to Z on the right.", Toggle),
+            row("start_show_sidebar", "Sidebar", "Account, folders, settings and power.", Toggle),
+            heading("h_side", "Sidebar buttons"),
             row("start_show_profile", "Account button", "Your name at the top of the sidebar.", Toggle),
             row("start_show_cascade", "Cascade button", "Opens Cascade's settings, above Power.", Toggle),
-            row("start_place_settings", "Shortcut: Settings", "Windows Settings, in the sidebar.", Toggle),
-            row("start_place_explorer", "Shortcut: File Explorer", "In the sidebar.", Toggle),
-            row("start_place_downloads", "Shortcut: Downloads", "In the sidebar.", Toggle),
-            row("start_place_documents", "Shortcut: Documents", "In the sidebar.", Toggle),
-            row("start_place_pictures", "Shortcut: Pictures", "In the sidebar.", Toggle),
-            row("start_place_music", "Shortcut: Music", "In the sidebar.", Toggle),
-            row("start_place_videos", "Shortcut: Videos", "In the sidebar.", Toggle),
-            row("start_place_network", "Shortcut: Network", "In the sidebar.", Toggle),
-            row("start_show_all_apps", "All apps list", "Every app A to Z on the right.", Toggle),
-            row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
+            heading("h_places", "Sidebar shortcuts"),
+            row("start_place_settings", "Settings", "", Toggle),
+            row("start_place_explorer", "File Explorer", "", Toggle),
+            row("start_place_downloads", "Downloads", "", Toggle),
+            row("start_place_documents", "Documents", "", Toggle),
+            row("start_place_pictures", "Pictures", "", Toggle),
+            row("start_place_music", "Music", "", Toggle),
+            row("start_place_videos", "Videos", "", Toggle),
+            row("start_place_network", "Network", "", Toggle),
         ],
         4 => vec![
+            heading("h_where", "Where each widget goes"),
             row("place_weather", "Weather", "Where the weather sits on the taskbar.", PLACE),
             row("place_music", "Music", "What's playing, with a play / pause button.", PLACE),
             row("place_cpu", "CPU", "Processor load.", PLACE),
@@ -212,6 +241,7 @@ fn rows(section: usize) -> Vec<Row> {
             row("place_gpu", "GPU", "Graphics load.", PLACE),
             row("place_net", "Network", "Download and upload speed.", PLACE),
             row("place_widgets", "Widgets button", "Opens the widgets panel.", PLACE),
+            heading("h_order", "Order and panel"),
             row(
                 "taskbar_left",
                 "Left side order",
@@ -270,6 +300,19 @@ fn rows(section: usize) -> Vec<Row> {
                 Text { secret: false },
             ),
             row("fahrenheit", "Use Fahrenheit", "Otherwise Celsius.", Toggle),
+            row(
+                "weather_click",
+                "Clicking the weather",
+                "Opens this.",
+                Choice(&[
+                    ("panel", "Panel"),
+                    ("google", "Google"),
+                    ("bing", "Bing"),
+                    ("custom", "Custom"),
+                    ("none", "Nothing"),
+                ]),
+            ),
+            row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
         ],
         7 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
@@ -312,7 +355,7 @@ fn default_of(key: &str) -> Option<String> {
         return None;
     }
     let d = Config::default().get(key);
-    (!d.is_empty() || key == "weather_location").then_some(d)
+    (!d.is_empty() || matches!(key, "weather_location" | "weather_url")).then_some(d)
 }
 
 /// Whether `value` differs from the default (sliders compare as numbers).
@@ -342,7 +385,9 @@ pub struct Settings {
     hovered: Option<Hit>,
     tracking: bool,
     drag: Option<(usize, f32)>,
-    edits: Vec<(HWND, usize)>,
+    /// Text boxes: window, row index, and the text they were loaded with (only
+    /// a box the user actually edited is written back).
+    edits: Vec<(HWND, usize, String)>,
     font: HFONT,
     pub brush: HBRUSH,
 }
@@ -454,23 +499,24 @@ impl Settings {
     }
 
     fn row_y(&self, i: usize) -> f32 {
-        TOP + i as f32 * (ROW_H + ROW_GAP) - self.scroll
+        TOP + row_offset(self.section, i) - self.scroll
     }
 
     /// Control rect (x, y, w, h) of row `i`.
     fn ctl_rect(&self, i: usize, ctl: &Ctl) -> (f32, f32, f32, f32) {
         let x1 = SIDEBAR + 24.0 + self.content_w() - 18.0;
         let y = self.row_y(i);
+        let h = rows(self.section).get(i).map_or(ROW_H, row_h);
         match ctl {
-            Ctl::Toggle => (x1 - 44.0, y + (ROW_H - 22.0) / 2.0, 44.0, 22.0),
-            Ctl::Slider { .. } => (x1 - 170.0, y + 14.0, 170.0, ROW_H - 28.0),
-            Ctl::Text { .. } => (x1 - 250.0, y + (ROW_H - 30.0) / 2.0, 250.0, 30.0),
+            Ctl::Toggle => (x1 - 44.0, y + (h - 22.0) / 2.0, 44.0, 22.0),
+            Ctl::Slider { .. } => (x1 - 170.0, y + 14.0, 170.0, h - 28.0),
+            Ctl::Text { .. } => (x1 - 250.0, y + (h - 30.0) / 2.0, 250.0, 30.0),
             Ctl::Choice(opts) => {
                 let w = opts.len() as f32 * CHOICE_W;
-                (x1 - w, y + (ROW_H - 32.0) / 2.0, w, 32.0)
+                (x1 - w, y + (h - 32.0) / 2.0, w, 32.0)
             }
-            Ctl::Button(_) => (x1 - 130.0, y + (ROW_H - 32.0) / 2.0, 130.0, 32.0),
-            Ctl::Note => (x1, y, 0.0, 0.0),
+            Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
+            Ctl::Note | Ctl::Heading => (x1, y, 0.0, 0.0),
         }
     }
 
@@ -481,13 +527,14 @@ impl Settings {
             Ctl::Slider { .. } => cx - 112.0,
             _ => cx - 36.0,
         };
-        (x, self.row_y(i) + (ROW_H - 26.0) / 2.0, 26.0)
+        let h = rows(self.section).get(i).map_or(ROW_H, row_h);
+        (x, self.row_y(i) + (h - 26.0) / 2.0, 26.0)
     }
 
     /// Creates the text boxes for the current section.
     pub fn sync_edits(&mut self, get: &dyn Fn(&str) -> String) {
         unsafe {
-            for (h, _) in self.edits.drain(..) {
+            for (h, _, _) in self.edits.drain(..) {
                 let _ = DestroyWindow(h);
             }
             let instance = GetWindowLongPtrW(self.hwnd, GWLP_HINSTANCE);
@@ -500,10 +547,11 @@ impl Settings {
                     style |= WINDOW_STYLE(0x20); // ES_PASSWORD
                 }
                 let pad = (6.0 * k) as i32;
+                let loaded = get(r.key);
                 let Ok(e) = CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     w!("EDIT"),
-                    &windows::core::HSTRING::from(get(r.key)),
+                    &windows::core::HSTRING::from(loaded.as_str()),
                     style,
                     (x * k) as i32 + pad,
                     (y * k) as i32 + pad,
@@ -517,21 +565,22 @@ impl Settings {
                     continue;
                 };
                 SendMessageW(e, WM_SETFONT, Some(WPARAM(self.font.0 as usize)), Some(LPARAM(1)));
-                self.edits.push((e, i));
+                self.edits.push((e, i, loaded));
             }
         }
     }
 
     /// A text box lost focus: returns its new value.
     pub fn commit_edit(&self, edit: HWND) -> Option<Change> {
-        let (_, i) = self.edits.iter().find(|(h, _)| *h == edit)?;
+        let (_, i, loaded) = self.edits.iter().find(|(h, _, _)| *h == edit)?;
         let r = rows(self.section).into_iter().nth(*i)?;
-        Some(Change::Set(r.key, edit_text(edit).trim().to_string()))
+        let text = edit_text(edit).trim().to_string();
+        (text != loaded.trim()).then_some(Change::Set(r.key, text))
     }
 
     /// All text boxes' values (when the window closes).
     pub fn commit_all(&self) -> Vec<Change> {
-        self.edits.iter().filter_map(|(h, _)| self.commit_edit(*h)).collect()
+        self.edits.iter().filter_map(|(h, _, _)| self.commit_edit(*h)).collect()
     }
 
     fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
@@ -606,10 +655,11 @@ impl Settings {
                 self.hovered = None;
                 if matches!(r.ctl, Ctl::Text { .. }) {
                     // Show the default in the text box straight away.
-                    if let Some((h, _)) = self.edits.iter().find(|(_, j)| *j == i) {
+                    if let Some((h, _, loaded)) = self.edits.iter_mut().find(|(_, j, _)| *j == i) {
                         unsafe {
                             let _ = SetWindowTextW(*h, &windows::core::HSTRING::from(d.as_str()));
                         }
+                        *loaded = d.clone();
                     }
                 }
                 self.invalidate();
@@ -665,8 +715,7 @@ impl Settings {
     }
 
     pub fn on_wheel(&mut self, delta: i16, get: &dyn Fn(&str) -> String) {
-        let n = rows(self.section).len() as f32;
-        let content = TOP + n * (ROW_H + ROW_GAP) + 16.0;
+        let content = TOP + row_offset(self.section, usize::MAX) + 16.0;
         let max = (content - CH).max(0.0);
         let before = self.scroll;
         self.scroll = (self.scroll - delta as f32 / 120.0 * 60.0).clamp(0.0, max);
@@ -747,10 +796,24 @@ impl Settings {
                 );
                 for (i, r) in rows(self.section).iter().enumerate() {
                     let y = self.row_y(i);
-                    if y + ROW_H < 0.0 || y > CH {
+                    let h = row_h(r);
+                    if y + h < 0.0 || y > CH {
                         continue;
                     }
-                    p.rrect(x0, y, cw, ROW_H, 8.0, Color::white(0.045));
+                    if matches!(r.ctl, Ctl::Heading) {
+                        p.text(
+                            r.title,
+                            &f.label,
+                            x0 + 4.0,
+                            y + 12.0,
+                            cw,
+                            22.0,
+                            Align::Left,
+                            Color(0.55, 0.74, 1.0, 1.0),
+                        );
+                        continue;
+                    }
+                    p.rrect(x0, y, cw, h, 8.0, Color::white(0.045));
                     let text_w = cw - 330.0;
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
@@ -768,8 +831,21 @@ impl Settings {
                     } else {
                         r.desc.to_string()
                     };
-                    p.text(r.title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
-                    p.text(&desc, &f.small, x0 + 18.0, y + 30.0, text_w, 18.0, Align::Left, Color::white(0.55));
+                    if desc.is_empty() {
+                        p.text(
+                            r.title,
+                            &f.label,
+                            x0 + 18.0,
+                            y + (h - 20.0) / 2.0,
+                            text_w,
+                            20.0,
+                            Align::Left,
+                            Color::white(0.95),
+                        );
+                    } else {
+                        p.text(r.title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
+                        p.text(&desc, &f.small, x0 + 18.0, y + 30.0, text_w, 18.0, Align::Left, Color::white(0.55));
+                    }
                     let (cx, cy, cwid, ch) = self.ctl_rect(i, &r.ctl);
                     let hovered = self.hovered == Some(Hit::Row(i));
                     match r.ctl {
@@ -814,7 +890,7 @@ impl Settings {
                             p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, ACCENT);
                             let knob = if hovered || self.drag.is_some_and(|(d, _)| d == i) { 9.0 } else { 7.5 };
                             p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
-                            p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, ROW_H, Align::Right, Color::white(0.8));
+                            p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, h, Align::Right, Color::white(0.8));
                         }
                         Ctl::Text { .. } => {
                             p.rrect(cx, cy, cwid, ch, 6.0, Color(0.17, 0.17, 0.17, 1.0));
@@ -838,7 +914,7 @@ impl Settings {
                             p.rrect(cx, cy, cwid, ch, 6.0, if hovered { Color(0.36, 0.62, 1.0, 1.0) } else { ACCENT });
                             p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
                         }
-                        Ctl::Note => {}
+                        Ctl::Note | Ctl::Heading => {}
                     }
                     let value = match self.drag {
                         Some((d, v)) if d == i => format!("{v}"),

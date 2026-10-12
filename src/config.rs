@@ -129,6 +129,11 @@ weather = true
 # Empty = detect from your IP. Or a city name, or \"lat,lon\".
 weather_location =
 fahrenheit = false
+# What clicking the weather does: panel (Cascade's widgets panel), google, bing,
+# custom (weather_url) or none.
+weather_click = panel
+# Used when weather_click = custom. {q} becomes e.g. \"weather Sydney\".
+weather_url =
 
 # ---- Updates ----
 # Check GitHub for a newer build every few hours (right-click > Update to install).
@@ -203,6 +208,8 @@ pub struct Config {
     pub break_minutes: u32,
     pub weather: bool,
     pub weather_location: String,
+    pub weather_click: String,
+    pub weather_url: String,
     pub fahrenheit: bool,
     pub update_check: bool,
     pub github_token: String,
@@ -270,6 +277,8 @@ impl Default for Config {
             break_minutes: 5,
             weather: true,
             weather_location: String::new(),
+            weather_click: "panel".into(),
+            weather_url: String::new(),
             fahrenheit: false,
             update_check: true,
             github_token: String::new(),
@@ -460,6 +469,10 @@ impl Config {
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "weather" => set_b(&mut c.weather),
                 "weather_location" => c.weather_location = v.trim_matches('"').to_string(),
+                "weather_click" if matches!(v, "panel" | "google" | "bing" | "custom" | "none") => {
+                    c.weather_click = v.into()
+                }
+                "weather_url" => c.weather_url = v.trim_matches('"').to_string(),
                 "fahrenheit" => set_b(&mut c.fahrenheit),
                 "update_check" => set_b(&mut c.update_check),
                 "github_token" => c.github_token = v.trim_matches('"').to_string(),
@@ -558,6 +571,8 @@ impl Config {
             "break_minutes" => self.break_minutes.to_string(),
             "weather" => b(self.weather),
             "weather_location" => self.weather_location.clone(),
+            "weather_click" => self.weather_click.clone(),
+            "weather_url" => self.weather_url.clone(),
             "fahrenheit" => b(self.fahrenheit),
             "update_check" => b(self.update_check),
             "github_token" => self.github_token.clone(),

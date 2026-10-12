@@ -4,12 +4,14 @@
 use std::sync::mpsc::{channel, Sender};
 
 use windows::core::{Interface, Result, HSTRING, PCWSTR};
+use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, HPALETTE};
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::Shell::*;
+use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
 
 use crate::msg;
 
@@ -28,12 +30,18 @@ pub fn spawn() -> Sender<String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let wic: Option<IWICImagingFactory> =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
+        // Cascade's own exe is drawn from its embedded icon: the shell's icon
+        // cache keeps showing the old picture after an update swaps the file.
+        let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_lowercase());
         while let Ok(id) = rx.recv() {
             let item: Option<IShellItem> = SHCreateItemFromParsingName(&HSTRING::from(id.as_str()), None).ok();
+            let is_own = own.as_deref() == Some(id.to_lowercase().as_str());
             let pixels = match (&item, &wic) {
-                (Some(item), Some(wic)) => load_icon(item, wic).unwrap_or_default(),
-                _ => Vec::new(),
-            };
+                (_, Some(wic)) if is_own => own_icon(wic).or_else(|_| load_icon(item.as_ref().ok_or(E_FAIL)?, wic)),
+                (Some(item), Some(wic)) => load_icon(item, wic),
+                _ => Ok(Vec::new()),
+            }
+            .unwrap_or_default();
             let name = display_name(&id, item.as_ref());
             let ptr = Box::into_raw(Box::new(IconResult { id, name, pixels }));
             if !msg::post(msg::ICON, 0, ptr as isize) {
@@ -50,25 +58,37 @@ unsafe fn load_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Result<Vec<u
     let hbmp = factory
         .GetImage(size, SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_BIGGERSIZEOK.0))
         .or_else(|_| factory.GetImage(size, SIIGBF_BIGGERSIZEOK))?;
-    let result = (|| {
-        let bmp = wic.CreateBitmapFromHBITMAP(hbmp, HPALETTE::default(), WICBitmapUsePremultipliedAlpha)?;
-        let scaler = wic.CreateBitmapScaler()?;
-        scaler.Initialize(&bmp, ICON_SIZE, ICON_SIZE, WICBitmapInterpolationModeFant)?;
-        let conv = wic.CreateFormatConverter()?;
-        conv.Initialize(
-            &scaler,
-            &GUID_WICPixelFormat32bppPBGRA,
-            WICBitmapDitherTypeNone,
-            None,
-            0.0,
-            WICBitmapPaletteTypeCustom,
-        )?;
-        let mut px = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
-        conv.CopyPixels(std::ptr::null(), ICON_SIZE * 4, &mut px)?;
-        Ok(px)
-    })();
+    let result = wic
+        .CreateBitmapFromHBITMAP(hbmp, HPALETTE::default(), WICBitmapUsePremultipliedAlpha)
+        .and_then(|bmp| to_pixels(wic, &bmp));
     let _ = DeleteObject(hbmp.into());
     result
+}
+
+/// Cascade's own icon, straight from the exe's resources.
+unsafe fn own_icon(wic: &IWICImagingFactory) -> Result<Vec<u8>> {
+    let icon = crate::shell::app_icon(ICON_SIZE as i32).ok_or(E_FAIL)?;
+    let result = wic.CreateBitmapFromHICON(icon).and_then(|bmp| to_pixels(wic, &bmp));
+    let _ = DestroyIcon(icon);
+    result
+}
+
+/// Scales a bitmap to ICON_SIZE square, premultiplied BGRA.
+unsafe fn to_pixels(wic: &IWICImagingFactory, bmp: &IWICBitmap) -> Result<Vec<u8>> {
+    let scaler = wic.CreateBitmapScaler()?;
+    scaler.Initialize(bmp, ICON_SIZE, ICON_SIZE, WICBitmapInterpolationModeFant)?;
+    let conv = wic.CreateFormatConverter()?;
+    conv.Initialize(
+        &scaler,
+        &GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        None,
+        0.0,
+        WICBitmapPaletteTypeCustom,
+    )?;
+    let mut px = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
+    conv.CopyPixels(std::ptr::null(), ICON_SIZE * 4, &mut px)?;
+    Ok(px)
 }
 
 /// The app's friendly name: an exe's "File description", else the shell's name.

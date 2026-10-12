@@ -1764,6 +1764,11 @@ impl App {
                 Config::set("taskbar_left", &left);
                 Config::set("taskbar_right", &right);
                 self.reload_config();
+                // The order boxes on this page now hold old text; reload them.
+                if let Some(s) = &mut self.settings {
+                    let cfg = &self.cfg;
+                    s.sync_edits(&|k: &str| setting_value(cfg, k));
+                }
             }
             Change::Set("admin_helper", v) => {
                 let on = v == "true";
@@ -1957,7 +1962,16 @@ impl App {
                 } else {
                     format!("weather {}", self.cfg.weather_location.trim())
                 };
-                shell::open(&format!("https://www.bing.com/search?q={}", q.replace(' ', "+")));
+                let q = q.replace(' ', "+");
+                match self.cfg.weather_click.as_str() {
+                    "panel" => self.toggle_widgets(),
+                    "google" => shell::open(&format!("https://www.google.com/search?q={q}")),
+                    "bing" => shell::open(&format!("https://www.bing.com/search?q={q}")),
+                    "custom" if !self.cfg.weather_url.trim().is_empty() => {
+                        shell::open(&self.cfg.weather_url.trim().replace("{q}", &q))
+                    }
+                    _ => {}
+                }
             }
             DockHot::Tray => self.toggle_flyout(),
             DockHot::TrayIcon(i) => self.systray.click(i, false),

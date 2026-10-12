@@ -657,6 +657,10 @@ pub fn ensure_shortcuts() {
         let dir = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs");
         let _ = create_link(&dir.join("Cascade.lnk"), &exe, "", "Cascade notch, taskbar and Start menu");
         let _ = create_link(&dir.join("Cascade Settings.lnk"), &exe, "--settings", "Cascade settings");
+        // After an update the shell may still show the old icon: have it reload.
+        if std::env::args().any(|a| a == "--updated") {
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+        }
     });
 }
 
