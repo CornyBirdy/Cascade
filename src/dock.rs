@@ -298,7 +298,10 @@ impl Dock {
         self.bottom = match self.reserve_slot {
             Some(slot) => slot.bottom,
             None if self.hide_taskbar => self.monitor.bottom,
-            None => shell::work_area().bottom.min(self.monitor.bottom),
+            None => {
+                let taskbar = shell::bottom_taskbar_top(self.monitor).unwrap_or(i32::MAX);
+                shell::work_area().bottom.min(self.monitor.bottom).min(taskbar)
+            }
         };
         self.dirty = true;
     }

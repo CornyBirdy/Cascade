@@ -297,6 +297,11 @@ pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut b
             *registered = SHAppBarMessage(ABM_NEW, &mut abd) != 0;
         }
         SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        // Windows 11 does not always move the proposed rect clear of the
+        // taskbar, so make sure the dock ends above a visible bottom taskbar.
+        if let Some(top) = bottom_taskbar_top(monitor) {
+            abd.rc.bottom = abd.rc.bottom.min(top);
+        }
         abd.rc.top = abd.rc.bottom - height;
         if current == Some(abd.rc) {
             return abd.rc;
@@ -304,6 +309,29 @@ pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut b
         SHAppBarMessage(ABM_SETPOS, &mut abd);
     }
     abd.rc
+}
+
+/// Top edge of the main taskbar if it is showing along the bottom of
+/// `monitor` (not hidden by Cascade and not set to auto-hide).
+pub fn bottom_taskbar_top(monitor: RECT) -> Option<i32> {
+    let tray = *taskbars().first()?;
+    unsafe {
+        if !IsWindowVisible(tray).as_bool() {
+            return None;
+        }
+        let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, ..Default::default() };
+        if SHAppBarMessage(ABM_GETSTATE, &mut abd) as u32 & ABS_AUTOHIDE != 0 {
+            return None;
+        }
+        let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: tray, ..Default::default() };
+        if SHAppBarMessage(ABM_GETTASKBARPOS, &mut abd) == 0 {
+            return None;
+        }
+        let r = abd.rc;
+        let at_bottom = r.bottom >= monitor.bottom - 2 && r.top > monitor.top + (monitor.bottom - monitor.top) / 2;
+        let on_monitor = r.left < monitor.right && r.right > monitor.left;
+        (at_bottom && on_monitor).then_some(r.top)
+    }
 }
 
 pub fn work_area() -> RECT {
