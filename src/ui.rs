@@ -2137,8 +2137,8 @@ impl App {
                 muted: self.vol.1,
                 battery: battery(),
             };
-            let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             self.sync_art();
+            let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());
             let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art };
             let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);

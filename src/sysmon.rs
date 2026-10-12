@@ -79,21 +79,21 @@ fn ok<T: Into<i64>>(status: T) -> bool {
 }
 
 struct Pdh {
-    query: isize,
-    gpu: Option<isize>,
-    disk: Option<isize>,
+    query: PDH_HQUERY,
+    gpu: Option<PDH_HCOUNTER>,
+    disk: Option<PDH_HCOUNTER>,
     opened: Instant,
 }
 
 impl Pdh {
     fn open() -> Option<Self> {
         unsafe {
-            let mut query = 0isize;
+            let mut query = PDH_HQUERY::default();
             if !ok(PdhOpenQueryW(PCWSTR::null(), 0, &mut query)) {
                 return None;
             }
             let mut add = |path: PCWSTR| {
-                let mut h = 0isize;
+                let mut h = PDH_HCOUNTER::default();
                 ok(PdhAddEnglishCounterW(query, path, 0, &mut h)).then_some(h)
             };
             let gpu = add(w!("\\GPU Engine(*)\\Utilization Percentage"));
@@ -104,7 +104,7 @@ impl Pdh {
         }
     }
 
-    fn value(&self, counter: isize) -> Option<f64> {
+    fn value(&self, counter: PDH_HCOUNTER) -> Option<f64> {
         unsafe {
             let mut v = PDH_FMT_COUNTERVALUE::default();
             if !ok(PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, None, &mut v)) || v.CStatus > 1 {
@@ -115,7 +115,7 @@ impl Pdh {
     }
 
     /// The busiest GPU's busiest engine, like Task Manager's GPU figure.
-    fn gpu_load(&self, counter: isize) -> Option<f64> {
+    fn gpu_load(&self, counter: PDH_HCOUNTER) -> Option<f64> {
         unsafe {
             let (mut size, mut count) = (0u32, 0u32);
             let _ = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
