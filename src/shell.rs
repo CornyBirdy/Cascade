@@ -204,11 +204,125 @@ pub fn set_flyout_hidden(hide: bool) {
     }
 }
 
+// --------------------------------------------------------------- taskbar --
+
+fn taskbars() -> Vec<HWND> {
+    let mut out = Vec::new();
+    unsafe {
+        if let Ok(h) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) {
+            out.push(h);
+        }
+        let mut after: Option<HWND> = None;
+        while let Ok(h) = FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) {
+            after = Some(h);
+            out.push(h);
+        }
+    }
+    out
+}
+
+pub fn is_taskbar(hwnd: HWND) -> bool {
+    taskbars().contains(&hwnd)
+}
+
+fn taskbar_marker() -> std::path::PathBuf {
+    crate::config::dir().join("taskbar-hidden")
+}
+
+fn set_taskbar_state(state: u32) {
+    let Some(&tray) = taskbars().first() else { return };
+    let mut abd = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        hWnd: tray,
+        lParam: LPARAM(state as isize),
+        ..Default::default()
+    };
+    unsafe { SHAppBarMessage(ABM_SETSTATE, &mut abd) };
+}
+
+/// Hides the Windows taskbar. Its auto-hide setting is switched on so the
+/// screen space is given back; the original setting is saved to a marker
+/// file so it is restored even after a crash.
+pub fn hide_taskbar() {
+    let marker = taskbar_marker();
+    if !marker.exists() {
+        let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, ..Default::default() };
+        let state = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut abd) } as u32;
+        let _ = std::fs::create_dir_all(crate::config::dir());
+        let _ = std::fs::write(&marker, state.to_string());
+    }
+    set_taskbar_state(ABS_AUTOHIDE);
+    reassert_taskbar_hidden();
+}
+
+/// Explorer re-shows the taskbar now and then (Start menu, explorer restart).
+pub fn reassert_taskbar_hidden() {
+    for t in taskbars() {
+        unsafe {
+            if IsWindowVisible(t).as_bool() {
+                let _ = ShowWindow(t, SW_HIDE);
+            }
+        }
+    }
+}
+
+/// Restores the taskbar if Cascade hid it (now or in a run that crashed).
+pub fn restore_taskbar() {
+    let marker = taskbar_marker();
+    let Ok(text) = std::fs::read_to_string(&marker) else { return };
+    set_taskbar_state(text.trim().parse().unwrap_or(ABS_ALWAYSONTOP));
+    for t in taskbars() {
+        unsafe {
+            let _ = ShowWindow(t, SW_SHOWNA);
+        }
+    }
+    let _ = std::fs::remove_file(marker);
+}
+
+/// Reserves a strip at the bottom of the primary monitor for `hwnd` (like the
+/// taskbar does) so maximised windows stop above it. Returns the granted rect.
+pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut bool) -> RECT {
+    let mut abd = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd,
+        uCallbackMessage: msg::APPBAR,
+        uEdge: ABE_BOTTOM,
+        rc: RECT { top: monitor.bottom - height, ..monitor },
+        ..Default::default()
+    };
+    unsafe {
+        if !*registered {
+            *registered = SHAppBarMessage(ABM_NEW, &mut abd) != 0;
+        }
+        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        abd.rc.top = abd.rc.bottom - height;
+        SHAppBarMessage(ABM_SETPOS, &mut abd);
+    }
+    abd.rc
+}
+
+pub fn work_area() -> RECT {
+    let mut r = RECT::default();
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut r as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    r
+}
+
 // ------------------------------------------------------------------ menu --
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum MenuCmd {
     None,
+    Notch,
+    Dock,
+    DockAutohide,
+    HideTaskbar,
     Autostart,
     Flyout,
     OpenConfig,
@@ -217,25 +331,25 @@ pub enum MenuCmd {
 }
 
 pub struct MenuState {
+    pub notch: bool,
+    pub dock: bool,
+    pub dock_autohide: bool,
+    pub hide_taskbar: bool,
     pub autostart: bool,
     pub flyout_hidden: bool,
 }
 
-pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 6] =
-        [MenuCmd::None, MenuCmd::Autostart, MenuCmd::Flyout, MenuCmd::OpenConfig, MenuCmd::Reload, MenuCmd::Quit];
+fn check(on: bool) -> MENU_ITEM_FLAGS {
+    if on {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING
+    }
+}
+
+/// Shows `menu` at the cursor and returns the chosen item id (0 = none).
+fn track(hwnd: HWND, menu: HMENU) -> usize {
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
-        let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Cascade"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, check(state.autostart), 1, w!("Start with Windows"));
-        let _ = AppendMenuW(menu, check(state.flyout_hidden), 2, w!("Hide Windows volume flyout"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, 3, w!("Open config file"));
-        let _ = AppendMenuW(menu, MF_STRING, 4, w!("Reload config"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, 5, w!("Quit Cascade"));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
         // Required so the menu closes when clicking elsewhere.
@@ -243,7 +357,76 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
-        IDS.get(id.0 as usize).copied().unwrap_or(MenuCmd::None)
+        id.0 as usize
+    }
+}
+
+pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
+    const IDS: [MenuCmd; 10] = [
+        MenuCmd::None,
+        MenuCmd::Notch,
+        MenuCmd::Dock,
+        MenuCmd::DockAutohide,
+        MenuCmd::HideTaskbar,
+        MenuCmd::Autostart,
+        MenuCmd::Flyout,
+        MenuCmd::OpenConfig,
+        MenuCmd::Reload,
+        MenuCmd::Quit,
+    ];
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Cascade"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, check(state.notch), 1, w!("Show notch"));
+        let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show dock"));
+        let flags = if state.dock { check(state.dock_autohide) } else { check(state.dock_autohide) | MF_GRAYED };
+        let _ = AppendMenuW(menu, flags, 3, w!("Auto-hide dock"));
+        let _ = AppendMenuW(menu, check(state.hide_taskbar), 4, w!("Hide Windows taskbar"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
+        let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 7, w!("Open config file"));
+        let _ = AppendMenuW(menu, MF_STRING, 8, w!("Reload config"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 9, w!("Quit Cascade"));
+        IDS.get(track(hwnd, menu)).copied().unwrap_or(MenuCmd::None)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum AppCmd {
+    None,
+    NewWindow,
+    TogglePin,
+    CloseAll,
+}
+
+/// Right-click menu for a dock icon.
+pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> AppCmd {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return AppCmd::None };
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(name));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 1, w!("New window"));
+        let _ = AppendMenuW(menu, MF_STRING, 2, if pinned { w!("Unpin from dock") } else { w!("Pin to dock") });
+        if windows > 0 {
+            let label = if windows == 1 { "Close window".to_string() } else { format!("Close {windows} windows") };
+            let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from(label));
+        }
+        match track(hwnd, menu) {
+            1 => AppCmd::NewWindow,
+            2 => AppCmd::TogglePin,
+            3 => AppCmd::CloseAll,
+            _ => AppCmd::None,
+        }
+    }
+}
+
+pub fn open(target: &str) {
+    unsafe {
+        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }
 }
 

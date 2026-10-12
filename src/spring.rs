@@ -29,6 +29,11 @@ impl Spring {
         self.velocity = 0.0;
     }
 
+    /// Gives the spring a push, e.g. for a bounce around its rest point.
+    pub fn kick(&mut self, velocity: f32) {
+        self.velocity += velocity;
+    }
+
     pub fn settled(&self) -> bool {
         self.velocity.abs() < EPSILON && (self.value - self.target).abs() < EPSILON
     }

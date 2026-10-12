@@ -92,6 +92,16 @@ impl Volume {
         unsafe { Some((ep.GetMasterVolumeLevelScalar().ok()?, ep.GetMute().ok()?.as_bool())) }
     }
 
+    pub fn set(&self, level: f32) {
+        let Some(ep) = &self.endpoint else { return };
+        unsafe {
+            if level > 0.0 {
+                let _ = ep.SetMute(false, std::ptr::null());
+            }
+            let _ = ep.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
+        }
+    }
+
     pub fn nudge(&self, delta: f32) {
         let Some(ep) = &self.endpoint else { return };
         let Some((v, muted)) = self.get() else { return };

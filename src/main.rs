@@ -7,13 +7,19 @@ compile_error!("Cascade is a Windows app.");
 mod audio;
 mod brightness;
 mod config;
+mod dock;
 mod gfx;
+mod icons;
 mod media;
+mod pomodoro;
+mod preview;
+mod radios;
 mod shell;
 mod spring;
 mod ui;
+mod weather;
 
-/// Messages worker threads post to the notch window.
+/// Messages worker threads post to the main (notch) window.
 pub mod msg {
     use std::sync::atomic::{AtomicIsize, Ordering};
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -26,6 +32,10 @@ pub mod msg {
     pub const AUDIO_DEVICE: u32 = WM_APP + 5;
     pub const TRAY: u32 = WM_APP + 6;
     pub const APPBAR: u32 = WM_APP + 7;
+    pub const RADIOS: u32 = WM_APP + 8;
+    pub const BRIGHTNESS_LEVEL: u32 = WM_APP + 9;
+    pub const ICON: u32 = WM_APP + 10;
+    pub const WEATHER: u32 = WM_APP + 11;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

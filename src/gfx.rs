@@ -31,6 +31,7 @@ impl Color {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Align {
     Left,
+    Center,
     Right,
 }
 
@@ -40,6 +41,7 @@ pub struct Fonts {
     pub small: IDWriteTextFormat,
     pub big: IDWriteTextFormat,
     pub num: IDWriteTextFormat,
+    pub label: IDWriteTextFormat,
 }
 
 struct Surface {
@@ -60,12 +62,58 @@ impl Drop for Surface {
     }
 }
 
+/// The off-screen pixels behind one layered window.
+#[derive(Default)]
+pub struct Layer {
+    surface: Option<Surface>,
+}
+
+impl Layer {
+    /// Makes sure the backing bitmap can hold `width` x `height` pixels.
+    fn ensure(&mut self, width: i32, height: i32) -> Result<HDC> {
+        if let Some(s) = &self.surface {
+            if s.width >= width && s.height >= height {
+                return Ok(s.dc);
+            }
+        }
+        self.surface = None;
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
+            let old = SelectObject(dc, bitmap.into());
+            self.surface = Some(Surface { dc, bitmap, old, width, height });
+            Ok(dc)
+        }
+    }
+
+    /// Frees the pixels (e.g. while the window is hidden).
+    pub fn release(&mut self) {
+        self.surface = None;
+    }
+}
+
 pub struct Gfx {
     pub factory: ID2D1Factory,
+    dw: IDWriteFactory,
     rt: ID2D1DCRenderTarget,
     brush: ID2D1SolidColorBrush,
     pub fonts: Fonts,
-    surface: Option<Surface>,
+    /// Bumped whenever the render target is recreated; bitmaps made by an
+    /// older generation must be thrown away.
+    pub generation: u32,
 }
 
 fn text_format(dw: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
@@ -102,13 +150,14 @@ impl Gfx {
                 small: text_format(&dw, 11.0, DWRITE_FONT_WEIGHT_NORMAL)?,
                 big: text_format(&dw, 32.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 num: text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+                label: text_format(&dw, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             };
-            Ok(Self { factory, rt, brush, fonts, surface: None })
+            Ok(Self { factory, dw, rt, brush, fonts, generation: 0 })
         }
     }
 
     fn create_target(factory: &ID2D1Factory) -> Result<ID2D1DCRenderTarget> {
-        // Software rendering: the surface is small, and it avoids a GPU
+        // Software rendering: the surfaces are small, and it avoids a GPU
         // readback every frame plus keeps the GPU asleep.
         let props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
@@ -128,77 +177,74 @@ impl Gfx {
         }
     }
 
-    /// Makes sure the backing bitmap can hold `width` x `height` pixels.
-    pub fn ensure_surface(&mut self, width: i32, height: i32) -> Result<()> {
-        if let Some(s) = &self.surface {
-            if s.width >= width && s.height >= height {
-                return Ok(());
-            }
-        }
-        self.surface = None;
-        unsafe {
-            let dc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width,
-                    biHeight: -height,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let old = SelectObject(dc, bitmap.into());
-            self.surface = Some(Surface { dc, bitmap, old, width, height });
-        }
-        Ok(())
+    /// Starts a frame of `width` x `height` pixels on `layer`, with drawing
+    /// coordinates in layout units of `scale` pixels each.
+    pub fn begin(&self, layer: &mut Layer, width: i32, height: i32, scale: f32) -> Result<()> {
+        let dc = layer.ensure(width, height)?;
+        self.begin_dc(dc, width, height, scale, Color(0.0, 0.0, 0.0, 0.0))
     }
 
-    /// Starts a frame of `width` x `height` pixels, with drawing coordinates
-    /// in layout units of `scale` pixels each. Draw with `painter()`.
-    pub fn begin(&mut self, width: i32, height: i32, scale: f32) -> Result<()> {
-        self.ensure_surface(width, height)?;
-        let dc = self.surface.as_ref().unwrap().dc;
+    /// Starts a frame on any device context (used for the opaque preview popup).
+    pub fn begin_dc(&self, dc: HDC, width: i32, height: i32, scale: f32, clear: Color) -> Result<()> {
         unsafe {
             self.rt.BindDC(dc, &RECT { left: 0, top: 0, right: width, bottom: height })?;
             self.rt.SetDpi(96.0 * scale, 96.0 * scale);
             self.rt.BeginDraw();
-            self.rt.Clear(Some(&Color(0.0, 0.0, 0.0, 0.0).d2d()));
+            self.rt.Clear(Some(&clear.d2d()));
         }
         Ok(())
+    }
+
+    /// Width of `text` in layout units.
+    pub fn measure(&self, text: &str, font: &IDWriteTextFormat) -> f32 {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            let Ok(layout) = self.dw.CreateTextLayout(&wide, font, 10_000.0, 100.0) else { return 0.0 };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut m).is_ok() {
+                m.widthIncludingTrailingWhitespace
+            } else {
+                0.0
+            }
+        }
     }
 
     pub fn painter(&self) -> Painter<'_> {
         Painter { gfx: self }
     }
 
-    /// Finishes the frame and shows it at `pos` on screen.
-    pub fn present(&mut self, hwnd: HWND, pos: POINT, width: i32, height: i32) -> Result<()> {
+    /// Ends the frame, recreating the render target if Direct2D lost it.
+    pub fn end(&mut self) -> Result<()> {
         unsafe {
             if let Err(e) = self.rt.EndDraw(None, None) {
                 if e.code() == D2DERR_RECREATE_TARGET {
                     self.rt = Self::create_target(&self.factory)?;
                     self.brush = self.rt.CreateSolidColorBrush(&Color::white(1.0).d2d(), None)?;
+                    self.generation += 1;
                 }
                 return Err(e);
             }
-            let dc = self.surface.as_ref().unwrap().dc;
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
+        }
+        Ok(())
+    }
+
+    /// Ends the frame and shows `layer` at `pos` on screen.
+    pub fn present(&mut self, layer: &Layer, hwnd: HWND, pos: POINT, width: i32, height: i32, alpha: u8) -> Result<()> {
+        self.end()?;
+        let Some(surface) = &layer.surface else { return Ok(()) };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: alpha,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        unsafe {
             UpdateLayeredWindow(
                 hwnd,
                 None,
                 Some(&pos),
                 Some(&SIZE { cx: width, cy: height }),
-                Some(dc),
+                Some(surface.dc),
                 Some(&POINT { x: 0, y: 0 }),
                 COLORREF(0),
                 Some(&blend),
@@ -270,6 +316,11 @@ impl Painter<'_> {
         unsafe { self.gfx.rt.FillEllipse(&e, self.brush(c)) };
     }
 
+    pub fn stroke_circle(&self, cx: f32, cy: f32, r: f32, c: Color, width: f32) {
+        let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: r, radiusY: r };
+        unsafe { self.gfx.rt.DrawEllipse(&e, self.brush(c), width, None) };
+    }
+
     pub fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, c: Color, width: f32) {
         unsafe { self.gfx.rt.DrawLine(pt(x0, y0), pt(x1, y1), self.brush(c), width, None) };
     }
@@ -287,6 +338,7 @@ impl Painter<'_> {
         let wide: Vec<u16> = s.encode_utf16().collect();
         let a = match align {
             Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+            Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
         };
         unsafe {
@@ -346,7 +398,7 @@ impl Painter<'_> {
                 size: D2D_SIZE_F { width: r, height: r },
                 rotationAngle: 0.0,
                 sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                arcSize: D2D1_ARC_SIZE_SMALL,
+                arcSize: if a1 - a0 > std::f32::consts::PI { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
             });
             s.EndFigure(D2D1_FIGURE_END_OPEN);
         }) {
