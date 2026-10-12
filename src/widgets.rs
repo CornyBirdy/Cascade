@@ -104,7 +104,7 @@ fn fmt_time(d: Duration) -> String {
 fn days_in_month(year: u16, month: u16) -> u16 {
     match month {
         4 | 6 | 9 | 11 => 30,
-        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) => 29,
         2 => 28,
         _ => 31,
     }
@@ -158,6 +158,13 @@ fn card_height(card: Card, ctx: &Ctx) -> f32 {
         Card::Weather => 112.0,
         Card::Calendar => 256.0,
     }
+}
+
+/// Each card's place (card, x, y, height) and the panel's size.
+struct Layout {
+    cards: Vec<(Card, f32, f32, f32)>,
+    w: f32,
+    h: f32,
 }
 
 impl Widgets {
@@ -270,8 +277,7 @@ impl Widgets {
         self.reveal.step(dt)
     }
 
-    /// Each card's place: (card, x, y, height), and the panel's size.
-    fn layout(&self, ctx: &Ctx) -> (Vec<(Card, f32, f32, f32)>, f32, f32) {
+    fn layout(&self, ctx: &Ctx) -> Layout {
         let cols = self.columns.max(1);
         let mut col_y = vec![HEADER; cols];
         let mut out = Vec::new();
@@ -285,7 +291,7 @@ impl Widgets {
         let w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
         let tallest = col_y.iter().copied().fold(HEADER, f32::max);
         let h = if self.cards.is_empty() { HEADER + 50.0 } else { tallest - GAP + PAD };
-        (out, w, h)
+        Layout { cards: out, w, h }
     }
 
     pub fn render(&mut self, gfx: &mut Gfx, ctx: &Ctx) -> Result<()> {
@@ -303,7 +309,7 @@ impl Widgets {
             return Ok(());
         }
         let k = self.k;
-        let (cards, w, h) = self.layout(ctx);
+        let Layout { cards, w, h } = self.layout(ctx);
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 16.0 * k) as i32;
         let (x, y) = (self.anchor.0 - pw, self.anchor.1 - ph);

@@ -92,7 +92,7 @@ impl Pdh {
             if !ok(PdhOpenQueryW(PCWSTR::null(), 0, &mut query)) {
                 return None;
             }
-            let mut add = |path: PCWSTR| {
+            let add = |path: PCWSTR| {
                 let mut h = PDH_HCOUNTER::default();
                 ok(PdhAddEnglishCounterW(query, path, 0, &mut h)).then_some(h)
             };
