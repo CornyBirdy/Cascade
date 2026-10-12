@@ -282,7 +282,8 @@ impl Dock {
 
         if self.enabled && !self.autohide {
             let panel_px = ((self.panel_h() + MARGIN * 2.0) * k).round() as i32;
-            self.reserve_slot = Some(shell::reserve_bottom(self.hwnd, monitor, panel_px, &mut self.reserved));
+            self.reserve_slot =
+                Some(shell::reserve_bottom(self.hwnd, monitor, panel_px, &mut self.reserved, self.reserve_slot));
         } else if self.reserved {
             shell::unregister_appbar(self.hwnd);
             self.reserved = false;
@@ -306,7 +307,7 @@ impl Dock {
     pub fn reposition(&mut self) {
         if self.reserved {
             let panel_px = ((self.panel_h() + MARGIN * 2.0) * self.k).round() as i32;
-            let slot = shell::reserve_bottom(self.hwnd, self.monitor, panel_px, &mut self.reserved);
+            let slot = shell::reserve_bottom(self.hwnd, self.monitor, panel_px, &mut self.reserved, self.reserve_slot);
             self.reserve_slot = Some(slot);
             self.bottom = slot.bottom;
             self.dirty = true;

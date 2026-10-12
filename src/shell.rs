@@ -281,7 +281,9 @@ pub fn restore_taskbar() {
 
 /// Reserves a strip at the bottom of the primary monitor for `hwnd` (like the
 /// taskbar does) so maximised windows stop above it. Returns the granted rect.
-pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut bool) -> RECT {
+/// `current` is the rect granted last time; if nothing changed the shell is
+/// left alone, so position-change notifications can't feed back into a loop.
+pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut bool, current: Option<RECT>) -> RECT {
     let mut abd = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
@@ -296,6 +298,9 @@ pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut b
         }
         SHAppBarMessage(ABM_QUERYPOS, &mut abd);
         abd.rc.top = abd.rc.bottom - height;
+        if current == Some(abd.rc) {
+            return abd.rc;
+        }
         SHAppBarMessage(ABM_SETPOS, &mut abd);
     }
     abd.rc
