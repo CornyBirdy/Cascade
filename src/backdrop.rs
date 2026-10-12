@@ -45,6 +45,10 @@ fn set_composition() -> Option<SetWindowCompositionAttribute> {
     })
 }
 
+const WCA_ACCENT_POLICY: u32 = 19;
+const ACCENT_DISABLED: u32 = 0;
+const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
