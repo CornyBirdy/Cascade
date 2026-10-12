@@ -42,8 +42,15 @@ enum Unit {
 
 enum Ctl {
     Toggle,
-    Slider { min: f32, max: f32, step: f32, unit: Unit },
-    Text { secret: bool },
+    Slider {
+        min: f32,
+        max: f32,
+        step: f32,
+        unit: Unit,
+    },
+    Text {
+        secret: bool,
+    },
     /// Segmented buttons: (config value, label).
     Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
@@ -114,7 +121,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "One bar, or separate floating islands.",
                 Choice(&[("full", "Full width"), ("floating", "Floating")]),
             ),
-            row("taskbar_align", "Alignment", "Where Start and your apps sit.", Choice(&[("center", "Centre"), ("left", "Left")])),
+            row(
+                "taskbar_align",
+                "Alignment",
+                "Where Start and your apps sit.",
+                Choice(&[("center", "Centre"), ("left", "Left")]),
+            ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
                 "taskbar_tile",
@@ -180,6 +192,7 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_show_recent", "Recent files", "Under the pinned apps.", Toggle),
             row("start_show_profile", "Account button", "Your name at the top of the sidebar.", Toggle),
+            row("start_show_cascade", "Cascade button", "Opens Cascade's settings, above Power.", Toggle),
             row("start_place_settings", "Shortcut: Settings", "Windows Settings, in the sidebar.", Toggle),
             row("start_place_explorer", "Shortcut: File Explorer", "In the sidebar.", Toggle),
             row("start_place_downloads", "Shortcut: Downloads", "In the sidebar.", Toggle),

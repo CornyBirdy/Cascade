@@ -92,6 +92,8 @@ start_show_recent = true
 # Show the Pinned apps grid, and the account button at the top of the sidebar.
 start_show_pinned = true
 start_show_profile = true
+# Show the Cascade (settings) button above Power.
+start_show_cascade = true
 # Sidebar shortcuts (each can be turned off).
 start_place_settings = true
 start_place_explorer = true
@@ -179,6 +181,7 @@ pub struct Config {
     pub start_show_recent: bool,
     pub start_show_pinned: bool,
     pub start_show_profile: bool,
+    pub start_show_cascade: bool,
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
     pub start_places: [bool; 8],
     pub start_show_all_apps: bool,
@@ -235,6 +238,7 @@ impl Default for Config {
             start_show_recent: true,
             start_show_pinned: true,
             start_show_profile: true,
+            start_show_cascade: true,
             start_places: [true; 8],
             start_show_all_apps: true,
             start_opacity: 0.55,
@@ -395,6 +399,7 @@ impl Config {
                 "start_show_recent" => set_b(&mut c.start_show_recent),
                 "start_show_pinned" => set_b(&mut c.start_show_pinned),
                 "start_show_profile" => set_b(&mut c.start_show_profile),
+                "start_show_cascade" => set_b(&mut c.start_show_cascade),
                 _ if place_index(k).is_some() => {
                     if let (Some(i), Some(on)) = (place_index(k), parse_bool(v)) {
                         c.start_places[i] = on;
@@ -492,6 +497,7 @@ impl Config {
             "start_show_recent" => b(self.start_show_recent),
             "start_show_pinned" => b(self.start_show_pinned),
             "start_show_profile" => b(self.start_show_profile),
+            "start_show_cascade" => b(self.start_show_cascade),
             _ if place_index(key).is_some() => b(self.start_places[place_index(key).unwrap_or(0)]),
             "start_show_all_apps" => b(self.start_show_all_apps),
             "start_opacity" => self.start_opacity.to_string(),
@@ -531,10 +537,7 @@ impl Config {
 /// events (the admin helper being set up or started), to help diagnose them.
 pub fn log(line: &str) {
     use std::io::Write;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let _ = std::fs::create_dir_all(dir());
     let path = dir().join("cascade.log");
     // Keep it small: start over past 64 KB.
