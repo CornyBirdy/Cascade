@@ -85,7 +85,7 @@ pub fn spawn_setter() -> Sender<u32> {
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let wmi = connect().ok();
-        let current = wmi.as_ref().and_then(|s| wmi_get(s)).or_else(ddc_get);
+        let current = wmi.as_ref().and_then(|s| wmi_get(s)).or_else(|| ddc_get());
         msg::post(msg::BRIGHTNESS_LEVEL, current.unwrap_or(0) as usize, current.is_some() as isize);
         while let Ok(mut level) = rx.recv() {
             // A slider drag queues many values; only the latest matters.

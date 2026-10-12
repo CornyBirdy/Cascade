@@ -538,7 +538,7 @@ impl Dock {
         if let Some(i) = self.hovered {
             self.pressed = Some((i, x));
             unsafe {
-                SetCapture(self.hwnd);
+                windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd);
             }
         }
     }

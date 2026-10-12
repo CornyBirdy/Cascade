@@ -1,7 +1,7 @@
 //! Window previews above the dock. Live thumbnails are composited by DWM
 //! itself (DwmRegisterThumbnail), so Cascade never copies window pixels.
 
-use windows::core::Result;
+use windows::core::{Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
