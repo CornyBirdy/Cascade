@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::backdrop::Backdrop;
 use crate::dock::{self, Dock, ACCENT};
 use crate::gfx::{Align, Color, Gfx, Layer};
+use crate::spring::Spring;
 
 const CARD_W: f32 = 232.0;
 const CARD_H: f32 = 176.0;
@@ -25,12 +26,23 @@ const TITLE_H: f32 = 38.0;
 const GAP: f32 = 12.0;
 const PAD: f32 = 20.0;
 const MAX_ROWS: usize = 3;
+/// How far a card rises while it appears, in layout units.
+const RISE: f32 = 18.0;
 
 struct Item {
     window: HWND,
     thumb: isize,
     title: String,
     id: Option<String>,
+    /// The thumbnail's box inside the card (layout units).
+    fit: (f32, f32, f32, f32),
+    /// 0 to 1 as the card appears (rising and fading in).
+    appear: Spring,
+    /// Seconds before this card starts to appear.
+    delay: f32,
+    /// 1 while selected / hovered, springing between 0 and 1.
+    sel: Spring,
+    hov: Spring,
 }
 
 pub struct Switcher {
@@ -44,6 +56,14 @@ pub struct Switcher {
     selected: usize,
     hovered: Option<usize>,
     tracking: bool,
+    /// The selection ring's top-left corner, sliding between cards.
+    ring_x: Spring,
+    ring_y: Spring,
+    /// The panel's own fade-in.
+    open: Spring,
+    moving: bool,
+    was_moving: bool,
+    thumbs_dirty: bool,
     k: f32,
     monitor: RECT,
     radius: f32,
@@ -67,6 +87,12 @@ impl Switcher {
             selected: 0,
             hovered: None,
             tracking: false,
+            ring_x: Spring::new(0.0, 900.0, 46.0),
+            ring_y: Spring::new(0.0, 900.0, 46.0),
+            open: Spring::new(0.0, 500.0, 40.0),
+            moving: false,
+            was_moving: false,
+            thumbs_dirty: false,
             k: 1.0,
             monitor: RECT::default(),
             radius: 8.0,
@@ -105,7 +131,17 @@ impl Switcher {
             .map(|h| {
                 let mut title = [0u16; 256];
                 let n = unsafe { GetWindowTextW(h, &mut title) } as usize;
-                Item { window: h, thumb: 0, title: String::from_utf16_lossy(&title[..n]), id: dock::window_app_id(h) }
+                Item {
+                    window: h,
+                    thumb: 0,
+                    title: String::from_utf16_lossy(&title[..n]),
+                    id: dock::window_app_id(h),
+                    fit: (0.0, 0.0, 0.0, 0.0),
+                    appear: Spring::new(0.0, 420.0, 27.0),
+                    delay: 0.0,
+                    sel: Spring::new(0.0, 700.0, 42.0),
+                    hov: Spring::new(0.0, 800.0, 48.0),
+                }
             })
             .collect();
         if self.items.is_empty() {
@@ -118,6 +154,15 @@ impl Switcher {
         self.selected = if self.items[0].window == fg { 0 } else { self.items.len() - 1 };
         self.hovered = None;
         self.active = true;
+        self.open.snap(0.0);
+        let (cols, ..) = self.layout();
+        let (rx, ry) = Self::card(self.selected, cols);
+        self.ring_x.snap(rx);
+        self.ring_y.snap(ry);
+        for (i, it) in self.items.iter_mut().enumerate() {
+            it.delay = (i as f32 * 0.03).min(0.15);
+            it.sel.snap((i == self.selected) as u8 as f32);
+        }
         true
     }
 
@@ -143,6 +188,8 @@ impl Switcher {
         self.active = false;
         self.shown = false;
         self.hovered = None;
+        self.moving = false;
+        self.was_moving = false;
         self.backdrop.hide();
         self.layer.release();
         unsafe {
@@ -186,7 +233,70 @@ impl Switcher {
     }
 
     pub fn wants_frame(&self) -> bool {
-        self.shown && self.dirty
+        self.shown && (self.dirty || self.moving)
+    }
+
+    /// Advances the animations. Returns true while anything is moving.
+    pub fn step(&mut self, dt: f32) -> bool {
+        if !self.shown {
+            return false;
+        }
+        let (cols, ..) = self.layout();
+        let (rx, ry) = Self::card(self.selected, cols);
+        self.ring_x.set(rx);
+        self.ring_y.set(ry);
+        self.open.set(1.0);
+        let mut moving = self.ring_x.step(dt);
+        moving |= self.ring_y.step(dt);
+        moving |= self.open.step(dt);
+        let mut appearing = false;
+        for (i, it) in self.items.iter_mut().enumerate() {
+            if it.delay > 0.0 {
+                it.delay -= dt;
+                moving = true;
+            } else {
+                it.appear.set(1.0);
+            }
+            appearing |= it.appear.step(dt);
+            it.sel.set((i == self.selected) as u8 as f32);
+            it.hov.set((self.hovered == Some(i)) as u8 as f32);
+            moving |= it.sel.step(dt);
+            moving |= it.hov.step(dt);
+        }
+        moving |= appearing;
+        // The thumbnails live in another window: move them along with the
+        // cards while those appear (and once more when they land).
+        self.thumbs_dirty = appearing || self.was_moving;
+        self.was_moving = appearing;
+        self.moving = moving;
+        moving
+    }
+
+    /// Puts card `i`'s live thumbnail where its card is drawn right now.
+    fn place_thumb(&self, i: usize) {
+        let it = &self.items[i];
+        if it.thumb == 0 {
+            return;
+        }
+        let a = it.appear.value.clamp(0.0, 1.0);
+        let oy = (1.0 - it.appear.value) * RISE;
+        let (fx, fy, fw, fh) = it.fit;
+        let k = self.k;
+        let props = DWM_THUMBNAIL_PROPERTIES {
+            dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
+            rcDestination: RECT {
+                left: (fx * k) as i32,
+                top: ((fy + oy) * k) as i32,
+                right: ((fx + fw) * k) as i32,
+                bottom: ((fy + fh + oy) * k) as i32,
+            },
+            opacity: (a * 255.0) as u8,
+            fVisible: (a > 0.01).into(),
+            ..Default::default()
+        };
+        unsafe {
+            let _ = DwmUpdateThumbnailProperties(it.thumb, &props);
+        }
     }
 
     /// Puts the panel on screen (a moment after Alt+Tab, so a quick flip
@@ -208,6 +318,7 @@ impl Switcher {
             let (cx, cy) = Self::card(i, cols);
             let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
             let src = self.items[i].window;
+            self.items[i].appear.snap(0.0);
             let thumb = unsafe { DwmRegisterThumbnail(self.backdrop.hwnd, src) }.unwrap_or(0);
             self.items[i].thumb = thumb;
             if thumb == 0 {
@@ -221,22 +332,8 @@ impl Switcher {
                 fh = th;
                 fw = th * aspect;
             }
-            let (fx, fy) = (tx + (tw - fw) / 2.0, ty + (th - fh) / 2.0);
-            let props = DWM_THUMBNAIL_PROPERTIES {
-                dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
-                rcDestination: RECT {
-                    left: (fx * k) as i32,
-                    top: (fy * k) as i32,
-                    right: ((fx + fw) * k) as i32,
-                    bottom: ((fy + fh) * k) as i32,
-                },
-                opacity: 255,
-                fVisible: true.into(),
-                ..Default::default()
-            };
-            unsafe {
-                let _ = DwmUpdateThumbnailProperties(thumb, &props);
-            }
+            self.items[i].fit = (tx + (tw - fw) / 2.0, ty + (th - fh) / 2.0, fw, fh);
+            self.place_thumb(i);
         }
         self.dirty = true;
     }
@@ -295,44 +392,51 @@ impl Switcher {
         let icons: Vec<Option<ID2D1Bitmap>> =
             self.items.iter().map(|it| it.id.as_ref().and_then(|id| dock.icon(id, gfx, icon_px))).collect();
 
+        if self.thumbs_dirty {
+            for i in 0..self.items.len() {
+                self.place_thumb(i);
+            }
+            self.thumbs_dirty = false;
+        }
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
             let f = &gfx.fonts;
             let r = self.radius.max(6.0);
-            p.rrect(0.0, 0.0, w, h, self.radius, Color::white(0.015));
-            p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, self.radius, Color::white(0.10), 1.0);
+            let open = self.open.value.clamp(0.0, 1.0);
+            p.rrect(0.0, 0.0, w, h, self.radius, Color::white(0.015 * open));
+            p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, self.radius, Color::white(0.10 * open), 1.0);
             for (i, it) in self.items.iter().enumerate() {
-                let (cx, cy) = Self::card(i, cols);
-                let selected = i == self.selected;
-                let fill = if selected {
-                    0.12
-                } else if self.hovered == Some(i) {
-                    0.08
-                } else {
-                    0.05
-                };
-                p.rrect(cx, cy, CARD_W, CARD_H, r, Color::white(fill));
-                if selected {
-                    p.stroke_rrect(cx + 1.0, cy + 1.0, CARD_W - 2.0, CARD_H - 2.0, r, ACCENT, 2.0);
-                } else {
-                    p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, CARD_H - 1.0, r, Color::white(0.07), 1.0);
-                }
+                let (cx, cy0) = Self::card(i, cols);
+                let a = it.appear.value.clamp(0.0, 1.0);
+                let cy = cy0 + (1.0 - it.appear.value) * RISE;
+                let sel = it.sel.value.clamp(0.0, 1.0);
+                let hov = it.hov.value.clamp(0.0, 1.0) * (1.0 - sel);
+                let fill = 0.05 + 0.07 * sel + 0.03 * hov;
+                p.rrect(cx, cy, CARD_W, CARD_H, r, Color::white(fill * a));
+                p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, CARD_H - 1.0, r, Color::white(0.07 * a * (1.0 - sel)), 1.0);
                 match &icons[i] {
-                    Some(bmp) => p.icon(bmp, cx + 22.0, cy + TITLE_H / 2.0, 1.0),
-                    None => p.rrect(cx + 14.0, cy + TITLE_H / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15)),
+                    Some(bmp) => p.icon(bmp, cx + 22.0, cy + TITLE_H / 2.0, a),
+                    None => p.rrect(cx + 14.0, cy + TITLE_H / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15 * a)),
                 }
                 let title = if it.title.is_empty() { "Window" } else { &it.title };
-                p.text(title, &f.label, cx + 40.0, cy + 4.0, CARD_W - 52.0, TITLE_H - 8.0, Align::Left, Color::white(0.93));
+                p.text(title, &f.label, cx + 40.0, cy + 4.0, CARD_W - 52.0, TITLE_H - 8.0, Align::Left, Color::white(0.93 * a));
                 let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
                 p.hole(tx, ty, tw, th);
                 if it.thumb == 0 {
                     // No live preview (e.g. an admin window): its icon, big.
-                    p.rrect(tx, ty, tw, th, 6.0, Color::white(0.06));
+                    p.rrect(tx, ty, tw, th, 6.0, Color::white(0.06 * a));
                     if let Some(bmp) = &icons[i] {
-                        p.icon(bmp, tx + tw / 2.0, ty + th / 2.0, 1.0);
+                        p.icon(bmp, tx + tw / 2.0, ty + th / 2.0, a);
                     }
                 }
+            }
+            // The selection ring glides from card to card.
+            if let Some(it) = self.items.get(self.selected) {
+                let a = it.appear.value.clamp(0.0, 1.0);
+                let oy = (1.0 - it.appear.value) * RISE;
+                let (x, y) = (self.ring_x.value, self.ring_y.value + oy);
+                p.stroke_rrect(x + 1.0, y + 1.0, CARD_W - 2.0, CARD_H - 2.0, r, Color(ACCENT.0, ACCENT.1, ACCENT.2, a), 2.0);
             }
         }
         gfx.present(&self.layer, self.overlay, POINT { x, y }, pw, ph, 255)

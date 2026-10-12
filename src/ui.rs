@@ -2355,6 +2355,7 @@ impl App {
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
         }
         if self.switcher.wants_frame() {
+            fast |= self.switcher.step(dt);
             let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
         }
         if self.widgets.wants_frame() {
