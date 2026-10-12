@@ -185,6 +185,7 @@ pub struct Dock {
     bar_h: f32,
     margin: f32,
     padding: f32,
+    tile: f32,
     radius: f32,
     icon: f32,
     magnify: f32,
@@ -357,7 +358,8 @@ impl Dock {
             left: false,
             bar_h: 48.0,
             margin: 8.0,
-            padding: 4.0,
+            padding: 6.0,
+            tile: 6.0,
             radius: 8.0,
             icon: 24.0,
             magnify: 0.0,
@@ -480,11 +482,12 @@ impl Dock {
         self.hide_taskbar = cfg.hide_taskbar;
         self.full = cfg.taskbar_style != "floating";
         self.left = cfg.taskbar_align == "left";
-        self.margin = cfg.taskbar_margin;
-        // The bar is as tall as its icons plus the same gap above and below.
-        self.padding = cfg.taskbar_inset.clamp(0.0, 24.0);
+        self.margin = cfg.taskbar_gap;
+        self.padding = cfg.taskbar_pad.clamp(0.0, 24.0);
+        self.tile = cfg.taskbar_tile.clamp(0.0, 16.0);
         self.icon = cfg.dock_icon_size.clamp(16.0, 48.0);
-        self.bar_h = (self.icon + 2.0 * self.padding).max(28.0);
+        // Icon, its highlight margin, then the same padding all round.
+        self.bar_h = (self.icon + 2.0 * self.tile + 2.0 * self.padding).max(28.0);
         // A full-width bar flush with the screen edges has square corners.
         self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
         self.magnify = cfg.dock_magnify;
@@ -696,21 +699,15 @@ impl Dock {
 
     // ----------------------------------------------------------- geometry --
 
-    /// Space between an icon and the edge of its hover highlight.
-    fn highlight(&self) -> f32 {
-        self.padding.min(8.0)
-    }
-
     /// Size of a square button: the icon plus its highlight margin.
     fn button(&self) -> f32 {
-        (self.icon + 2.0 * self.highlight()).min(self.bar_h - 2.0)
+        (self.icon + 2.0 * self.tile).min(self.bar_h)
     }
 
-    /// Space between a bar's end and the first or last button. Chosen so the
-    /// gap from the bar's edge to the icons is the same at the ends as it is
-    /// above and below them.
+    /// Space between a bar's end and the first or last button: the same as
+    /// above and below the buttons.
     fn edge(&self) -> f32 {
-        ((self.bar_h - self.icon) / 2.0 - (self.button() - self.icon) / 2.0).max(0.0)
+        self.padding
     }
 
     fn status_icons(&self, status: &Status) -> usize {

@@ -38,10 +38,12 @@ taskbar_style = full
 # center or left
 taskbar_align = center
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
-taskbar_margin = 12
-# Gap from the taskbar's edge to its icons, the same on all four sides. The
-# taskbar's height is the icon size plus twice this.
-taskbar_inset = 12
+taskbar_gap = 6
+# Gap from the taskbar's edge to its buttons, the same on all four sides.
+taskbar_pad = 6
+# Space between an icon and the edge of its hover highlight. The taskbar's
+# height is the icon, twice this and twice taskbar_pad added up.
+taskbar_tile = 6
 # round, small or square
 taskbar_corners = round
 # Blur what's behind the taskbar and Start menu (acrylic).
@@ -121,8 +123,9 @@ pub struct Config {
     pub dock_magnify: f32,
     pub taskbar_style: String,
     pub taskbar_align: String,
-    pub taskbar_margin: f32,
-    pub taskbar_inset: f32,
+    pub taskbar_gap: f32,
+    pub taskbar_pad: f32,
+    pub taskbar_tile: f32,
     pub taskbar_corners: String,
     pub acrylic: bool,
     pub taskbar_opacity: f32,
@@ -174,8 +177,9 @@ impl Default for Config {
             dock_magnify: 0.0,
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
-            taskbar_margin: 12.0,
-            taskbar_inset: 12.0,
+            taskbar_gap: 6.0,
+            taskbar_pad: 6.0,
+            taskbar_tile: 6.0,
             taskbar_corners: "round".into(),
             acrylic: true,
             taskbar_opacity: 0.55,
@@ -290,8 +294,9 @@ impl Config {
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
-                "taskbar_margin" => set_f(&mut c.taskbar_margin, 0.0, 32.0),
-                "taskbar_inset" => set_f(&mut c.taskbar_inset, 0.0, 24.0),
+                "taskbar_gap" => set_f(&mut c.taskbar_gap, 0.0, 32.0),
+                "taskbar_pad" => set_f(&mut c.taskbar_pad, 0.0, 24.0),
+                "taskbar_tile" => set_f(&mut c.taskbar_tile, 0.0, 16.0),
                 "tray_icons" => set_b(&mut c.tray_icons),
                 "admin_helper" => set_b(&mut c.admin_helper),
                 "start_position" if matches!(v, "auto" | "center" | "left") => c.start_position = v.into(),
@@ -373,8 +378,9 @@ impl Config {
             "dock_magnify" => self.dock_magnify.to_string(),
             "taskbar_style" => self.taskbar_style.clone(),
             "taskbar_align" => self.taskbar_align.clone(),
-            "taskbar_margin" => self.taskbar_margin.to_string(),
-            "taskbar_inset" => self.taskbar_inset.to_string(),
+            "taskbar_gap" => self.taskbar_gap.to_string(),
+            "taskbar_pad" => self.taskbar_pad.to_string(),
+            "taskbar_tile" => self.taskbar_tile.to_string(),
             "tray_icons" => b(self.tray_icons),
             "admin_helper" => b(self.admin_helper),
             "start_position" => self.start_position.clone(),

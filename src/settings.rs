@@ -111,15 +111,21 @@ fn rows(section: usize) -> Vec<Row> {
             row("taskbar_align", "Alignment", "Where Start and your apps sit.", Choice(&[("center", "Centre"), ("left", "Left")])),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
-                "taskbar_inset",
-                "Padding",
-                "Gap from the bar's edge to its icons, the same on all four sides. Sets the height.",
+                "taskbar_tile",
+                "Icon padding",
+                "Space between an icon and the edge of its highlight.",
+                slider(0.0, 16.0, 1.0, Unit::Px),
+            ),
+            row(
+                "taskbar_pad",
+                "Bar padding",
+                "Gap from the bar's edge to its buttons, the same on all four sides.",
                 slider(0.0, 24.0, 1.0, Unit::Px),
             ),
             row(
-                "taskbar_margin",
+                "taskbar_gap",
                 "Gap from the screen edge",
-                "Set it equal to Padding for an even look. 0 = flush with the screen.",
+                "Set it equal to Bar padding for an even look. 0 = flush.",
                 slider(0.0, 32.0, 1.0, Unit::Px),
             ),
             row(
