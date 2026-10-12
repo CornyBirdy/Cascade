@@ -722,11 +722,10 @@ impl Launcher {
                     p.text(label, &f.body, 54.0, y, g.side - 64.0, SIDE_ROW - 4.0, Align::Left, Color::white(0.9));
                     hits.push((t, 10.0, y, g.side - 20.0, SIDE_ROW - 4.0));
                 };
-                let mut slot = 0;
-                for (i, (label, _, glyph)) in PLACES.iter().enumerate().filter(|(i, _)| g.places[*i]) {
+                let shown = PLACES.iter().enumerate().filter(|(i, _)| g.places[*i]);
+                for (slot, (i, (label, _, glyph))) in shown.enumerate() {
                     let top = if g.show_profile { TOP } else { py };
                     side_item(&mut self.hits, Target::Place(i), label, *glyph, top + slot as f32 * SIDE_ROW);
-                    slot += 1;
                 }
                 let rule_y = if g.show_cascade { g.h - PAD - SIDE_ROW * 2.0 - 6.0 } else { g.h - PAD - SIDE_ROW - 6.0 };
                 p.line(18.0, rule_y, g.side - 18.0, rule_y, Color::white(0.08), 1.0);
