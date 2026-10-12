@@ -237,7 +237,7 @@ impl Switcher {
     }
 
     /// Advances the animations. Returns true while anything is moving.
-    pub fn step(&mut self, dt: f32) -> bool {
+    pub fn animate(&mut self, dt: f32) -> bool {
         if !self.shown {
             return false;
         }
