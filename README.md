@@ -1,6 +1,6 @@
 # Cascade
 
-A tiny native notch and dock for Windows. Rust and Win32 only: no webview, no runtime, one small `.exe`.
+A tiny native notch, dock and launcher for Windows. Rust and Win32 only: no webview, no runtime, one small `.exe`.
 
 ## Notch
 
@@ -27,10 +27,26 @@ A small black notch at the top centre of your main screen. Turn it off in the ri
 
 Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
+## Launcher
+
+Cascade's own Start menu. Windows doesn't let other apps restyle its real one, so Cascade replaces it instead.
+
+- **Opening it:** tap the **Win key** on its own, or click the **Start button** at the left of the dock. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal.
+- **Searching:** start typing to search every installed app, Store apps included. Use the arrow keys and Enter, or click.
+- **Layout:** pinned apps (the same as your dock's) sit above an alphabetical list of all apps. Right-click any app to pin or unpin it.
+- **Footer:** your name, a button for Cascade settings, and a power menu (lock, sleep, sign out, restart, shut down).
+
+Turn off the Win-key takeover or the whole launcher in Settings.
+
+## Settings
+
+Search **Cascade Settings** in the launcher or the Windows Start menu, or right-click the notch, dock or tray icon and choose **Settings…**. Every option has a toggle, slider or text box, and changes apply immediately. Starting Cascade again while it's already running also opens Settings.
+
 ## Running it
 
 Grab `cascade.exe` from the latest successful **build** run in the Actions tab (artifact `cascade`). Put it anywhere and double-click it. Right-click the notch, the dock background or the tray icon for:
 
+- Settings… / Open launcher
 - Show notch / Show dock / Auto-hide dock / Hide Windows taskbar
 - Start with Windows
 - Hide Windows volume flyout
@@ -68,6 +84,9 @@ Frames are only drawn while something is animating. Rendering uses Direct2D's so
 | File | What it does |
 |---|---|
 | `src/ui.rs` | App core: windows, message loop, notch states, layout, input and drawing |
+| `src/launcher.rs` | Launcher: app list, search, pinned, power |
+| `src/keyhook.rs` | Lone Win key → launcher |
+| `src/settings.rs` | Settings window |
 | `src/dock.rs` | Dock: window tracking, layout, magnification, drag, launch/focus |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
