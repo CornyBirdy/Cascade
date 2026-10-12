@@ -63,7 +63,15 @@ pub fn app_icon(size: i32) -> Option<HICON> {
         let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as i32;
         let px = size * dpi / 96;
         let module = GetModuleHandleW(None).ok()?;
-        let h = LoadImageW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, px, px, LR_DEFAULTCOLOR).ok()?;
+        let h = LoadImageW(
+            Some(module.into()),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            px,
+            px,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()?;
         Some(HICON(h.0))
     }
 }

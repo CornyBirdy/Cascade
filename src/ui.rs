@@ -1489,8 +1489,17 @@ impl App {
                 None
             }
             WM_LBUTTONDOWN => {
+                // Clicking anywhere commits text boxes and takes focus from them.
+                let pending = s.commit_all();
+                unsafe {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(s.hwnd));
+                }
                 let (x, y) = lparam_xy(lp);
-                s.on_down(x, y, &get)
+                let change = s.on_down(x, y, &get);
+                for p in pending {
+                    self.apply_change(p);
+                }
+                change
             }
             WM_LBUTTONUP => s.on_up(),
             WM_MOUSEWHEEL => {
