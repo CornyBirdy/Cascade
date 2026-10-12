@@ -1,6 +1,6 @@
 # Cascade
 
-A tiny native notch, dock and launcher for Windows. Rust and Win32 only: no webview, no runtime, one small `.exe`.
+A tiny native notch, taskbar and Start menu for Windows. Rust and Win32 only: no webview, no runtime, one small `.exe`.
 
 ## Notch
 
@@ -12,42 +12,44 @@ A small black notch at the top centre of your main screen. Turn it off in the ri
   - **Controls:** Wi-Fi and Bluetooth toggles, a notification-centre button, and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
   - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
-- **Fullscreen apps and games:** the notch and dock hide automatically.
+- **Fullscreen apps and games:** the notch and taskbar hide automatically.
 
-## Dock
+## Taskbar
 
-- Pinned and running apps along the bottom. A dot marks apps with open windows; a wider one marks the app in front.
-- **Click:** opens the app if it isn't running, brings it to the front if it is, minimises it if it's already in front, and cycles through its windows if it has several.
-- **Middle-click:** opens a new window.
-- **Hover:** icons grow under the cursor, and after a moment live previews of the app's windows appear. Click a preview to switch to that window, or its × to close it.
-- **Drag pinned icons** to reorder them.
-- **Right-click an icon** to pin or unpin it, open a new window, or close its windows.
-- **Auto-hide** (optional): the dock fades away until you push the mouse to the bottom edge. This works best with the Windows taskbar hidden.
-- **Replaces the Windows taskbar** while the dock is on (untick *Hide Windows taskbar* to keep both). The real taskbar is restored when Cascade quits, when the dock is turned off, and on the next start if Cascade crashed.
+A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
+
+- **Left:** the current weather. **Centre:** Start, a search box, then your pinned and running apps. **Right:** hidden icons, network / volume / battery, and the clock.
+- **App buttons** work like Windows: a short line marks apps with open windows and a longer blue one the app in front. Hover for a name and live window previews; click a preview to switch to it, or its × to close it.
+- **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin or close. **Drag** pinned apps to reorder them.
+- **Clicks on the right:** the chevron opens the Windows hidden-icons flyout, the status icons open quick settings, and the clock opens notifications.
+- **Look:** full width or floating islands, centred or left-aligned, height, icon size, gap from the screen edge, corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
+- **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
+- **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
 Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
-## Launcher
+## Start menu
 
-Cascade's own Start menu. Windows doesn't let other apps restyle its real one, so Cascade replaces it instead.
+Cascade's own Start menu. Windows doesn't let other apps restyle its real one, so Cascade replaces it.
 
-- **Opening it:** tap the **Win key** on its own, or click the **Start button** at the left of the dock. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal.
-- **Searching:** start typing to search every installed app, Store apps included. Use the arrow keys and Enter, or click.
-- **Layout:** pinned apps (the same as your dock's) sit above an alphabetical list of all apps. Right-click any app to pin or unpin it.
-- **Footer:** your name, a button for Cascade settings, and a power menu (lock, sleep, sign out, restart, shut down).
+- **Opening it:** tap the **Win key** on its own, or click **Start** or the search box on the taskbar. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal. If the Windows Start menu still gets the key (Windows hides keys typed into apps running as administrator, such as Task Manager, from other apps), Cascade notices it opening and swaps in its own.
+- **Left:** your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down).
+- **Middle:** pinned apps (the same as your taskbar's) and recently opened files.
+- **Right:** every installed app A to Z, Store apps included.
+- **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
 
-Turn off the Win-key takeover or the whole launcher in Settings.
+Turn off the Win-key takeover or the whole Start menu in Settings.
 
 ## Settings
 
-Search **Cascade Settings** in the launcher or the Windows Start menu, or right-click the notch, dock or tray icon and choose **Settings…**. Every option has a toggle, slider or text box, and changes apply immediately. Starting Cascade again while it's already running also opens Settings.
+Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider or text box, and changes apply immediately. Starting Cascade again while it's already running also opens Settings.
 
 ## Running it
 
-Grab `cascade.exe` from the latest successful **build** run in the Actions tab (artifact `cascade`). Put it anywhere and double-click it. Right-click the notch, the dock background or the tray icon for:
+Grab `cascade.exe` from the latest successful **build** run in the Actions tab (artifact `cascade`). Put it anywhere and double-click it. Right-click the notch, an empty part of the taskbar or the tray icon for:
 
-- Settings… / Open launcher
-- Show notch / Show dock / Auto-hide dock / Hide Windows taskbar
+- Settings… / Open Start menu
+- Show notch / Show taskbar / Auto-hide taskbar / Replace the Windows taskbar
 - Start with Windows
 - Hide Windows volume flyout
 - Open / reload config (`%APPDATA%\Cascade\config.ini`; focus-timer lengths, weather location, sizes and more)
@@ -55,7 +57,7 @@ Grab `cascade.exe` from the latest successful **build** run in the Actions tab (
 
 ## Updating
 
-Right-click the notch, dock or tray icon and choose **Update Cascade**. One click checks GitHub for a newer build, downloads it, swaps the exe and restarts. Cascade also checks every few hours and shows a note in the notch when an update is out.
+Right-click the notch, taskbar or tray icon and choose **Update Cascade**. One click checks GitHub for a newer build, downloads it, swaps the exe and restarts. Cascade also checks every few hours and shows a note in the notch when an update is out.
 
 Every push to the default branch is published as a GitHub release (`build-N`), and that's where the updater looks. While the repo is **private**, GitHub only serves releases to signed-in users. In that case, create a fine-grained token with read-only *Contents* access to this repo and paste it after `github_token =` in the config file. If the repo is public, no token is needed.
 
@@ -77,17 +79,20 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
 
-Frames are only drawn while something is animating. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep.
+Frames are only drawn while something is animating; the taskbar clock costs one redraw a minute. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep. The acrylic blur is done by Windows' own compositor, the same way the real taskbar gets it, so it costs Cascade nothing.
+
+Cascade also never injects code into Explorer or patches Windows files, unlike Explorer mods. It draws its own windows next to Explorer, so Windows updates have nothing of it to break.
 
 ## Layout
 
 | File | What it does |
 |---|---|
 | `src/ui.rs` | App core: windows, message loop, notch states, layout, input and drawing |
-| `src/launcher.rs` | Launcher: app list, search, pinned, power |
-| `src/keyhook.rs` | Lone Win key → launcher |
+| `src/launcher.rs` | Start menu: places, pinned, recent files, all apps, search, power |
+| `src/keyhook.rs` | Lone Win key → Start menu |
 | `src/settings.rs` | Settings window |
-| `src/dock.rs` | Dock: window tracking, layout, magnification, drag, launch/focus |
+| `src/dock.rs` | Taskbar: window tracking, layout, drawing, drag, launch/focus |
+| `src/backdrop.rs` | Acrylic blur behind the taskbar and Start menu |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |
@@ -97,7 +102,7 @@ Frames are only drawn while something is animating. Rendering uses Direct2D's so
 | `src/radios.rs` | Wi-Fi / Bluetooth toggles |
 | `src/weather.rs` | Open-Meteo over WinHTTP |
 | `src/pomodoro.rs` | Focus timer |
-| `src/icons.rs` | App icons and names for the dock |
+| `src/icons.rs` | App icons and names |
 | `src/update.rs` | One-click updates from GitHub releases |
 | `src/http.rs` | Tiny WinHTTP client |
 | `src/shell.rs` | Tray, autostart, fullscreen, taskbar, flyout, menus |

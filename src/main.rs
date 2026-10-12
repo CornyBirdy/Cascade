@@ -5,6 +5,7 @@
 compile_error!("Cascade is a Windows app.");
 
 mod audio;
+mod backdrop;
 mod brightness;
 mod config;
 mod dock;

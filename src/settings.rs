@@ -22,8 +22,9 @@ const ROW_GAP: f32 = 8.0;
 const TOP: f32 = 84.0;
 const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
+const CHOICE_W: f32 = 84.0;
 
-pub const SECTIONS: [&str; 6] = ["General", "Notch", "Dock & launcher", "Focus & weather", "Updates", "About"];
+pub const SECTIONS: [&str; 7] = ["General", "Notch", "Taskbar", "Start menu", "Focus & weather", "Updates", "About"];
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -39,6 +40,8 @@ enum Ctl {
     Toggle,
     Slider { min: f32, max: f32, step: f32, unit: Unit },
     Text { secret: bool },
+    /// Segmented buttons: (config value, label).
+    Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
     Note,
 }
@@ -94,23 +97,50 @@ fn rows(section: usize) -> Vec<Row> {
             ),
         ],
         2 => vec![
-            row("dock", "Show the dock", "Pinned and running apps along the bottom.", Toggle),
-            row("hide_taskbar", "Replace the Windows taskbar", "Hide the taskbar while the dock is on.", Toggle),
-            row("dock_autohide", "Auto-hide the dock", "Push the mouse to the bottom edge to show it.", Toggle),
-            row("dock_icon_size", "Icon size", "Size of the dock icons.", slider(32.0, 72.0, 1.0, Unit::Px)),
+            row("dock", "Show the taskbar", "Cascade's taskbar along the bottom.", Toggle),
+            row("hide_taskbar", "Replace the Windows taskbar", "Hide the Windows one while Cascade's is on.", Toggle),
+            row("dock_autohide", "Auto-hide", "Push the mouse to the bottom edge to show it.", Toggle),
+            row(
+                "taskbar_style",
+                "Style",
+                "One bar, or separate floating islands.",
+                Choice(&[("full", "Full width"), ("floating", "Floating")]),
+            ),
+            row("taskbar_align", "Alignment", "Where Start and your apps sit.", Choice(&[("center", "Centre"), ("left", "Left")])),
+            row("taskbar_height", "Height", "Height of the bar.", slider(32.0, 80.0, 1.0, Unit::Px)),
+            row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
+            row(
+                "taskbar_margin",
+                "Gap from the edge",
+                "0 sits flush with the screen, like Windows.",
+                slider(0.0, 32.0, 1.0, Unit::Px),
+            ),
+            row(
+                "taskbar_corners",
+                "Corners",
+                "Also used by the Start menu.",
+                Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
+            ),
+            row("acrylic", "Acrylic blur", "Blur what's behind the taskbar and Start menu.", Toggle),
+            row("taskbar_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
+            row("show_search", "Search box", "Next to the Start button.", Toggle),
+            row("show_status", "Network, volume and battery", "Opens quick settings when clicked.", Toggle),
+            row("show_clock", "Clock", "Opens notifications when clicked.", Toggle),
             row(
                 "dock_magnify",
                 "Magnification",
-                "How much icons grow under the cursor.",
+                "Grow icons under the cursor (0 for the Windows look).",
                 slider(0.0, 1.0, 0.05, Unit::Percent),
             ),
-            row("launcher", "Start button and launcher", "Cascade's own app launcher on the dock.", Toggle),
-            row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
         ],
         3 => vec![
+            row("launcher", "Cascade Start menu", "Opened by the Start button on the taskbar.", Toggle),
+            row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
+        ],
+        4 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
-            row("weather", "Show weather", "Shown in the notch when nothing is playing.", Toggle),
+            row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
             row(
                 "weather_location",
                 "Location",
@@ -119,7 +149,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("fahrenheit", "Use Fahrenheit", "Otherwise Celsius.", Toggle),
         ],
-        4 => vec![
+        5 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
@@ -285,6 +315,10 @@ impl Settings {
             Ctl::Toggle => (x1 - 44.0, y + (ROW_H - 22.0) / 2.0, 44.0, 22.0),
             Ctl::Slider { .. } => (x1 - 200.0, y + 14.0, 200.0, ROW_H - 28.0),
             Ctl::Text { .. } => (x1 - 260.0, y + (ROW_H - 30.0) / 2.0, 260.0, 30.0),
+            Ctl::Choice(opts) => {
+                let w = opts.len() as f32 * CHOICE_W;
+                (x1 - w, y + (ROW_H - 32.0) / 2.0, w, 32.0)
+            }
             Ctl::Button(_) => (x1 - 130.0, y + (ROW_H - 32.0) / 2.0, 130.0, 32.0),
             Ctl::Note => (x1, y, 0.0, 0.0),
         }
@@ -425,6 +459,12 @@ impl Settings {
                         }
                         self.invalidate();
                         None
+                    }
+                    Ctl::Choice(opts) => {
+                        let (cx, ..) = self.ctl_rect(i, &r.ctl);
+                        let j = ((x as f32 / self.k - cx) / CHOICE_W).floor().clamp(0.0, opts.len() as f32 - 1.0);
+                        let value = opts[j as usize].0;
+                        (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
                     Ctl::Button(_) => Some(Change::Action(r.key)),
                     _ => None,
@@ -587,6 +627,20 @@ impl Settings {
                         Ctl::Text { .. } => {
                             p.rrect(cx, cy, cwid, ch, 6.0, Color(0.17, 0.17, 0.17, 1.0));
                             p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 6.0, Color::white(0.12), 1.0);
+                        }
+                        Ctl::Choice(opts) => {
+                            let current = get(r.key);
+                            p.rrect(cx, cy, cwid, ch, 6.0, Color::white(0.06));
+                            p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 6.0, Color::white(0.10), 1.0);
+                            for (j, (value, label)) in opts.iter().enumerate() {
+                                let sx = cx + j as f32 * CHOICE_W;
+                                let on = current == *value;
+                                if on {
+                                    p.rrect(sx + 3.0, cy + 3.0, CHOICE_W - 6.0, ch - 6.0, 4.0, ACCENT);
+                                }
+                                let c = Color::white(if on { 1.0 } else { 0.75 });
+                                p.text(label, &f.body, sx, cy, CHOICE_W, ch, Align::Center, c);
+                            }
                         }
                         Ctl::Button(label) => {
                             p.rrect(cx, cy, cwid, ch, 6.0, if hovered { Color(0.36, 0.62, 1.0, 1.0) } else { ACCENT });

@@ -31,7 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::brightness;
 use crate::config::{self, Config};
-use crate::dock::{self, Dock};
+use crate::backdrop::{self, Backdrop};
+use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{self, IconResult};
 use crate::keyhook;
@@ -63,6 +64,8 @@ const TIMER_SCAN: usize = 10;
 const TIMER_DOCK_HIDE: usize = 11;
 const TIMER_PREVIEW_SHOW: usize = 12;
 const TIMER_PREVIEW_HIDE: usize = 13;
+const TIMER_CLOCK: usize = 14;
+const TIMER_TRAY_PEEK: usize = 15;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -200,6 +203,10 @@ struct App {
     launcher: Launcher,
     launcher_menu: bool,
     settings: Option<Settings>,
+    /// The Windows hidden-icons flyout is opening or open: when it started,
+    /// whether the taskbar under it is invisible, and whether Enter is still
+    /// to be pressed.
+    tray_peek: Option<(Instant, bool, bool)>,
 
     message: String,
     message_color: Color,
@@ -241,8 +248,12 @@ pub fn run() -> Result<()> {
         let preview_hwnd = create_window(class, instance, WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
         let launcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         msg::set_target(hwnd);
+        backdrop::register(instance);
+        // Blur panels: up to three taskbar islands, plus the launcher.
+        let dock_backdrops = (0..3).filter_map(|_| Backdrop::create(instance).ok()).collect();
+        let launcher_backdrop = Backdrop::create(instance)?;
 
-        let app = App::new(hwnd, dock_hwnd, trigger, preview_hwnd, launcher_hwnd, instance)?;
+        let app = App::new(hwnd, dock_hwnd, trigger, preview_hwnd, (launcher_hwnd, launcher_backdrop), dock_backdrops, instance)?;
         APP.with(|c| *c.borrow_mut() = Some(app));
         with_app(|a| a.start());
 
@@ -392,6 +403,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(move |a| {
                 a.weather = Some(*w);
                 a.dirty = true;
+                a.dock.dirty = true;
             });
             return LRESULT(0);
         }
@@ -489,7 +501,8 @@ impl App {
         dock_hwnd: HWND,
         trigger: HWND,
         preview_hwnd: HWND,
-        launcher_hwnd: HWND,
+        (launcher_hwnd, launcher_backdrop): (HWND, Backdrop),
+        dock_backdrops: Vec<Backdrop>,
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -554,14 +567,15 @@ impl App {
             flyout_hidden: false,
             origin: 0.0,
             content_w: 0.0,
-            dock: Dock::new(dock_hwnd, trigger, icons::spawn()),
+            dock: Dock::new(dock_hwnd, trigger, icons::spawn(), dock_backdrops),
             preview: Preview::new(preview_hwnd),
             hooks: Vec::new(),
             taskbar_hidden: false,
             instance,
-            launcher: Launcher::new(launcher_hwnd),
+            launcher: Launcher::new(launcher_hwnd, launcher_backdrop),
             launcher_menu: false,
             settings: None,
+            tray_peek: None,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -603,6 +617,9 @@ impl App {
         if self.flyout_hidden {
             shell::set_flyout_hidden(false);
             self.flyout_hidden = false;
+        }
+        if let Some((_, invisible, _)) = self.tray_peek.take() {
+            shell::end_tray_overflow(invisible);
         }
         if self.taskbar_hidden {
             shell::restore_taskbar();
@@ -652,7 +669,9 @@ impl App {
     }
 
     fn apply_dock(&mut self) {
-        let hooks_wanted = self.cfg.dock;
+        // The launcher also watches the foreground window, to take over when
+        // Windows opens its own Start menu (see `on_win_event`).
+        let hooks_wanted = self.cfg.dock || (self.cfg.launcher && self.cfg.launcher_win_key);
         if hooks_wanted && self.hooks.is_empty() {
             let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
             let ranges = [
@@ -674,18 +693,19 @@ impl App {
                 }
             }
         }
-        self.dock.set_start_button(self.cfg.launcher);
         keyhook::set(self.cfg.launcher && self.cfg.launcher_win_key);
         if !self.cfg.launcher {
             self.launcher.hide();
         }
         self.dock.configure(&self.cfg, self.monitor, self.dpi);
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
+        self.launcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         if self.cfg.dock {
             self.dock.scan();
         } else {
             self.preview.hide();
         }
+        self.arm_clock();
     }
 
     // ------------------------------------------------------------ state --
@@ -887,6 +907,7 @@ impl App {
             WM_TIMER => self.on_timer(wp.0),
             msg::VOLUME => {
                 self.vol = (wp.0 as f32 / 1000.0, lp.0 != 0);
+                self.dock.dirty = true;
                 let in_controls = self.expanded && self.mode == Mode::Controls;
                 if in_controls {
                     self.dirty = true;
@@ -913,6 +934,7 @@ impl App {
             msg::RADIOS => {
                 self.radios = Radios::unpack(wp.0);
                 self.dirty = true;
+                self.dock.dirty = true;
             }
             msg::SPECTRUM => {
                 if self.visualizer.running() {
@@ -1216,8 +1238,21 @@ impl App {
     }
 
     fn on_win_event(&mut self, event: u32, hwnd: HWND) {
-        if self.taskbar_hidden && event == EVENT_OBJECT_SHOW && shell::is_taskbar(hwnd) {
+        if self.taskbar_hidden && self.tray_peek.is_none() && event == EVENT_OBJECT_SHOW && shell::is_taskbar(hwnd) {
             shell::reassert_taskbar_hidden();
+            return;
+        }
+        // Windows opened its own Start menu: the Win key reached it without
+        // passing our hook (an elevated app such as Task Manager was in
+        // front), or its Start button was clicked. Show ours instead; taking
+        // the foreground closes theirs.
+        if event == EVENT_SYSTEM_FOREGROUND
+            && self.cfg.launcher
+            && self.cfg.launcher_win_key
+            && !self.launcher.open
+            && shell::is_start_menu(hwnd)
+        {
+            self.open_launcher();
             return;
         }
         if !self.cfg.dock {
@@ -1255,7 +1290,7 @@ impl App {
             return RightClick::Nothing;
         }
         if hwnd == self.dock.hwnd {
-            if let Some(i) = self.dock.hovered.filter(|&i| !self.dock.is_start(i)) {
+            if let Some(i) = self.dock.hovered_app() {
                 let a = &self.dock.apps[i];
                 return RightClick::App {
                     id: a.id.clone(),
@@ -1366,8 +1401,12 @@ impl App {
     fn toggle_launcher(&mut self) {
         if self.launcher.open {
             self.launcher.hide();
-            return;
+        } else {
+            self.open_launcher();
         }
+    }
+
+    fn open_launcher(&mut self) {
         if !self.cfg.launcher {
             return;
         }
@@ -1577,17 +1616,13 @@ impl App {
                 }
                 WM_LBUTTONDOWN => self.dock.on_down(lparam_xy(lp).0),
                 WM_LBUTTONUP => {
-                    if let Some(i) = self.dock.on_up() {
+                    if let Some(hot) = self.dock.on_up() {
                         self.preview.hide();
-                        if self.dock.is_start(i) {
-                            self.toggle_launcher();
-                        } else {
-                            self.dock.activate(i);
-                        }
+                        self.on_dock_click(hot);
                     }
                 }
                 WM_MBUTTONUP => {
-                    if let Some(i) = self.dock.hovered {
+                    if let Some(i) = self.dock.hovered_app() {
                         self.dock.launch_new(i);
                     }
                 }
@@ -1607,6 +1642,11 @@ impl App {
                         }
                         TIMER_PREVIEW_SHOW => self.show_preview(),
                         TIMER_PREVIEW_HIDE => self.preview.hide(),
+                        TIMER_CLOCK => {
+                            self.dock.dirty = true;
+                            self.arm_clock();
+                        }
+                        TIMER_TRAY_PEEK => self.check_tray_peek(),
                         _ => {}
                     }
                 }
@@ -1616,10 +1656,89 @@ impl App {
         Some(LRESULT(0))
     }
 
+    fn on_dock_click(&mut self, hot: DockHot) {
+        match hot {
+            DockHot::Start | DockHot::Search => {
+                if self.cfg.launcher {
+                    self.toggle_launcher();
+                } else {
+                    shell::open_start_menu();
+                }
+            }
+            DockHot::App(i) => self.dock.activate(i),
+            DockHot::Weather => {
+                let q = if self.cfg.weather_location.trim().is_empty() {
+                    "weather".to_string()
+                } else {
+                    format!("weather {}", self.cfg.weather_location.trim())
+                };
+                shell::open(&format!("https://www.bing.com/search?q={}", q.replace(' ', "+")));
+            }
+            DockHot::Tray => self.open_tray_overflow(),
+            DockHot::Status => shell::open("ms-actioncenter:controlcenter/&showFooter=true"),
+            DockHot::Clock => shell::open("ms-actioncenter:"),
+        }
+    }
+
+    /// Redraws the taskbar clock at the start of each minute (and not more).
+    fn arm_clock(&mut self) {
+        unsafe {
+            if self.cfg.dock && (self.cfg.show_clock || self.cfg.show_status) {
+                let t = GetLocalTime();
+                let ms = (60 - t.wSecond as u32) * 1000 - t.wMilliseconds as u32 + 20;
+                SetTimer(Some(self.dock.hwnd), TIMER_CLOCK, ms.max(100), None);
+            } else {
+                let _ = KillTimer(Some(self.dock.hwnd), TIMER_CLOCK);
+            }
+        }
+    }
+
+    /// The Windows "hidden icons" flyout. With the real taskbar hidden it is
+    /// shown fully transparent for as long as the flyout stays open.
+    fn open_tray_overflow(&mut self) {
+        if let Some((_, invisible, _)) = self.tray_peek.take() {
+            shell::end_tray_overflow(invisible);
+            return;
+        }
+        let invisible = self.taskbar_hidden;
+        shell::focus_tray(invisible);
+        self.tray_peek = Some((Instant::now(), invisible, true));
+        unsafe {
+            SetTimer(Some(self.dock.hwnd), TIMER_TRAY_PEEK, 120, None);
+        }
+    }
+
+    /// Runs only while the flyout is up (twice a second), to put the
+    /// taskbar away again once it closes.
+    fn check_tray_peek(&mut self) {
+        let Some((since, invisible, enter)) = self.tray_peek else { return };
+        let age = since.elapsed();
+        let focused = shell::shell_focused();
+        if enter {
+            // Only press Enter once the tray really has the focus, so it can
+            // never land in the app that was in front.
+            if focused {
+                shell::press_enter();
+                self.tray_peek = Some((since, invisible, false));
+            } else if age > Duration::from_millis(1000) {
+                self.tray_peek = None;
+                shell::end_tray_overflow(invisible);
+                return;
+            }
+        } else if !focused || age > Duration::from_secs(120) {
+            self.tray_peek = None;
+            shell::end_tray_overflow(invisible);
+            return;
+        }
+        unsafe {
+            SetTimer(Some(self.dock.hwnd), TIMER_TRAY_PEEK, if enter { 60 } else { 500 }, None);
+        }
+    }
+
     /// Opens (after a short hover) or retargets the preview for the hovered app.
     fn schedule_preview(&mut self) {
         let dock = self.dock.hwnd;
-        let has_windows = self.dock.hovered.is_some_and(|i| !self.dock.apps[i].windows.is_empty());
+        let has_windows = self.dock.hovered_app().is_some_and(|i| !self.dock.apps[i].windows.is_empty());
         unsafe {
             if has_windows {
                 let delay = if self.preview.visible() { 1 } else { 450 };
@@ -1634,7 +1753,7 @@ impl App {
     }
 
     fn show_preview(&mut self) {
-        let Some(i) = self.dock.hovered else { return };
+        let Some(i) = self.dock.hovered_app() else { return };
         let app = &self.dock.apps[i];
         if app.windows.is_empty() {
             return;
@@ -1748,12 +1867,20 @@ impl App {
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
-            let _ = self.dock.render(&mut self.gfx);
+            let status = dock::Status {
+                wifi: self.radios.wifi,
+                volume: self.vol.0,
+                muted: self.vol.1,
+                battery: battery(),
+            };
+            let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
+            let _ = self.dock.render(&mut self.gfx, &status, weather);
         }
         if self.launcher.wants_frame() {
             fast |= self.launcher.step(dt);
             let bottom = self.launcher_bottom();
-            let _ = self.launcher.render(&mut self.gfx, &mut self.dock, self.monitor, bottom);
+            let anchor = if self.dock.shown { self.dock.start_anchor() } else { None };
+            let _ = self.launcher.render(&mut self.gfx, &mut self.dock, self.monitor, bottom, anchor);
         }
 
         // Full rate while shapes morph; level bars and fades are fine at 60.
@@ -2289,7 +2416,7 @@ fn pause(p: &Painter, x: f32, cy: f32, c: Color) {
     p.rrect(x + 2.0, cy - 9.0, 5.0, 18.0, 1.5, c);
 }
 
-fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: bool, c: Color) {
+pub(crate) fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: bool, c: Color) {
     let x0 = cx - s * 0.5;
     p.polygon(
         &[
@@ -2363,7 +2490,7 @@ fn cloud(p: &Painter, cx: f32, cy: f32, s: f32, c: Color) {
     p.rrect(cx - s * 0.38, cy + s * 0.04, s * 0.8, s * 0.21, s * 0.1, c);
 }
 
-fn weather_icon(p: &Painter, cx: f32, cy: f32, s: f32, code: u32, day: bool, alpha: f32) {
+pub(crate) fn weather_icon(p: &Painter, cx: f32, cy: f32, s: f32, code: u32, day: bool, alpha: f32) {
     let sun_c = Color(1.0, 0.8, 0.3, alpha);
     let cloud_c = Color(0.85, 0.87, 0.9, alpha);
     let drop_c = Color(0.45, 0.7, 1.0, alpha);

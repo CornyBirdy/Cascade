@@ -8,6 +8,9 @@ use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -291,6 +294,104 @@ pub fn reassert_taskbar_hidden() {
     }
 }
 
+// -------------------------------------------------- Start / hidden icons --
+
+/// Presses and releases keys: (virtual key, up).
+fn send_keys(keys: &[(u16, bool)]) {
+    let inputs: Vec<INPUT> = keys
+        .iter()
+        .map(|&(vk, up)| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        })
+        .collect();
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+const VK_LWIN: u16 = 0x5B;
+const VK_CONTROL: u16 = 0x11;
+const VK_ESCAPE: u16 = 0x1B;
+const VK_RETURN: u16 = 0x0D;
+const VK_B: u16 = 0x42;
+
+/// Whether `hwnd` is the Windows Start menu.
+pub fn is_start_menu(hwnd: HWND) -> bool {
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+    if String::from_utf16_lossy(&class[..n]) != "Windows.UI.Core.CoreWindow" {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\startmenuexperiencehost.exe"))
+}
+
+/// Opens the real Windows Start menu (Ctrl+Esc).
+pub fn open_start_menu() {
+    send_keys(&[(VK_CONTROL, false), (VK_ESCAPE, false), (VK_ESCAPE, true), (VK_CONTROL, true)]);
+}
+
+fn explorer_pid() -> Option<u32> {
+    let tray = *taskbars().first()?;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(tray, Some(&mut pid)) };
+    (pid != 0).then_some(pid)
+}
+
+/// Step one of opening the Windows "hidden icons" flyout: Win+B moves the
+/// keyboard focus to the taskbar's tray. When Cascade hides the taskbar it is
+/// first shown fully transparent and click-through, so only the flyout shows.
+pub fn focus_tray(invisible: bool) {
+    if invisible {
+        if let Some(&tray) = taskbars().first() {
+            unsafe {
+                let ex = GetWindowLongW(tray, GWL_EXSTYLE) as u32;
+                SetWindowLongW(tray, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0) as i32);
+                let _ = SetLayeredWindowAttributes(tray, COLORREF(0), 0, LWA_ALPHA);
+                let _ = ShowWindow(tray, SW_SHOWNA);
+            }
+        }
+    }
+    send_keys(&[(VK_LWIN, false), (VK_B, false), (VK_B, true), (VK_LWIN, true)]);
+}
+
+/// Whether the shell (taskbar, tray or its flyouts) has the foreground.
+pub fn shell_focused() -> bool {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    explorer_pid().is_some_and(|e| e == pid)
+}
+
+/// Step two: Enter on the focused "Show hidden icons" button.
+pub fn press_enter() {
+    send_keys(&[(VK_RETURN, false), (VK_RETURN, true)]);
+}
+
+/// Puts the taskbar back after `focus_tray(true)`.
+pub fn end_tray_overflow(invisible: bool) {
+    if !invisible {
+        return;
+    }
+    if let Some(&tray) = taskbars().first() {
+        unsafe {
+            let _ = ShowWindow(tray, SW_HIDE);
+            let _ = SetLayeredWindowAttributes(tray, COLORREF(0), 255, LWA_ALPHA);
+            let ex = GetWindowLongW(tray, GWL_EXSTYLE) as u32;
+            SetWindowLongW(tray, GWL_EXSTYLE, (ex & !(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0)) as i32);
+        }
+    }
+}
+
 /// Restores the taskbar if Cascade hid it (now or in a run that crashed).
 pub fn restore_taskbar() {
     let marker = taskbar_marker();
@@ -298,6 +399,12 @@ pub fn restore_taskbar() {
     set_taskbar_state(text.trim().parse().unwrap_or(ABS_ALWAYSONTOP));
     for t in taskbars() {
         unsafe {
+            // Undo a hidden-icons peek cut short by a crash.
+            let ex = GetWindowLongW(t, GWL_EXSTYLE) as u32;
+            if ex & WS_EX_TRANSPARENT.0 != 0 {
+                let _ = SetLayeredWindowAttributes(t, COLORREF(0), 255, LWA_ALPHA);
+                SetWindowLongW(t, GWL_EXSTYLE, (ex & !(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0)) as i32);
+            }
             let _ = ShowWindow(t, SW_SHOWNA);
         }
     }
@@ -445,15 +552,15 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Cascade"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 11, w!("Settings\u{2026}"));
-        let _ = AppendMenuW(menu, MF_STRING, 12, w!("Open launcher"));
+        let _ = AppendMenuW(menu, MF_STRING, 12, w!("Open Start menu"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, check(state.notch), 1, w!("Show notch"));
-        let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show dock"));
+        let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show taskbar"));
         let flags = if state.dock { check(state.dock_autohide) } else { check(state.dock_autohide) | MF_GRAYED };
-        let _ = AppendMenuW(menu, flags, 3, w!("Auto-hide dock"));
+        let _ = AppendMenuW(menu, flags, 3, w!("Auto-hide taskbar"));
         let flags =
             if state.hide_taskbar_allowed { check(state.hide_taskbar) } else { check(state.hide_taskbar) | MF_GRAYED };
-        let _ = AppendMenuW(menu, flags, 4, w!("Hide Windows taskbar while the dock is on"));
+        let _ = AppendMenuW(menu, flags, 4, w!("Replace the Windows taskbar"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
         let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
@@ -482,7 +589,7 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(name));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 1, w!("New window"));
-        let _ = AppendMenuW(menu, MF_STRING, 2, if pinned { w!("Unpin from dock") } else { w!("Pin to dock") });
+        let _ = AppendMenuW(menu, MF_STRING, 2, if pinned { w!("Unpin from taskbar") } else { w!("Pin to taskbar") });
         if windows > 0 {
             let label = if windows == 1 { "Close window".to_string() } else { format!("Close {windows} windows") };
             let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from(label));
@@ -500,7 +607,7 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
 pub fn show_pin_menu(hwnd: HWND, pinned: bool) -> bool {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return false };
-        let _ = AppendMenuW(menu, MF_STRING, 1, if pinned { w!("Unpin from dock") } else { w!("Pin to dock") });
+        let _ = AppendMenuW(menu, MF_STRING, 1, if pinned { w!("Unpin from taskbar") } else { w!("Pin to taskbar") });
         track(hwnd, menu) == 1
     }
 }
@@ -581,7 +688,7 @@ pub fn ensure_shortcuts() {
             windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         let (Some(appdata), Ok(exe)) = (std::env::var_os("APPDATA"), std::env::current_exe()) else { return };
         let dir = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs");
-        let _ = create_link(&dir.join("Cascade.lnk"), &exe, "", "Cascade notch, dock and launcher");
+        let _ = create_link(&dir.join("Cascade.lnk"), &exe, "", "Cascade notch, taskbar and Start menu");
         let _ = create_link(&dir.join("Cascade Settings.lnk"), &exe, "--settings", "Cascade settings");
     });
 }

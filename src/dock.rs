@@ -1,36 +1,42 @@
-//! The dock: pinned and running apps along the bottom of the screen.
+//! The taskbar: Start, search, pinned + running apps, weather, status icons
+//! and the clock, drawn Windows 11 style over an acrylic blur.
 //!
 //! Window changes arrive through WinEvent hooks (no polling); a short
 //! debounce then rescans the top-level windows. Like the notch, it is a
-//! layered window drawn with Direct2D only while something animates.
+//! layered window drawn with Direct2D only while something changes.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
-use windows::core::{Result, BOOL, BSTR, GUID};
+use windows::core::{Result, BOOL, BSTR, GUID, PCWSTR};
 use windows::Win32::Foundation::*;
+use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, DATE_SHORTDATE, TIME_NOSECONDS};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::backdrop::Backdrop;
 use crate::config::{self, Config};
-use crate::gfx::{Align, Color, Gfx, Layer};
+use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::shell;
 use crate::spring::Spring;
+use crate::weather::Weather;
 
-const PAD: f32 = 9.0;
-const GAP: f32 = 7.0;
-const MARGIN: f32 = 8.0;
-/// Room above the panel for magnified icons and the name label.
-const LABEL_ROOM: f32 = 40.0;
-
-/// Pseudo-app for the launcher button at the left end of the dock.
-pub const START_ID: &str = "cascade:start";
+/// Room above the bar for tooltips (transparent, click-through).
+const TIP_ROOM: f32 = 40.0;
+const GAP: f32 = 4.0;
+const SEARCH_W: f32 = 112.0;
+const WEATHER_W: f32 = 118.0;
+const CLOCK_W: f32 = 78.0;
+const TRAY_W: f32 = 28.0;
+const STATUS_ICON: f32 = 24.0;
+pub const ACCENT: Color = Color(0.38, 0.67, 1.0, 1.0);
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
@@ -65,10 +71,63 @@ struct Icon {
     bitmap: Option<(u32, ID2D1Bitmap)>,
 }
 
+/// Things on the taskbar you can point at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Hot {
+    Start,
+    Search,
+    Weather,
+    App(usize),
+    Tray,
+    Status,
+    Clock,
+}
+
+/// Live system state shown on the right of the taskbar.
+#[derive(Clone, Copy, Default)]
+pub struct Status {
+    pub wifi: Option<bool>,
+    pub volume: f32,
+    pub muted: bool,
+    pub battery: Option<(u8, bool)>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Span {
+    x: f32,
+    w: f32,
+}
+
+impl Span {
+    fn contains(&self, x: f32) -> bool {
+        x >= self.x && x < self.x + self.w
+    }
+    fn centre(&self) -> f32 {
+        self.x + self.w / 2.0
+    }
+}
+
+/// Last frame's layout, in layout units relative to the window.
+#[derive(Default)]
+struct Geo {
+    y0: f32,
+    y1: f32,
+    start: Span,
+    search: Option<Span>,
+    weather: Option<Span>,
+    apps: Vec<Span>,
+    tray: Span,
+    status: Span,
+    clock: Span,
+    /// Rounded panels (x0, x1) that get a blur behind them.
+    islands: Vec<(f32, f32)>,
+}
+
 pub struct Dock {
     pub hwnd: HWND,
     pub trigger: HWND,
     layer: Layer,
+    backdrops: Vec<Backdrop>,
     pub apps: Vec<DockApp>,
     icons: HashMap<String, Icon>,
     names: HashMap<String, String>,
@@ -84,28 +143,40 @@ pub struct Dock {
     window_visible: bool,
     autohide: bool,
     hide_taskbar: bool,
-    size: f32,
-    magnify: f32,
     pub reveal: Spring,
     reserved: bool,
     reserve_slot: Option<RECT>,
 
+    // Appearance.
+    full: bool,
+    left: bool,
+    bar_h: f32,
+    margin: f32,
+    radius: f32,
+    icon: f32,
+    magnify: f32,
+    acrylic: bool,
+    opacity: f32,
+    show_search: bool,
+    show_status: bool,
+    show_clock: bool,
+    show_weather: bool,
+
     k: f32,
     monitor: RECT,
-    /// Bottom edge of the dock area, in screen pixels.
+    /// Bottom edge of the taskbar area, in screen pixels.
     bottom: i32,
 
-    /// Cursor x relative to the dock's centre, in layout units.
-    hover_rel: Option<f32>,
-    pub hovered: Option<usize>,
-    pressed: Option<(usize, i32)>,
+    geo: Geo,
+    hover_x: Option<f32>,
+    pub hovered: Option<Hot>,
+    pressed: Option<(Hot, i32)>,
     dragging: Option<usize>,
     tracking: bool,
     pub foreground: HWND,
     pub dirty: bool,
-    /// Last frame's window rect in screen pixels, for anchoring the preview.
+    /// Last frame's window rect in screen pixels.
     pub screen: RECT,
-    win_w: f32,
 }
 
 fn pinned_path() -> std::path::PathBuf {
@@ -132,7 +203,7 @@ fn is_cloaked(h: HWND) -> bool {
     unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4).is_ok() && cloaked != 0 }
 }
 
-/// Whether a window belongs on the dock, the same way the taskbar decides.
+/// Whether a window belongs on the taskbar, the same way Windows decides.
 fn is_app_window(h: HWND, own_pid: u32) -> bool {
     unsafe {
         if !IsWindowVisible(h).as_bool() {
@@ -148,19 +219,20 @@ fn is_app_window(h: HWND, own_pid: u32) -> bool {
         if GetWindowTextLengthW(h) == 0 || is_cloaked(h) {
             return false;
         }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(h, Some(&mut pid));
-        if pid == own_pid {
-            return false;
-        }
         let mut class = [0u16; 64];
         let n = GetClassNameW(h, &mut class) as usize;
         let class = String::from_utf16_lossy(&class[..n]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        // Cascade's own settings window is a normal app window.
+        if pid == own_pid && class != "CascadeSettings" {
+            return false;
+        }
         !matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
     }
 }
 
-fn process_path(pid: u32) -> Option<String> {
+pub fn process_path(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
@@ -190,12 +262,41 @@ pub fn focus_window(h: HWND) {
     }
 }
 
+fn clock_text() -> (String, String) {
+    let mut t = [0u16; 64];
+    let mut d = [0u16; 64];
+    unsafe {
+        let nt = GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, None, PCWSTR::null(), Some(&mut t));
+        let nd = GetDateFormatEx(PCWSTR::null(), DATE_SHORTDATE, None, PCWSTR::null(), Some(&mut d), PCWSTR::null());
+        let s = |b: &[u16], n: i32| String::from_utf16_lossy(&b[..(n.max(1) - 1) as usize]);
+        (s(&t, nt), s(&d, nd))
+    }
+}
+
+/// The four-pane Windows logo, in Windows 11 blues.
+pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
+    let q = size * 0.46;
+    let g = size * 0.08;
+    let colours = [
+        Color(0.18, 0.62, 1.0, alpha),
+        Color(0.30, 0.72, 1.0, alpha),
+        Color(0.10, 0.50, 0.92, alpha),
+        Color(0.22, 0.62, 0.98, alpha),
+    ];
+    for (i, (left, top)) in [(true, true), (false, true), (true, false), (false, false)].into_iter().enumerate() {
+        let x = if left { cx - q - g / 2.0 } else { cx + g / 2.0 };
+        let y = if top { cy - q - g / 2.0 } else { cy + g / 2.0 };
+        p.rrect(x, y, q, q, q * 0.12, colours[i]);
+    }
+}
+
 impl Dock {
-    pub fn new(hwnd: HWND, trigger: HWND, icon_tx: Sender<String>) -> Self {
+    pub fn new(hwnd: HWND, trigger: HWND, icon_tx: Sender<String>, backdrops: Vec<Backdrop>) -> Self {
         let mut d = Self {
             hwnd,
             trigger,
             layer: Layer::default(),
+            backdrops,
             apps: Vec::new(),
             icons: HashMap::new(),
             names: HashMap::new(),
@@ -207,15 +308,27 @@ impl Dock {
             window_visible: false,
             autohide: false,
             hide_taskbar: false,
-            size: 46.0,
-            magnify: 0.35,
             reveal: Spring::new(0.0, 300.0, 30.0),
             reserved: false,
             reserve_slot: None,
+            full: true,
+            left: false,
+            bar_h: 48.0,
+            margin: 8.0,
+            radius: 8.0,
+            icon: 24.0,
+            magnify: 0.0,
+            acrylic: true,
+            opacity: 0.55,
+            show_search: true,
+            show_status: true,
+            show_clock: true,
+            show_weather: true,
             k: 1.0,
             monitor: RECT::default(),
             bottom: 0,
-            hover_rel: None,
+            geo: Geo::default(),
+            hover_x: None,
             hovered: None,
             pressed: None,
             dragging: None,
@@ -223,7 +336,6 @@ impl Dock {
             foreground: HWND::default(),
             dirty: true,
             screen: RECT::default(),
-            win_w: 0.0,
         };
         for id in load_pinned() {
             let mut app = DockApp::new(id, true);
@@ -238,30 +350,16 @@ impl Dock {
         h == self.hwnd || h == self.trigger
     }
 
-    /// Adds or removes the launcher button at the left end.
-    pub fn set_start_button(&mut self, on: bool) {
-        let has = self.apps.first().is_some_and(|a| a.id == START_ID);
-        if on && !has {
-            let mut app = DockApp::new(START_ID.to_string(), true);
-            app.presence.snap(1.0);
-            self.apps.insert(0, app);
-        } else if !on && has {
-            self.apps.remove(0);
+    pub fn hovered_app(&self) -> Option<usize> {
+        match self.hovered {
+            Some(Hot::App(i)) if i < self.apps.len() => Some(i),
+            _ => None,
         }
-        self.hovered = None;
-        self.dirty = true;
-    }
-
-    pub fn is_start(&self, i: usize) -> bool {
-        self.apps.get(i).is_some_and(|a| a.id == START_ID)
     }
 
     /// Pinned apps as (target, name), for the launcher.
     pub fn pinned_apps(&self) -> Vec<(String, String)> {
-        (0..self.apps.len())
-            .filter(|&i| self.apps[i].pinned && !self.is_start(i))
-            .map(|i| (self.apps[i].id.clone(), self.name(i)))
-            .collect()
+        (0..self.apps.len()).filter(|&i| self.apps[i].pinned).map(|i| (self.apps[i].id.clone(), self.name(i))).collect()
     }
 
     pub fn is_pinned(&self, id: &str) -> bool {
@@ -288,7 +386,7 @@ impl Dock {
         }
     }
 
-    /// The icon for any app id, loading it in the background if needed.
+    /// The icon for any app id or file, loading it in the background if needed.
     pub fn icon(&mut self, id: &str, gfx: &Gfx) -> Option<ID2D1Bitmap> {
         self.request_icon(id);
         let icon = self.icons.get_mut(&id.to_ascii_lowercase())?;
@@ -302,9 +400,6 @@ impl Dock {
     }
 
     fn request_icon(&mut self, id: &str) {
-        if id == START_ID {
-            return;
-        }
         let key = id.to_ascii_lowercase();
         if let std::collections::hash_map::Entry::Vacant(e) = self.icons.entry(key) {
             e.insert(Icon::default());
@@ -323,9 +418,6 @@ impl Dock {
 
     pub fn name(&self, i: usize) -> String {
         let id = &self.apps[i].id;
-        if id == START_ID {
-            return "Start".to_string();
-        }
         self.names
             .get(&id.to_ascii_lowercase())
             .cloned()
@@ -333,8 +425,7 @@ impl Dock {
     }
 
     fn save_pinned(&self) {
-        let list: Vec<&str> =
-            self.apps.iter().filter(|a| a.pinned && a.id != START_ID).map(|a| a.id.as_str()).collect();
+        let list: Vec<&str> = self.apps.iter().filter(|a| a.pinned).map(|a| a.id.as_str()).collect();
         let _ = std::fs::create_dir_all(config::dir());
         let _ = std::fs::write(pinned_path(), list.join("\r\n") + "\r\n");
     }
@@ -342,21 +433,36 @@ impl Dock {
     // ------------------------------------------------------------ placement --
 
     /// Applies config and screen geometry, and reserves screen space when the
-    /// dock is always shown. Visibility is separate (`set_visible`) so a
+    /// taskbar is always shown. Visibility is separate (`set_visible`) so a
     /// fullscreen game never changes the work area of other windows.
     pub fn configure(&mut self, cfg: &Config, monitor: RECT, k: f32) {
         self.enabled = cfg.dock;
         self.autohide = cfg.dock_autohide;
         self.hide_taskbar = cfg.hide_taskbar;
-        self.size = cfg.dock_icon_size;
+        self.full = cfg.taskbar_style != "floating";
+        self.left = cfg.taskbar_align == "left";
+        self.bar_h = cfg.taskbar_height;
+        self.margin = cfg.taskbar_margin;
+        // A full-width bar flush with the screen edges has square corners.
+        self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
+        self.icon = cfg.dock_icon_size.min(self.bar_h - 12.0);
         self.magnify = cfg.dock_magnify;
+        self.acrylic = cfg.acrylic;
+        self.opacity = cfg.taskbar_opacity;
+        self.show_search = cfg.show_search;
+        self.show_status = cfg.show_status;
+        self.show_clock = cfg.show_clock;
+        self.show_weather = cfg.weather;
         self.monitor = monitor;
         self.k = k;
+        let tint = ((self.opacity * 255.0) as u32) << 24 | 0x00_1C1C1E;
+        for b in &self.backdrops {
+            b.style(self.acrylic, tint, self.radius);
+        }
 
         if self.enabled && !self.autohide {
-            let panel_px = ((self.panel_h() + MARGIN * 2.0) * k).round() as i32;
-            self.reserve_slot =
-                Some(shell::reserve_bottom(self.hwnd, monitor, panel_px, &mut self.reserved, self.reserve_slot));
+            let px = ((self.bar_h + self.margin) * k).round() as i32;
+            self.reserve_slot = Some(shell::reserve_bottom(self.hwnd, monitor, px, &mut self.reserved, self.reserve_slot));
         } else if self.reserved {
             shell::unregister_appbar(self.hwnd);
             self.reserved = false;
@@ -366,7 +472,7 @@ impl Dock {
         self.apply_visible(true);
     }
 
-    /// Recomputes where the dock sits (after work-area changes).
+    /// Recomputes where the taskbar sits (after work-area changes).
     pub fn refresh_bottom(&mut self) {
         self.bottom = match self.reserve_slot {
             Some(slot) => slot.bottom,
@@ -382,8 +488,8 @@ impl Dock {
     /// Re-applies the app-bar reservation after the shell moved things.
     pub fn reposition(&mut self) {
         if self.reserved {
-            let panel_px = ((self.panel_h() + MARGIN * 2.0) * self.k).round() as i32;
-            let slot = shell::reserve_bottom(self.hwnd, self.monitor, panel_px, &mut self.reserved, self.reserve_slot);
+            let px = ((self.bar_h + self.margin) * self.k).round() as i32;
+            let slot = shell::reserve_bottom(self.hwnd, self.monitor, px, &mut self.reserved, self.reserve_slot);
             self.reserve_slot = Some(slot);
             self.bottom = slot.bottom;
             self.dirty = true;
@@ -422,15 +528,22 @@ impl Dock {
             self.show_now();
         } else {
             self.reveal.snap(0.0);
-            if self.window_visible {
-                self.window_visible = false;
-                unsafe {
-                    let _ = ShowWindow(self.hwnd, SW_HIDE);
-                }
-            }
-            self.layer.release();
+            self.hide_window();
         }
         self.dirty = true;
+    }
+
+    fn hide_window(&mut self) {
+        for b in &mut self.backdrops {
+            b.hide();
+        }
+        if self.window_visible {
+            self.window_visible = false;
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+        self.layer.release();
     }
 
     pub fn shutdown(&mut self) {
@@ -438,9 +551,12 @@ impl Dock {
             shell::unregister_appbar(self.hwnd);
             self.reserved = false;
         }
+        for b in &mut self.backdrops {
+            b.hide();
+        }
     }
 
-    /// Brings the dock in (auto-hide, or when it becomes visible).
+    /// Brings the taskbar in (auto-hide, or when it becomes visible).
     pub fn show_now(&mut self) {
         if !self.shown {
             return;
@@ -455,10 +571,13 @@ impl Dock {
         self.dirty = true;
     }
 
-    /// Slides the dock away if auto-hide is on and nothing holds it open.
+    /// Slides the taskbar away if auto-hide is on and nothing holds it open.
     pub fn hide_if_idle(&mut self) -> bool {
-        if self.autohide && self.hover_rel.is_none() && self.pressed.is_none() {
+        if self.autohide && self.hover_x.is_none() && self.pressed.is_none() {
             self.reveal.set(0.0);
+            for b in &mut self.backdrops {
+                b.hide();
+            }
             return true;
         }
         false
@@ -524,112 +643,170 @@ impl Dock {
 
     // ----------------------------------------------------------- geometry --
 
-    fn panel_h(&self) -> f32 {
-        self.size + PAD * 2.0 + 4.0
+    fn button(&self) -> f32 {
+        (self.bar_h - 8.0).max(24.0)
     }
 
-    /// Width taken by app `i` right now (layout units).
-    fn slot_w(&self, a: &DockApp) -> f32 {
-        (self.size * (1.0 + self.magnify * a.mag.value) + GAP) * a.presence.value.clamp(0.0, 1.0)
+    fn status_icons(&self, status: &Status) -> usize {
+        2 + status.battery.is_some() as usize
     }
 
-    fn panel_w(&self) -> f32 {
-        let content: f32 = self.apps.iter().map(|a| self.slot_w(a)).sum();
-        (content - GAP).max(self.size * 0.5) + PAD * 2.0
+    /// Lays everything out for a window `ww` layout units wide.
+    fn layout(&self, ww: f32, wh: f32, status: &Status, weather: bool) -> Geo {
+        let b = self.button();
+        let m = self.margin;
+        let y1 = wh - m;
+        let y0 = y1 - self.bar_h;
+        let (x0, x1) = (m, ww - m);
+
+        // Centre group: Start, search, apps.
+        let slots: Vec<f32> = self.apps.iter().map(|a| (b + GAP) * a.presence.value.clamp(0.0, 1.0)).collect();
+        let search_w = if self.show_search { SEARCH_W + GAP } else { 0.0 };
+        let group_w = b + GAP + search_w + slots.iter().sum::<f32>() - GAP;
+        let weather_w = if weather { WEATHER_W } else { 0.0 };
+        let gx = if self.left { x0 + 8.0 + if self.full { weather_w } else { 0.0 } } else { (ww - group_w) / 2.0 };
+        let gx = if self.left && !self.full && weather { x0 + weather_w + 16.0 } else { gx };
+
+        let start = Span { x: gx, w: b };
+        let mut x = gx + b + GAP;
+        let search = self.show_search.then(|| {
+            let s = Span { x, w: SEARCH_W };
+            x += SEARCH_W + GAP;
+            s
+        });
+        let mut apps = Vec::new();
+        for w in &slots {
+            apps.push(Span { x, w: (w - GAP).max(0.0) });
+            x += w;
+        }
+
+        // Right: hidden icons, status, clock.
+        let mut rx = x1 - 6.0;
+        let clock = if self.show_clock { Span { x: rx - CLOCK_W, w: CLOCK_W } } else { Span { x: rx, w: 0.0 } };
+        rx = clock.x;
+        let status_w = if self.show_status { STATUS_ICON * self.status_icons(status) as f32 + 12.0 } else { 0.0 };
+        let status_span = Span { x: rx - status_w, w: status_w };
+        rx = status_span.x;
+        let tray = Span { x: rx - TRAY_W, w: TRAY_W };
+        let right_x = tray.x - 6.0;
+
+        // Left: weather.
+        let weather_span = weather.then_some(Span { x: x0 + 6.0, w: WEATHER_W - 12.0 });
+
+        let islands = if self.full {
+            vec![(x0, x1)]
+        } else {
+            let mut v = Vec::new();
+            if let Some(w) = weather_span {
+                v.push((w.x - 6.0, w.x + w.w + 6.0));
+            }
+            v.push((gx - 6.0, gx + group_w + 6.0));
+            v.push((right_x, x1));
+            v
+        };
+        Geo { y0, y1, start, search, weather: weather_span, apps, tray, status: status_span, clock, islands }
     }
 
-    /// Unmagnified centre of each app, relative to the dock's centre.
-    fn base_centres(&self) -> Vec<f32> {
-        let slots: Vec<f32> = self.apps.iter().map(|a| (self.size + GAP) * a.presence.target).collect();
-        let total: f32 = slots.iter().sum::<f32>() - GAP;
-        let mut x = -total / 2.0;
-        slots
-            .iter()
-            .map(|w| {
-                let c = x + (w - GAP).max(0.0) / 2.0;
-                x += w;
-                c
-            })
-            .collect()
-    }
-
-    fn index_at(&self, rel: f32) -> Option<usize> {
-        let half = (self.size + GAP) / 2.0;
-        self.base_centres()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.apps[*i].presence.target > 0.5)
-            .find(|(_, c)| (rel - **c).abs() <= half)
-            .map(|(i, _)| i)
+    fn hit(&self, x: f32, y: f32) -> Option<Hot> {
+        let g = &self.geo;
+        if y < g.y0 || y > g.y1 {
+            return None;
+        }
+        if g.start.contains(x) {
+            return Some(Hot::Start);
+        }
+        if g.search.is_some_and(|s| s.contains(x)) {
+            return Some(Hot::Search);
+        }
+        if g.weather.is_some_and(|s| s.contains(x)) {
+            return Some(Hot::Weather);
+        }
+        if let Some(i) = g.apps.iter().position(|s| s.w > 4.0 && s.contains(x)) {
+            return Some(Hot::App(i));
+        }
+        if g.tray.contains(x) {
+            return Some(Hot::Tray);
+        }
+        if g.status.w > 0.0 && g.status.contains(x) {
+            return Some(Hot::Status);
+        }
+        if g.clock.w > 0.0 && g.clock.contains(x) {
+            return Some(Hot::Clock);
+        }
+        None
     }
 
     // -------------------------------------------------------------- input --
 
+    /// Returns true when the hovered thing changed.
     pub fn on_move(&mut self, x: i32, y: i32) -> bool {
         unsafe {
             if !self.tracking {
-                let mut t = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                let mut t = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
                     hwndTrack: self.hwnd,
                     dwHoverTime: 0,
                 };
-                self.tracking = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut t).is_ok();
+                self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
         }
-        let _ = y;
-        let rel = x as f32 / self.k - self.win_w / 2.0;
-        self.hover_rel = Some(rel);
-        if let Some((i, start)) = self.pressed {
-            if self.dragging.is_none()
-                && (x - start).abs() > (6.0 * self.k) as i32
-                && self.apps[i].pinned
-                && !self.is_start(i)
-            {
+        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+        self.hover_x = Some(lx);
+        if let Some((Hot::App(i), start)) = self.pressed {
+            if self.dragging.is_none() && (x - start).abs() > (6.0 * self.k) as i32 && self.apps[i].pinned {
                 self.dragging = Some(i);
             }
         }
         if let Some(from) = self.dragging {
-            if let Some(to) = self.index_at(rel) {
-                if to != from && self.apps[to].pinned && !self.is_start(to) {
+            let to = self.geo.apps.iter().position(|s| s.contains(lx));
+            if let Some(to) = to {
+                if to != from && self.apps[to].pinned {
                     let app = self.apps.remove(from);
                     self.apps.insert(to, app);
                     self.dragging = Some(to);
-                    self.pressed = Some((to, self.pressed.map_or(x, |p| p.1)));
+                    self.pressed = Some((Hot::App(to), self.pressed.map_or(x, |p| p.1)));
                 }
             }
         }
-        let hovered = if self.dragging.is_some() { self.dragging } else { self.index_at(rel) };
+        let hovered = match self.dragging {
+            Some(i) => Some(Hot::App(i)),
+            None => self.hit(lx, ly),
+        };
         let changed = hovered != self.hovered;
         self.hovered = hovered;
-        self.dirty = true;
+        if changed {
+            self.dirty = true;
+        }
         changed
     }
 
     pub fn on_leave(&mut self) {
         self.tracking = false;
         if self.pressed.is_none() {
-            self.hover_rel = None;
+            self.hover_x = None;
             self.hovered = None;
         }
         self.dirty = true;
     }
 
     pub fn on_down(&mut self, x: i32) {
-        if let Some(i) = self.hovered {
-            self.pressed = Some((i, x));
+        if let Some(h) = self.hovered {
+            self.pressed = Some((h, x));
             unsafe {
-                windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd);
+                SetCapture(self.hwnd);
             }
+            self.dirty = true;
         }
     }
 
-    /// Mouse released. Returns the app index for a plain click.
-    pub fn on_up(&mut self) -> Option<usize> {
+    /// Mouse released. Returns what was clicked.
+    pub fn on_up(&mut self) -> Option<Hot> {
         unsafe {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            let _ = ReleaseCapture();
         }
         let pressed = self.pressed.take();
+        self.dirty = true;
         if self.dragging.take().is_some() {
             self.save_pinned();
             return None;
@@ -645,7 +822,7 @@ impl Dock {
         let Some(app) = self.apps.get_mut(i) else { return };
         if app.windows.is_empty() {
             shell::open(&app.id);
-            app.bounce.kick(14.0);
+            app.bounce.kick(10.0);
             self.dirty = true;
             return;
         }
@@ -664,7 +841,7 @@ impl Dock {
     pub fn launch_new(&mut self, i: usize) {
         if let Some(app) = self.apps.get_mut(i) {
             shell::open(&app.id);
-            app.bounce.kick(14.0);
+            app.bounce.kick(10.0);
             self.dirty = true;
         }
     }
@@ -701,12 +878,12 @@ impl Dock {
 
     /// Steps springs; returns true while the size or position is changing.
     pub fn step(&mut self, dt: f32) -> bool {
-        let centres = self.base_centres();
         let mut moving = self.reveal.step(dt);
+        let centres: Vec<f32> = self.geo.apps.iter().map(|s| s.centre()).collect();
         for (i, a) in self.apps.iter_mut().enumerate() {
-            let target = match (self.hover_rel, self.magnify > 0.0) {
-                (Some(h), true) => {
-                    let d = (h - centres[i]).abs() / (self.size * 2.2);
+            let target = match (self.hover_x, self.magnify > 0.0, centres.get(i)) {
+                (Some(h), true, Some(c)) => {
+                    let d = (h - c).abs() / (self.bar_h * 1.6);
                     if d < 1.0 {
                         (1.0 + (std::f32::consts::PI * d).cos()) / 2.0
                     } else {
@@ -724,15 +901,12 @@ impl Dock {
         let before = self.apps.len();
         self.apps.retain(|a| a.presence.target > 0.5 || a.presence.value > 0.01);
         if self.apps.len() != before {
-            self.hovered = self.hover_rel.and_then(|r| self.index_at(r));
-        }
-        if self.shown && self.autohide && self.reveal.target == 0.0 && self.reveal.value < 0.01 {
-            self.reveal.snap(0.0);
+            self.hovered = None;
         }
         moving
     }
 
-    pub fn render(&mut self, gfx: &mut Gfx) -> Result<()> {
+    pub fn render(&mut self, gfx: &mut Gfx, status: &Status, weather: Option<&Weather>) -> Result<()> {
         self.dirty = false;
         if !self.shown || !self.window_visible {
             return Ok(());
@@ -750,111 +924,210 @@ impl Dock {
         }
 
         let k = self.k;
-        let s = self.size;
-        let panel_w = self.panel_w();
-        let panel_h = self.panel_h();
-        let win_w = panel_w + 260.0;
-        let win_h = LABEL_ROOM + s * self.magnify + panel_h + MARGIN;
-        self.win_w = win_w;
         let mon_w = self.monitor.right - self.monitor.left;
-        let mut pw = (win_w * k).ceil() as i32;
-        if (mon_w - pw) % 2 != 0 {
-            pw += 1;
-        }
-        let ph = (win_h * k).ceil() as i32;
-        // Auto-hide fades the dock while it sinks a little.
-        let hidden_px = (18.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
-        let pos = POINT { x: self.monitor.left + (mon_w - pw) / 2, y: self.bottom - ph + hidden_px };
-        self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
+        let pw = mon_w;
+        let wh = TIP_ROOM + self.bar_h + self.margin;
+        let ph = (wh * k).ceil() as i32;
         let ww = pw as f32 / k;
+        // Auto-hide fades the bar while it sinks a little.
+        let hidden_px = (14.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
+        let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
+        self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
+        let show_weather = self.show_weather && weather.is_some();
+        self.geo = self.layout(ww, wh, status, show_weather);
+        let g = &self.geo;
+
+        // Blur behind each island, just under this window.
+        let settled = self.reveal.value > 0.95;
+        for (i, b) in self.backdrops.iter_mut().enumerate() {
+            match g.islands.get(i) {
+                Some(&(x0, x1)) if self.acrylic && settled => b.place(
+                    RECT {
+                        left: pos.x + (x0 * k).round() as i32,
+                        top: pos.y + (g.y0 * k).round() as i32,
+                        right: pos.x + (x1 * k).round() as i32,
+                        bottom: pos.y + (g.y1 * k).round() as i32,
+                    },
+                    self.hwnd,
+                ),
+                _ => b.hide(),
+            }
+        }
 
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
-            let panel_x = (ww - panel_w) / 2.0;
-            let panel_y = win_h - MARGIN - panel_h;
-            p.rrect(panel_x, panel_y, panel_w, panel_h, 18.0, Color(0.10, 0.10, 0.11, 0.86));
-            p.stroke_rrect(panel_x + 0.5, panel_y + 0.5, panel_w - 1.0, panel_h - 1.0, 17.5, Color::white(0.10), 1.0);
-
-            let mut x = panel_x + PAD;
-            let base_y = panel_y + PAD + s;
-            let mut label: Option<(f32, f32, String)> = None;
-            for (i, a) in self.apps.iter().enumerate() {
-                let presence = a.presence.value.clamp(0.0, 1.0);
-                let size = s * (1.0 + self.magnify * a.mag.value) * presence;
-                let cx = x + size / 2.0;
-                let y = base_y - size - a.bounce.value.max(0.0) * s * 0.35;
-                let alpha = presence;
-                match self.icons.get(&a.id.to_ascii_lowercase()).and_then(|ic| ic.bitmap.as_ref()) {
-                    _ if a.id == START_ID => {
-                        // Launcher button: a soft tile with four squares.
-                        let hovered = self.hovered == Some(i);
-                        p.rrect(
-                            x + size * 0.06,
-                            y + size * 0.06,
-                            size * 0.88,
-                            size * 0.88,
-                            size * 0.24,
-                            Color(0.27, 0.55, 1.0, if hovered { 0.95 } else { 0.8 } * alpha),
-                        );
-                        let q = size * 0.17;
-                        let g = size * 0.05;
-                        let (cx0, cy0) = (x + size / 2.0, y + size / 2.0);
-                        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
-                            let qx = if left { cx0 - q - g / 2.0 } else { cx0 + g / 2.0 };
-                            let qy = if top { cy0 - q - g / 2.0 } else { cy0 + g / 2.0 };
-                            p.rrect(qx, qy, q, q, q * 0.25, Color::white(0.95 * alpha));
-                        }
-                    }
-                    Some((_, bmp)) => p.image(bmp, x, y, size, size, alpha),
-                    None => p.rrect(
-                        x + size * 0.1,
-                        y + size * 0.1,
-                        size * 0.8,
-                        size * 0.8,
-                        size * 0.2,
-                        Color::white(0.15 * alpha),
-                    ),
-                }
-                if !a.windows.is_empty() {
-                    let active = a.windows.contains(&self.foreground);
-                    let (w, c) = if active { (10.0, Color::white(0.95)) } else { (4.0, Color::white(0.55)) };
-                    p.rrect(cx - w / 2.0, panel_y + panel_h - 6.5, w, 4.0, 2.0, c.alpha(presence));
-                }
-                if self.hovered == Some(i) && self.dragging.is_none() && presence > 0.9 {
-                    label = Some((cx, y, self.name(i)));
-                }
-                x += self.slot_w(a);
+            let f = &gfx.fonts;
+            let r = self.radius;
+            let bh = g.y1 - g.y0;
+            for &(x0, x1) in &g.islands {
+                // Over acrylic only a whisper of tint (it also keeps the
+                // pixels clickable); without acrylic a solid panel.
+                let fill = if self.acrylic && settled {
+                    Color::white(0.02)
+                } else {
+                    Color(0.11, 0.11, 0.12, 0.6 + 0.4 * self.opacity)
+                };
+                p.rrect(x0, g.y0, x1 - x0, bh, r, fill);
+                p.stroke_rrect(x0 + 0.5, g.y0 + 0.5, x1 - x0 - 1.0, bh - 1.0, r, Color::white(0.08), 1.0);
             }
-            if let Some((cx, top, name)) = label {
-                let tw = gfx.measure(&name, &gfx.fonts.label).min(ww - 20.0);
-                let (lw, lh) = (tw + 20.0, 24.0);
+            let b = self.button();
+            let by = g.y0 + (bh - b) / 2.0;
+            let pressed = self.pressed.map(|p| p.0);
+            let hover_bg = |h: Hot| -> Option<Color> {
+                if pressed == Some(h) {
+                    Some(Color::white(0.05))
+                } else if self.hovered == Some(h) {
+                    Some(Color::white(0.08))
+                } else {
+                    None
+                }
+            };
+
+            // Start.
+            if let Some(c) = hover_bg(Hot::Start) {
+                p.rrect(g.start.x, by, g.start.w, b, 5.0, c);
+            }
+            start_logo(&p, g.start.centre(), by + b / 2.0, self.icon * 0.85, 1.0);
+
+            // Search.
+            if let Some(s) = g.search {
+                let sh = (b - 8.0).min(34.0);
+                let sy = g.y0 + (bh - sh) / 2.0;
+                let a = if self.hovered == Some(Hot::Search) { 0.11 } else { 0.06 };
+                p.rrect(s.x, sy, s.w, sh, sh / 2.0, Color::white(a));
+                p.stroke_rrect(s.x + 0.5, sy + 0.5, s.w - 1.0, sh - 1.0, sh / 2.0, Color::white(0.07), 1.0);
+                let cy = sy + sh / 2.0;
+                p.stroke_circle(s.x + 18.0, cy - 1.0, 5.5, Color::white(0.75), 1.5);
+                p.line(s.x + 22.0, cy + 3.0, s.x + 25.5, cy + 6.5, Color::white(0.75), 1.5);
+                p.text("Search", &f.body, s.x + 32.0, sy, s.w - 36.0, sh, Align::Left, Color::white(0.75));
+            }
+
+            // Weather.
+            if let (Some(s), Some(wx)) = (g.weather, weather) {
+                if let Some(c) = hover_bg(Hot::Weather) {
+                    p.rrect(s.x, by, s.w, b, 5.0, c);
+                }
+                crate::ui::weather_icon(&p, s.x + 18.0, g.y0 + bh / 2.0, 24.0, wx.code, wx.day, 1.0);
+                let unit = if wx.fahrenheit { "F" } else { "C" };
+                let ty = g.y0 + bh / 2.0;
+                p.text(&format!("{:.0}\u{b0}{unit}", wx.temp), &f.label, s.x + 36.0, ty - 17.0, s.w - 38.0, 17.0, Align::Left, Color::white(0.95));
+                p.text(wx.describe(), &f.small, s.x + 36.0, ty, s.w - 38.0, 15.0, Align::Left, Color::white(0.6));
+            }
+
+            // Apps.
+            let mut tip: Option<(f32, String)> = None;
+            for (i, a) in self.apps.iter().enumerate() {
+                let Some(s) = g.apps.get(i).copied() else { break };
+                let presence = a.presence.value.clamp(0.0, 1.0);
+                if s.w < 2.0 {
+                    continue;
+                }
+                let cx = s.centre();
+                let running = !a.windows.is_empty();
+                let active = a.windows.contains(&self.foreground);
+                let bg = if active { Some(Color::white(if self.hovered == Some(Hot::App(i)) { 0.11 } else { 0.07 })) } else { hover_bg(Hot::App(i)) };
+                if let Some(c) = bg {
+                    p.rrect(s.x, by, s.w, b, 5.0, c.alpha(presence));
+                }
+                let size = self.icon * (1.0 + self.magnify * a.mag.value) * presence;
+                let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0;
+                match self.icons.get(&a.id.to_ascii_lowercase()).and_then(|ic| ic.bitmap.as_ref()) {
+                    Some((_, bmp)) => p.image(bmp, cx - size / 2.0, iy, size, size, presence),
+                    None => p.rrect(cx - size * 0.4, iy + size * 0.1, size * 0.8, size * 0.8, size * 0.2, Color::white(0.15 * presence)),
+                }
+                if running {
+                    let (w, c) = if active { (16.0, ACCENT) } else { (6.0, Color::white(0.55)) };
+                    p.rrect(cx - w / 2.0, by + b - 3.0, w, 3.0, 1.5, c.alpha(presence));
+                }
+                if self.hovered == Some(Hot::App(i)) && self.dragging.is_none() && presence > 0.9 {
+                    tip = Some((cx, self.name(i)));
+                }
+            }
+
+            // Hidden icons, status, clock.
+            if let Some(c) = hover_bg(Hot::Tray) {
+                p.rrect(g.tray.x, by, g.tray.w, b, 5.0, c);
+            }
+            let (tx, ty) = (g.tray.centre(), g.y0 + bh / 2.0);
+            p.line(tx - 4.5, ty + 2.0, tx, ty - 2.5, Color::white(0.85), 1.4);
+            p.line(tx, ty - 2.5, tx + 4.5, ty + 2.0, Color::white(0.85), 1.4);
+
+            if g.status.w > 0.0 {
+                if let Some(c) = hover_bg(Hot::Status) {
+                    p.rrect(g.status.x, by, g.status.w, b, 5.0, c);
+                }
+                let white = Color::white(0.92);
+                let mut x = g.status.x + 6.0 + STATUS_ICON / 2.0;
+                let cy = g.y0 + bh / 2.0;
+                match status.wifi {
+                    Some(on) => {
+                        let c = if on { white } else { Color::white(0.4) };
+                        p.arc(x, cy + 5.0, 4.5, -2.4, -0.74, c, 1.6);
+                        p.arc(x, cy + 5.0, 8.5, -2.4, -0.74, c, 1.6);
+                        p.circle(x, cy + 5.0, 1.5, c);
+                    }
+                    None => {
+                        // Wired: a small monitor.
+                        p.stroke_rrect(x - 7.0, cy - 6.0, 14.0, 10.0, 1.5, white, 1.3);
+                        p.line(x, cy + 4.0, x, cy + 7.0, white, 1.3);
+                        p.line(x - 4.0, cy + 7.0, x + 4.0, cy + 7.0, white, 1.3);
+                    }
+                }
+                x += STATUS_ICON;
+                crate::ui::speaker(&p, x, cy, 15.0, status.volume, status.muted, white);
+                x += STATUS_ICON;
+                if let Some((pct, charging)) = status.battery {
+                    p.stroke_rrect(x - 8.0, cy - 4.5, 15.0, 9.0, 2.0, white, 1.2);
+                    p.rrect(x + 7.5, cy - 1.5, 1.5, 3.0, 0.7, white);
+                    let c = if charging { Color(0.45, 0.9, 0.5, 1.0) } else if pct <= 20 { Color(1.0, 0.4, 0.35, 1.0) } else { white };
+                    p.rrect(x - 6.5, cy - 3.0, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
+                }
+            }
+            if g.clock.w > 0.0 {
+                if let Some(c) = hover_bg(Hot::Clock) {
+                    p.rrect(g.clock.x, by, g.clock.w, b, 5.0, c);
+                }
+                let (time, date) = clock_text();
+                let cy = g.y0 + bh / 2.0;
+                p.text(&time, &f.small, g.clock.x, cy - 16.0, g.clock.w - 8.0, 16.0, Align::Right, Color::white(0.95));
+                p.text(&date, &f.small, g.clock.x, cy, g.clock.w - 8.0, 16.0, Align::Right, Color::white(0.95));
+            }
+
+            // Tooltip above the hovered app.
+            if let Some((cx, name)) = tip {
+                let tw = gfx.measure(&name, &f.body).min(ww - 20.0);
+                let (lw, lh) = (tw + 20.0, 28.0);
                 let lx = (cx - lw / 2.0).clamp(4.0, ww - lw - 4.0);
-                let ly = top - lh - 6.0;
-                p.rrect(lx, ly, lw, lh, 8.0, Color(0.10, 0.10, 0.11, 0.92));
-                p.text(&name, &gfx.fonts.label, lx, ly, lw, lh, Align::Center, Color::white(0.95));
+                let ly = g.y0 - lh - 8.0;
+                p.rrect(lx, ly, lw, lh, 6.0, Color(0.16, 0.16, 0.17, 0.97));
+                p.stroke_rrect(lx + 0.5, ly + 0.5, lw - 1.0, lh - 1.0, 6.0, Color::white(0.1), 1.0);
+                p.text(&name, &f.body, lx, ly, lw, lh, Align::Center, Color::white(0.95));
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
         gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)?;
         if self.autohide && self.reveal.target == 0.0 && self.reveal.value < 0.01 && self.window_visible {
             // Fully faded out: stop covering anything.
-            self.window_visible = false;
-            unsafe {
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
-            }
+            self.hide_window();
         }
         Ok(())
     }
 
     /// Screen x of app `i`'s centre (for anchoring the preview).
     pub fn app_screen_x(&self, i: usize) -> i32 {
-        let centres = self.base_centres();
-        let c = centres.get(i).copied().unwrap_or(0.0);
-        (self.screen.left + self.screen.right) / 2 + (c * self.k) as i32
+        let c = self.geo.apps.get(i).map(|s| s.centre()).unwrap_or(0.0);
+        self.screen.left + (c * self.k) as i32
     }
 
+    /// Screen y of the bar's top edge.
     pub fn panel_top(&self) -> i32 {
-        self.screen.bottom - ((MARGIN + self.panel_h()) * self.k) as i32
+        self.screen.top + (self.geo.y0 * self.k) as i32
+    }
+
+    /// Screen x the Start menu should line up with (its left edge when the
+    /// taskbar is left-aligned), or None when centred.
+    pub fn start_anchor(&self) -> Option<i32> {
+        self.left.then(|| self.screen.left + ((self.geo.start.x - 4.0).max(self.margin) * self.k) as i32)
     }
 }

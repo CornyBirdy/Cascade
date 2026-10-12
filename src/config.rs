@@ -33,9 +33,25 @@ dock = true
 dock_autohide = false
 # Hide the Windows taskbar while the dock is on (restored when Cascade quits).
 hide_taskbar = true
-dock_icon_size = 46
+# floating = rounded islands, full = one bar across the screen.
+taskbar_style = full
+# center or left
+taskbar_align = center
+taskbar_height = 48
+# Gap between the taskbar and the screen edges (0 = flush like Windows).
+taskbar_margin = 8
+# round, small or square
+taskbar_corners = round
+# Blur what's behind the taskbar and Start menu (acrylic).
+acrylic = true
+# Tint strength over the blur (0 = clear glass, 1 = solid).
+taskbar_opacity = 0.55
+show_search = true
+show_status = true
+show_clock = true
+dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
-dock_magnify = 0.35
+dock_magnify = 0
 
 # ---- Launcher ----
 # Start button on the dock that opens Cascade's app launcher.
@@ -85,6 +101,16 @@ pub struct Config {
     pub hide_taskbar: bool,
     pub dock_icon_size: f32,
     pub dock_magnify: f32,
+    pub taskbar_style: String,
+    pub taskbar_align: String,
+    pub taskbar_height: f32,
+    pub taskbar_margin: f32,
+    pub taskbar_corners: String,
+    pub acrylic: bool,
+    pub taskbar_opacity: f32,
+    pub show_search: bool,
+    pub show_status: bool,
+    pub show_clock: bool,
     pub launcher: bool,
     pub launcher_win_key: bool,
     pub focus_minutes: u32,
@@ -116,8 +142,18 @@ impl Default for Config {
             dock: true,
             dock_autohide: false,
             hide_taskbar: true,
-            dock_icon_size: 46.0,
-            dock_magnify: 0.35,
+            dock_icon_size: 24.0,
+            dock_magnify: 0.0,
+            taskbar_style: "full".into(),
+            taskbar_align: "center".into(),
+            taskbar_height: 48.0,
+            taskbar_margin: 8.0,
+            taskbar_corners: "round".into(),
+            acrylic: true,
+            taskbar_opacity: 0.55,
+            show_search: true,
+            show_status: true,
+            show_clock: true,
             launcher: true,
             launcher_win_key: true,
             focus_minutes: 25,
@@ -150,6 +186,15 @@ fn parse_bool(v: &str) -> Option<bool> {
 }
 
 impl Config {
+    /// Corner radius (layout px) matching the DWM corner style.
+    pub fn corner_radius(&self) -> f32 {
+        match self.taskbar_corners.as_str() {
+            "square" => 0.0,
+            "small" => 4.0,
+            _ => 8.0,
+        }
+    }
+
     /// Reads the config, writing the commented default file on first run.
     pub fn load() -> Self {
         let path = path();
@@ -203,8 +248,18 @@ impl Config {
                 "dock" => set_b(&mut c.dock),
                 "dock_autohide" => set_b(&mut c.dock_autohide),
                 "hide_taskbar" => set_b(&mut c.hide_taskbar),
-                "dock_icon_size" => set_f(&mut c.dock_icon_size, 24.0, 96.0),
+                "dock_icon_size" => set_f(&mut c.dock_icon_size, 16.0, 48.0),
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
+                "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
+                "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
+                "taskbar_height" => set_f(&mut c.taskbar_height, 32.0, 80.0),
+                "taskbar_margin" => set_f(&mut c.taskbar_margin, 0.0, 32.0),
+                "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
+                "acrylic" => set_b(&mut c.acrylic),
+                "taskbar_opacity" => set_f(&mut c.taskbar_opacity, 0.0, 1.0),
+                "show_search" => set_b(&mut c.show_search),
+                "show_status" => set_b(&mut c.show_status),
+                "show_clock" => set_b(&mut c.show_clock),
                 "launcher" => set_b(&mut c.launcher),
                 "launcher_win_key" => set_b(&mut c.launcher_win_key),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
@@ -268,6 +323,16 @@ impl Config {
             "hide_taskbar" => b(self.hide_taskbar),
             "dock_icon_size" => self.dock_icon_size.to_string(),
             "dock_magnify" => self.dock_magnify.to_string(),
+            "taskbar_style" => self.taskbar_style.clone(),
+            "taskbar_align" => self.taskbar_align.clone(),
+            "taskbar_height" => self.taskbar_height.to_string(),
+            "taskbar_margin" => self.taskbar_margin.to_string(),
+            "taskbar_corners" => self.taskbar_corners.clone(),
+            "acrylic" => b(self.acrylic),
+            "taskbar_opacity" => self.taskbar_opacity.to_string(),
+            "show_search" => b(self.show_search),
+            "show_status" => b(self.show_status),
+            "show_clock" => b(self.show_clock),
             "launcher" => b(self.launcher),
             "launcher_win_key" => b(self.launcher_win_key),
             "focus_minutes" => self.focus_minutes.to_string(),
