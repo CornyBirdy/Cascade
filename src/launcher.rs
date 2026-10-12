@@ -140,7 +140,7 @@ fn load_recent(max: usize) -> Vec<RecentFile> {
         .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")))
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let now = SystemTime::now();
     files
         .into_iter()

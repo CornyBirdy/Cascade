@@ -118,7 +118,7 @@ impl Backdrop {
             DWMWCP_DONOTROUND
         };
         unsafe {
-            SetWindowCompositionAttribute(self.hwnd, &mut data);
+            let _ = SetWindowCompositionAttribute(self.hwnd, &mut data);
             let _ = DwmSetWindowAttribute(
                 self.hwnd,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
