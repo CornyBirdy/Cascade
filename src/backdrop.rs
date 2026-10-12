@@ -6,11 +6,13 @@
 //! window is inactive (unlike the newer system backdrops).
 
 use std::ffi::c_void;
+use std::sync::OnceLock;
 
-use windows::core::{w, Result, BOOL};
+use windows::core::{s, w, Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{GetStockObject, HBRUSH, BLACK_BRUSH};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -29,9 +31,18 @@ struct CompositionData {
     size: usize,
 }
 
-#[link(name = "user32")]
-extern "system" {
-    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut CompositionData) -> BOOL;
+type SetWindowCompositionAttribute = unsafe extern "system" fn(HWND, *mut CompositionData) -> BOOL;
+
+/// Undocumented (but what Explorer itself uses), so it isn't in the import
+/// library: look it up once at run time.
+fn set_composition() -> Option<SetWindowCompositionAttribute> {
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    let addr = *F.get_or_init(|| unsafe {
+        let user32 = GetModuleHandleW(w!("user32.dll")).ok()?;
+        GetProcAddress(user32, s!("SetWindowCompositionAttribute")).map(|f| f as usize)
+    });
+    // SAFETY: the address is user32's SetWindowCompositionAttribute.
+    addr.map(|a| unsafe { std::mem::transmute::<usize, SetWindowCompositionAttribute>(a) })
 }
 
 const WCA_ACCENT_POLICY: u32 = 19;
@@ -118,7 +129,9 @@ impl Backdrop {
             DWMWCP_DONOTROUND
         };
         unsafe {
-            let _ = SetWindowCompositionAttribute(self.hwnd, &mut data);
+            if let Some(f) = set_composition() {
+                let _ = f(self.hwnd, &mut data);
+            }
             let _ = DwmSetWindowAttribute(
                 self.hwnd,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
