@@ -287,6 +287,22 @@ pub fn path() -> PathBuf {
     dir().join("config.ini")
 }
 
+/// Config keys of the Start menu's sidebar shortcuts, in `launcher::PLACES` order.
+const PLACE_KEYS: [&str; 8] = [
+    "start_place_settings",
+    "start_place_explorer",
+    "start_place_downloads",
+    "start_place_documents",
+    "start_place_pictures",
+    "start_place_music",
+    "start_place_videos",
+    "start_place_network",
+];
+
+fn place_index(key: &str) -> Option<usize> {
+    PLACE_KEYS.iter().position(|k| *k == key)
+}
+
 fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
