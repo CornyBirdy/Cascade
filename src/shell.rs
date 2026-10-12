@@ -170,11 +170,34 @@ impl Drop for Tray {
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("Cascade");
 
-pub fn autostart_enabled() -> bool {
+fn run_key_set() -> bool {
     unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, None) == ERROR_SUCCESS }
 }
 
+pub fn autostart_enabled() -> bool {
+    run_key_set() || crate::helper::start_task_exists()
+}
+
+/// Turning it on registers a sign-in task (one permission prompt), which
+/// starts Cascade right at sign-in. If that's declined, the registry Run
+/// key (which Windows runs late, after the desktop loads) is used instead.
 pub fn set_autostart(on: bool) {
+    if on {
+        std::thread::spawn(|| {
+            let task = crate::helper::install_start_task();
+            set_run_key(!task);
+        });
+    } else {
+        set_run_key(false);
+        std::thread::spawn(|| {
+            if crate::helper::start_task_exists() {
+                crate::helper::remove_start_task();
+            }
+        });
+    }
+}
+
+fn set_run_key(on: bool) {
     unsafe {
         if on {
             let mut buf = [0u16; 1024];
@@ -352,6 +375,11 @@ pub fn is_start_menu(hwnd: HWND) -> bool {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\startmenuexperiencehost.exe"))
+}
+
+/// Closes the real Windows Start menu if it is in front (Esc).
+pub fn close_start_menu() {
+    send_keys(&[(VK_ESCAPE, false), (VK_ESCAPE, true)]);
 }
 
 /// Opens the real Windows Start menu (Ctrl+Esc).

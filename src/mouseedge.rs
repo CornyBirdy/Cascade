@@ -333,6 +333,25 @@ pub fn configure(cfg: &Config) {
     EDGE.with(|e| e.borrow_mut().rebuild(cfg));
 }
 
+/// Puts the strips back above every other topmost window. The taskbar
+/// raises itself when it appears; if it ends up over a strip, the pointer
+/// crossing under it is never seen, and the strip's later first sighting
+/// (the pointer rising out of the taskbar) is mistaken for a crossing and
+/// teleports it.
+pub fn raise() {
+    EDGE.with(|e| {
+        let Ok(e) = e.try_borrow() else { return };
+        if e.paused {
+            return;
+        }
+        for s in &e.strips {
+            unsafe {
+                let _ = SetWindowPos(s.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    });
+}
+
 /// Hides the strips (and ignores the pointer) while something is fullscreen.
 pub fn pause(on: bool) {
     EDGE.with(|e| {

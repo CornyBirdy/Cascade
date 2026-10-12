@@ -186,7 +186,8 @@ pub fn run() {
 
 // ----------------------------------------------------------- installing --
 
-fn task_xml(exe: &str) -> String {
+/// `args` are the program's arguments; `elevated` picks admin rights.
+fn task_xml(exe: &str, args: &str, desc: &str, elevated: bool) -> String {
     let user = format!(
         "{}\\{}",
         std::env::var("USERDOMAIN").unwrap_or_default(),
@@ -196,9 +197,9 @@ fn task_xml(exe: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Lets Cascade's Start menu open over apps run as administrator.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>{desc}</Description></RegistrationInfo>
   <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>{level}</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
@@ -212,11 +213,14 @@ fn task_xml(exe: &str) -> String {
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>5</Priority>
   </Settings>
-  <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>--key-helper</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>{args}</Arguments></Exec></Actions>
 </Task>
 "#,
         user = esc(&user),
         exe = esc(exe),
+        args = esc(args),
+        desc = esc(desc),
+        level = if elevated { "HighestAvailable" } else { "LeastPrivilege" },
     )
 }
 
@@ -273,21 +277,60 @@ pub fn stop() {
 pub fn install() {
     std::thread::spawn(|| {
         let Ok(exe) = std::env::current_exe() else { return };
-        let xml = task_xml(&exe.to_string_lossy());
-        let path = crate::config::dir().join("key-helper-task.xml");
-        let _ = std::fs::create_dir_all(crate::config::dir());
-        // Task Scheduler wants the file in UTF-16.
-        let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
-        if std::fs::write(&path, bytes).is_err() {
-            return;
-        }
-        let args = format!("/Create /F /TN \"{TASK}\" /XML \"{}\"", path.display());
-        if schtasks(&args, true) {
+        let xml = task_xml(
+            &exe.to_string_lossy(),
+            "--key-helper",
+            "Lets Cascade's Start menu open over apps run as administrator.",
+            true,
+        );
+        if create_task(TASK, &xml) {
             schtasks(&format!("/Run /TN \"{TASK}\""), false);
         }
-        let _ = std::fs::remove_file(path);
     });
+}
+
+/// Registers a scheduled task from `xml` (asks for permission once).
+fn create_task(name: &str, xml: &str) -> bool {
+    let path = crate::config::dir().join("task.xml");
+    let _ = std::fs::create_dir_all(crate::config::dir());
+    // Task Scheduler wants the file in UTF-16.
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+    if std::fs::write(&path, bytes).is_err() {
+        return false;
+    }
+    let ok = schtasks(&format!("/Create /F /TN \"{name}\" /XML \"{}\"", path.display()), true);
+    let _ = std::fs::remove_file(path);
+    ok
+}
+
+const START_TASK: &str = "Cascade start at sign-in";
+
+fn start_marker() -> std::path::PathBuf {
+    crate::config::dir().join("start-task")
+}
+
+/// Whether Cascade's sign-in task was set up (a marker file, so it's cheap).
+pub fn start_task_exists() -> bool {
+    start_marker().exists()
+}
+
+/// Starts Cascade from a sign-in task: it runs the moment you sign in,
+/// where the registry Run key waits until the desktop has finished loading.
+/// Returns false if it couldn't be set up (permission declined).
+pub fn install_start_task() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let xml = task_xml(&exe.to_string_lossy(), "", "Starts Cascade as soon as you sign in.", false);
+    let ok = create_task(START_TASK, &xml);
+    if ok {
+        let _ = std::fs::write(start_marker(), "");
+    }
+    ok
+}
+
+pub fn remove_start_task() {
+    schtasks(&format!("/Delete /F /TN \"{START_TASK}\""), true);
+    let _ = std::fs::remove_file(start_marker());
 }
 
 /// Stops the helper and removes its scheduled task (asks for permission).

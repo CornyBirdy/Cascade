@@ -806,6 +806,7 @@ impl App {
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.arm_stats();
         self.apply_edges(false);
+        mouseedge::raise();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
             (true, None) => {
@@ -975,9 +976,13 @@ impl App {
                         self.preview.hide();
                     }
                     mouseedge::pause(self.fullscreen);
+                    mouseedge::raise();
                     self.arm_stats();
                 }
-                ABN_POSCHANGED if hwnd == self.dock.hwnd => self.dock.reposition(),
+                ABN_POSCHANGED if hwnd == self.dock.hwnd => {
+                    self.dock.reposition();
+                    mouseedge::raise();
+                }
                 _ => {}
             }
             return Some(LRESULT(0));
@@ -1395,6 +1400,20 @@ impl App {
         // passing our hook (an elevated app such as Task Manager was in
         // front), or its Start button was clicked. Show ours instead; taking
         // the foreground closes theirs.
+        // Pressing Win to close our menu can let that press through to Windows
+        // as well (it opens theirs over ours): shut theirs rather than bring
+        // ours back, so the menu closes.
+        if event == EVENT_SYSTEM_FOREGROUND
+            && self.cfg.launcher
+            && self.cfg.launcher_win_key
+            && (self.launcher.open || self.launcher.closed_within(800))
+            && shell::is_start_menu(hwnd)
+        {
+            config::log("start: the Windows Start menu opened as Cascade's closed; closing it");
+            self.launcher.hide();
+            shell::close_start_menu();
+            return;
+        }
         if event == EVENT_SYSTEM_FOREGROUND
             && self.cfg.launcher
             && self.cfg.launcher_win_key
@@ -2350,6 +2369,7 @@ impl App {
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
         }
         if self.switcher.wants_frame() {
+            fast |= self.switcher.animate(dt);
             let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
         }
         if self.widgets.wants_frame() {
