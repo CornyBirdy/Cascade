@@ -37,6 +37,8 @@ hide_taskbar = true
 taskbar_style = full
 # center or left
 taskbar_align = center
+# with_apps = Start sits with the apps, right = Start alone on its own island at the far right.
+taskbar_start = with_apps
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
 taskbar_gap = 6
 # Gap from the taskbar's edge to its buttons, the same on all four sides.
@@ -171,6 +173,7 @@ pub struct Config {
     pub dock_magnify: f32,
     pub taskbar_style: String,
     pub taskbar_align: String,
+    pub taskbar_start: String,
     pub taskbar_gap: f32,
     pub taskbar_pad: f32,
     pub taskbar_tile: f32,
@@ -242,6 +245,7 @@ impl Default for Config {
             dock_magnify: 0.0,
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
+            taskbar_start: "with_apps".into(),
             taskbar_gap: 6.0,
             taskbar_pad: 6.0,
             taskbar_tile: 6.0,
@@ -431,6 +435,7 @@ impl Config {
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
+                "taskbar_start" if matches!(v, "with_apps" | "right") => c.taskbar_start = v.into(),
                 "taskbar_gap" => set_f(&mut c.taskbar_gap, 0.0, 32.0),
                 "taskbar_pad" => set_f(&mut c.taskbar_pad, 0.0, 24.0),
                 "taskbar_tile" => set_f(&mut c.taskbar_tile, 0.0, 16.0),
@@ -537,6 +542,7 @@ impl Config {
             "dock_magnify" => self.dock_magnify.to_string(),
             "taskbar_style" => self.taskbar_style.clone(),
             "taskbar_align" => self.taskbar_align.clone(),
+            "taskbar_start" => self.taskbar_start.clone(),
             "taskbar_gap" => self.taskbar_gap.to_string(),
             "taskbar_pad" => self.taskbar_pad.to_string(),
             "taskbar_tile" => self.taskbar_tile.to_string(),

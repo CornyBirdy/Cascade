@@ -235,6 +235,8 @@ pub struct Dock {
     pub shown: bool,
     /// What the app asked for (false while something is fullscreen).
     wanted: bool,
+    /// Start sits alone on its own island at the far right.
+    start_right: bool,
     /// The window is on screen (auto-hide hides it once faded out).
     window_visible: bool,
     autohide: bool,
@@ -395,15 +397,26 @@ fn clock_text() -> (String, String) {
     }
 }
 
-/// The Windows 11 logo: four flat, square-cornered panes in one blue.
+/// The Windows 11 logo: four equal, flat, square panes with a thin cross
+/// between them, in the blue that fades from light (top left) to deep (bottom
+/// right). `size` is the width of the whole mark.
 pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
-    let g = size * 0.07;
-    let q = size * 0.44;
-    let blue = Color(0.0, 0.47, 0.83, alpha);
+    let g = size * 0.055;
+    let q = (size - g) / 2.0;
+    let (light, deep) = ([0.40, 0.78, 1.0], [0.0, 0.42, 0.88]);
+    const STRIPS: usize = 8;
     for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
-        let x = if left { cx - q - g / 2.0 } else { cx + g / 2.0 };
-        let y = if top { cy - q - g / 2.0 } else { cy + g / 2.0 };
-        p.rrect(x, y, q, q, 0.0, blue);
+        let x = if left { cx - g / 2.0 - q } else { cx + g / 2.0 };
+        let y = if top { cy - g / 2.0 - q } else { cy + g / 2.0 };
+        // The fade runs diagonally; each pane is a few strips of it.
+        let u = if left { 0.0 } else { 1.0 };
+        for i in 0..STRIPS {
+            let v = (if top { 0.0 } else { 1.0 }) + (i as f32 + 0.5) / STRIPS as f32;
+            let t = ((u + v / 2.0) / 2.0).clamp(0.0, 1.0);
+            let c: [f32; 3] = std::array::from_fn(|k| light[k] + (deep[k] - light[k]) * t);
+            let (sy, sh) = (y + q * i as f32 / STRIPS as f32, q / STRIPS as f32 + 0.5);
+            p.rrect(x, sy, q, sh.min(y + q - sy), 0.0, Color(c[0], c[1], c[2], alpha));
+        }
     }
 }
 
@@ -433,6 +446,7 @@ impl Dock {
             enabled: false,
             shown: false,
             wanted: true,
+            start_right: false,
             window_visible: false,
             autohide: false,
             hide_taskbar: false,
@@ -569,6 +583,7 @@ impl Dock {
         self.hide_taskbar = cfg.hide_taskbar;
         self.full = cfg.taskbar_style != "floating";
         self.left = cfg.taskbar_align == "left";
+        self.start_right = cfg.taskbar_start == "right";
         self.margin = cfg.taskbar_gap;
         self.padding = cfg.taskbar_pad.clamp(0.0, 24.0);
         self.tile = cfg.taskbar_tile.clamp(0.0, 16.0);
@@ -820,12 +835,16 @@ impl Dock {
         let m = self.margin;
         let y1 = wh - m;
         let y0 = y1 - self.bar_h;
-        let (x0, x1) = (m, ww - m);
+        // Start alone at the far right gets its own island; everything else
+        // ends before it.
+        let start_w = b + 2.0 * pad;
+        let (x0, x1) = (m, if self.start_right { ww - m - start_w - ISLAND_GAP } else { ww - m });
 
         // Centre group: Start, search, apps.
         let slots: Vec<f32> = self.apps.iter().map(|a| (b + GAP) * a.presence.value.clamp(0.0, 1.0)).collect();
         let search_w = if self.show_search { SEARCH_W + GAP } else { 0.0 };
-        let group_w = b + GAP + search_w + slots.iter().sum::<f32>() - GAP;
+        let lead = if self.start_right { 0.0 } else { b + GAP };
+        let group_w = (lead + search_w + slots.iter().sum::<f32>() - GAP).max(0.0);
 
         // Left side widgets, from the bar's left end.
         let mut left = Vec::new();
@@ -844,8 +863,8 @@ impl Dock {
             (true, false, false) => left_end + ISLAND_GAP + pad,
         };
 
-        let start = Span { x: gx, w: b };
-        let mut x = gx + b + GAP;
+        let start = if self.start_right { Span { x: ww - m - pad - b, w: b } } else { Span { x: gx, w: b } };
+        let mut x = gx + lead;
         let search = self.show_search.then(|| {
             let s = Span { x, w: SEARCH_W };
             x += SEARCH_W + GAP;
@@ -886,19 +905,24 @@ impl Dock {
         right.reverse();
         let right_x = rx - pad;
 
-        let islands = if self.full {
+        let mut islands = if self.full {
             vec![(x0, x1)]
         } else {
             let mut v = Vec::new();
             if !left.is_empty() {
                 v.push((x0, left_end));
             }
-            v.push((gx - pad, gx + group_w + pad));
+            if group_w > 0.0 {
+                v.push((gx - pad, gx + group_w + pad));
+            }
             if right_x < x1 - pad - 1.0 {
                 v.push((right_x, x1));
             }
             v
         };
+        if self.start_right {
+            islands.push((ww - m - start_w, ww - m));
+        }
         Geo {
             y0,
             y1,
@@ -1216,7 +1240,7 @@ impl Dock {
             if let Some(c) = hover_bg(Hot::Start) {
                 p.rrect(g.start.x, by, g.start.w, b, 5.0, c);
             }
-            start_logo(&p, g.start.centre(), by + b / 2.0, self.icon * 0.85, 1.0);
+            start_logo(&p, g.start.centre(), by + b / 2.0, self.icon * 0.92, 1.0);
 
             // Search.
             if let Some(s) = g.search {
@@ -1458,6 +1482,10 @@ impl Dock {
     /// Screen x the Start menu should line up with (its left edge when the
     /// taskbar is left-aligned), or None when centred.
     pub fn start_anchor(&self) -> Option<i32> {
+        if self.start_right {
+            // The menu lines up with the right edge of the screen.
+            return Some(self.screen.right);
+        }
         self.left.then(|| self.screen.left + ((self.geo.start.x - 4.0).max(self.margin) * self.k) as i32)
     }
 }

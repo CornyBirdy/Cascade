@@ -150,6 +150,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "Where Start and your apps sit.",
                 Choice(&[("center", "Centre"), ("left", "Left")]),
             ),
+            row(
+                "taskbar_start",
+                "Start button",
+                "With your apps, or alone on its own island at the far right.",
+                Choice(&[("with_apps", "With the apps"), ("right", "Far right")]),
+            ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
                 "taskbar_tile",

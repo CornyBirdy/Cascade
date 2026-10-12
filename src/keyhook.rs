@@ -2,18 +2,21 @@
 //! and drives the Alt+Tab switcher. Win+anything (Win+E, Win+R, Win+Shift+S...)
 //! is left completely alone.
 //!
-//! When Win is released without another key in between, the release is
-//! swallowed and replaced by one batch of input: an unassigned "mask" key tap,
-//! then the Win release. To Windows that looks like a key combination, so it
-//! doesn't open its own Start menu. (Tapping the mask after the real release
-//! is too late, and tapping it before leaves the real release to open Start.)
+//! The Windows Start menu only opens when Win is released with no other key
+//! pressed since it went down. So as soon as Win goes down, one unassigned
+//! "mask" key tap is injected: to Windows that looks like a key combination
+//! and its own Start menu stays shut. The real Win release is never touched,
+//! so other programs that watch the keyboard (window-drag tools, games) always
+//! see the true state of the key and it can't get stuck.
+//!
 //! Alt+Tab works the same way: Tab is swallowed while Alt is held, and when
 //! Alt is released it is replaced by mask + release, so the app in front
 //! doesn't see a lone Alt and light up its menu bar.
 //!
-//! Swallowing a release risks leaving Windows thinking the key is still held,
-//! so: nothing is swallowed unless the replacement was accepted, and shortly
-//! afterwards the key state is checked and a release sent if it's still down.
+//! Alt+Tab swallows a release, which risks leaving Windows thinking Alt is
+//! still held, so: nothing is swallowed unless the replacement was accepted,
+//! and shortly afterwards the key state is checked and a release sent if it's
+//! still down.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
@@ -107,12 +110,9 @@ fn key(vk: u16, up: bool) -> INPUT {
 /// Releases a Win or Alt key that Windows still thinks is held, if there is one.
 pub fn fix_stuck() {
     let mut inputs = Vec::new();
-    for (vk, tracked) in [
-        (VK_LWIN.0, &WIN_DOWN),
-        (VK_RWIN.0, &WIN_DOWN),
-        (VK_LMENU.0, &ALT_DOWN),
-        (VK_RMENU.0, &ALT_DOWN),
-    ] {
+    for (vk, tracked) in
+        [(VK_LWIN.0, &WIN_DOWN), (VK_RWIN.0, &WIN_DOWN), (VK_LMENU.0, &ALT_DOWN), (VK_RMENU.0, &ALT_DOWN)]
+    {
         // Really held right now? Then it isn't stuck.
         if !tracked.load(Ordering::Relaxed) && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0 {
             inputs.push(key(vk, true));
@@ -128,6 +128,12 @@ pub fn fix_stuck() {
 unsafe fn masked_release(vk: u16) -> bool {
     let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
+}
+
+/// Taps the mask key (down and up as one batch).
+unsafe fn mask_tap() {
+    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];
+    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
 }
 
 fn track(flag: &AtomicBool, down: bool, up: bool) {
@@ -201,17 +207,14 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
                         WIN_DOWN.store(true, Ordering::Relaxed);
                         COMBO.store(false, Ordering::Relaxed);
+                        // Break the lone Win now, while it's held; the real
+                        // release then passes through untouched.
+                        mask_tap();
                     }
                 } else if is_win && up {
                     let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                     if was_down && !COMBO.load(Ordering::Relaxed) {
                         on_lone_win();
-                        // Refused (e.g. an admin window is in front): let the real
-                        // release through rather than risk a stuck key.
-                        if masked_release(vk) {
-                            request_check();
-                            return LRESULT(1);
-                        }
                     }
                 } else if down && WIN_DOWN.load(Ordering::Relaxed) {
                     COMBO.store(true, Ordering::Relaxed);
