@@ -229,7 +229,7 @@ pub fn run() -> Result<()> {
             lpfnWndProc: Some(wndproc),
             hInstance: instance,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hIcon: LoadIconW(Some(instance), PCWSTR(1 as *const u16)).unwrap_or_default(),
+            hIcon: LoadIconW(Some(instance), PCWSTR(std::ptr::without_provenance(1))).unwrap_or_default(),
             lpszClassName: w!("CascadeSettings"),
             ..Default::default()
         };
