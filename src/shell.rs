@@ -581,32 +581,11 @@ pub fn show_pin_menu(hwnd: HWND, pinned: bool) -> bool {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Power {
-    None,
     Lock,
     Sleep,
     SignOut,
     Restart,
     ShutDown,
-}
-
-pub fn show_power_menu(hwnd: HWND) -> Power {
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return Power::None };
-        let _ = AppendMenuW(menu, MF_STRING, 1, w!("Lock"));
-        let _ = AppendMenuW(menu, MF_STRING, 2, w!("Sleep"));
-        let _ = AppendMenuW(menu, MF_STRING, 3, w!("Sign out"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, 4, w!("Restart"));
-        let _ = AppendMenuW(menu, MF_STRING, 5, w!("Shut down"));
-        match track(hwnd, menu) {
-            1 => Power::Lock,
-            2 => Power::Sleep,
-            3 => Power::SignOut,
-            4 => Power::Restart,
-            5 => Power::ShutDown,
-            _ => Power::None,
-        }
-    }
 }
 
 pub fn power(action: Power) {
@@ -621,7 +600,6 @@ pub fn power(action: Power) {
             Power::SignOut => run("shutdown.exe", "/l"),
             Power::Restart => run("shutdown.exe", "/r /t 0"),
             Power::ShutDown => run("shutdown.exe", "/s /t 0"),
-            Power::None => {}
         }
     }
 }
