@@ -352,7 +352,7 @@ impl Systray {
         let lookup = |list: &Vec<(String, Option<u32>, bool)>| {
             list.iter().find(|(p, u, _)| *p == exe && u.is_none_or(|u| u == uid)).map(|e| e.2)
         };
-        if let Some(found) = self.settings.as_ref().and_then(&lookup) {
+        if let Some(found) = self.settings.as_ref().and_then(lookup) {
             return found;
         }
         // Not known yet (a new app): read the settings again.
