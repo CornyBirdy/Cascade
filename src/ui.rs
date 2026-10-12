@@ -44,6 +44,7 @@ use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
+use crate::mouseedge;
 use crate::switcher::Switcher;
 use crate::systray::{self, Flyout, Systray};
 use crate::sysmon::Sampler;
@@ -73,6 +74,7 @@ const TIMER_DOCK_HIDE: usize = 11;
 const TIMER_PREVIEW_SHOW: usize = 12;
 const TIMER_PREVIEW_HIDE: usize = 13;
 const TIMER_CLOCK: usize = 14;
+const TIMER_SCAN2: usize = 16;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -80,10 +82,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
-const EVENT_OBJECT_CREATE: u32 = 0x8000;
-const EVENT_OBJECT_DESTROY: u32 = 0x8001;
 const EVENT_OBJECT_SHOW: u32 = 0x8002;
-const EVENT_OBJECT_HIDE: u32 = 0x8003;
 const EVENT_OBJECT_CLOAKED: u32 = 0x8017;
 const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
 
@@ -221,6 +220,14 @@ struct App {
     stats_on: bool,
     widgets: Widgets,
     widgets_seen: bool,
+    /// Window changes come from the shell's own notifications (few) rather
+    /// than from every window event in the system (many).
+    shell_msg: u32,
+    shell_hooked: bool,
+    /// Watches Explorer alone, to catch it re-showing the taskbar we hid.
+    taskbar_hook: Option<HWINEVENTHOOK>,
+    /// The settings the pointer-matching strips were last built for.
+    edge_key: String,
     /// Whether the taskbar is being held in view for an open pop-up.
     dock_held: bool,
     /// When a click outside last closed the Start menu or tray flyout, so the
@@ -268,6 +275,7 @@ pub fn run() -> Result<()> {
         let launcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         msg::set_target(hwnd);
         backdrop::register(instance);
+        mouseedge::register(instance);
         // Blur panels: up to three taskbar islands, plus the launcher.
         let dock_backdrops = (0..3).filter_map(|_| Backdrop::create(instance).ok()).collect();
         let launcher_backdrop = Backdrop::create(instance)?;
@@ -643,6 +651,10 @@ impl App {
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             tray_rect: RECT::default(),
             outside_close: None,
+            shell_msg: unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) },
+            shell_hooked: false,
+            taskbar_hook: None,
+            edge_key: String::new(),
             sysmon: Sampler::new(),
             stats_on: false,
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
@@ -684,10 +696,16 @@ impl App {
         self.settings = None;
         self.visualizer.set(false);
         weather::stop();
-        for h in self.hooks.drain(..) {
+        for h in self.hooks.drain(..).chain(self.taskbar_hook.take()) {
             unsafe {
                 let _ = UnhookWinEvent(h);
             }
+        }
+        if self.shell_hooked {
+            unsafe {
+                let _ = DeregisterShellHookWindow(self.hwnd);
+            }
+            self.shell_hooked = false;
         }
         self.preview.hide();
         self.dock.shutdown();
@@ -745,6 +763,7 @@ impl App {
             shell::restore_taskbar();
             self.taskbar_hidden = false;
         }
+        self.hook_taskbar();
     }
 
     fn apply_dock(&mut self) {
@@ -756,7 +775,6 @@ impl App {
             let ranges = [
                 (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
                 (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
-                (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
                 (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
             ];
             for (lo, hi) in ranges {
@@ -772,6 +790,16 @@ impl App {
                 }
             }
         }
+        // Windows appearing and going: the shell tells us about top-level
+        // windows only.
+        if hooks_wanted && !self.shell_hooked {
+            self.shell_hooked = unsafe { RegisterShellHookWindow(self.hwnd) }.as_bool();
+        } else if !hooks_wanted && self.shell_hooked {
+            unsafe {
+                let _ = DeregisterShellHookWindow(self.hwnd);
+            }
+            self.shell_hooked = false;
+        }
         keyhook::configure(self.cfg.launcher && self.cfg.launcher_win_key, self.cfg.alt_tab);
         if !self.cfg.alt_tab {
             self.switcher.hide();
@@ -786,6 +814,7 @@ impl App {
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.arm_stats();
+        self.apply_edges(false);
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
             (true, None) => {
@@ -954,6 +983,7 @@ impl App {
                     if self.fullscreen {
                         self.preview.hide();
                     }
+                    mouseedge::pause(self.fullscreen);
                     self.arm_stats();
                 }
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => self.dock.reposition(),
@@ -969,12 +999,18 @@ impl App {
             if self.taskbar_hidden {
                 shell::hide_taskbar();
             }
+            self.hook_taskbar();
             self.dock.configure(&self.cfg, self.monitor, self.dpi);
+            return Some(LRESULT(0));
+        }
+        if m == self.shell_msg && m != 0 {
+            self.on_shell(wp.0 as u32, HWND(lp.0 as *mut _));
             return Some(LRESULT(0));
         }
         match m {
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 self.update_display();
+                self.apply_edges(true);
                 self.dock.configure(&self.cfg, self.monitor, self.dpi);
                 self.retarget();
                 return Some(LRESULT(0));
@@ -1361,6 +1397,9 @@ impl App {
             shell::reassert_taskbar_hidden();
             return;
         }
+        if event == EVENT_OBJECT_SHOW {
+            return; // only watched for the taskbar above
+        }
         // Windows opened its own Start menu: the Win key reached it without
         // passing our hook (an elevated app such as Task Manager was in
         // front), or its Start button was clicked. Show ours instead; taking
@@ -1389,13 +1428,69 @@ impl App {
                 self.dock.dirty = true;
                 !self.dock.tracks(hwnd)
             }
-            EVENT_OBJECT_DESTROY => self.dock.tracks(hwnd),
             _ => unsafe { GetAncestor(hwnd, GA_PARENT) == GetDesktopWindow() },
         };
         if rescan {
             unsafe {
                 SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 120, None);
             }
+        }
+    }
+
+    /// A top-level window was created or destroyed (the shell's notification).
+    fn on_shell(&mut self, code: u32, hwnd: HWND) {
+        const HSHELL_WINDOWCREATED: u32 = 1;
+        const HSHELL_WINDOWDESTROYED: u32 = 2;
+        if !self.cfg.dock {
+            return;
+        }
+        let dock = self.dock.hwnd;
+        unsafe {
+            match code {
+                // Many windows are created hidden and shown a moment later.
+                HSHELL_WINDOWCREATED => {
+                    SetTimer(Some(dock), TIMER_SCAN, 300, None);
+                    SetTimer(Some(dock), TIMER_SCAN2, 1500, None);
+                }
+                HSHELL_WINDOWDESTROYED if self.dock.tracks(hwnd) => {
+                    SetTimer(Some(dock), TIMER_SCAN, 120, None);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Watches Explorer's own windows, to hide the taskbar again if it shows
+    /// it. Scoped to one process, so it hears almost nothing.
+    fn hook_taskbar(&mut self) {
+        if let Some(h) = self.taskbar_hook.take() {
+            unsafe {
+                let _ = UnhookWinEvent(h);
+            }
+        }
+        if !self.taskbar_hidden {
+            return;
+        }
+        let Some(tray) = shell::explorer_tray() else { return };
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(tray, Some(&mut pid)) };
+        if pid == 0 {
+            return;
+        }
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        let h = unsafe { SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, None, Some(win_event), pid, 0, flags) };
+        if !h.is_invalid() {
+            self.taskbar_hook = Some(h);
+        }
+    }
+
+    /// (Re)builds the pointer-matching strips when their settings, or the
+    /// screens, changed.
+    fn apply_edges(&mut self, force: bool) {
+        let key = format!("{}|{}|{}", self.cfg.mouse_match, self.cfg.mouse_align, self.cfg.screen_inches);
+        if force || key != self.edge_key {
+            self.edge_key = key;
+            mouseedge::configure(&self.cfg);
         }
     }
 
@@ -1815,7 +1910,7 @@ impl App {
                 WM_TIMER => {
                     let _ = KillTimer(Some(dock), wp.0);
                     match wp.0 {
-                        TIMER_SCAN => {
+                        TIMER_SCAN | TIMER_SCAN2 => {
                             if self.systray.prune() {
                                 self.dock.dirty = true;
                             }

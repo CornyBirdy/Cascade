@@ -49,6 +49,12 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 
 **Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, whether to show the sidebar, recent files and the all-apps list, and the glass tint. Turn off the Win-key takeover or the whole Start menu there too.
 
+## Screens
+
+Turn on **Match the pointer across screens** (Settings → Screens) if you have monitors of different sizes. Windows lines screens up by pixels, so the pointer comes out at a different real-world height after crossing from, say, a 27" screen to a 24" one. Cascade reads each screen's real size (or you can type the diagonal sizes in inches, left to right, like `27,24`) and moves the pointer to where it would be if the screens were lined up the way they sit on your desk. Choose whether they line up at the top, middle or bottom, or leave it on Auto to read it from the Windows arrangement.
+
+It doesn't watch the mouse at all: thin invisible strips along the shared edges let every click through, and Windows only asks them anything while the pointer is inside one. There's nothing running in between, even with a very fast mouse. If the pointer is blocked where your screens really do overlap, drag them so they overlap more in Windows' display settings.
+
 ## Settings
 
 Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Starting Cascade again while it's already running also opens Settings.
@@ -80,7 +86,7 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Click-through | Global mouse hook + toggling | Per-pixel alpha: transparent pixels pass clicks |
 | Volume | Polled every 64 ms | `IAudioEndpointVolumeCallback` (pushed by Windows) |
 | Media | Polled | Media-session events |
-| Window list | Polled / hooks | WinEvent hooks + debounced rescan |
+| Window list | Polled / hooks | The shell's window notifications (top-level windows only) + debounced rescan |
 | Window previews | Captured bitmaps | DWM live thumbnails (composited by Windows) |
 | Wi-Fi / Bluetooth | Queried on demand | Radio state-change events |
 | Fullscreen | — | App-bar `ABN_FULLSCREENAPP` notification |
@@ -103,6 +109,8 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/dock.rs` | Taskbar: window tracking, layout, drawing, drag, launch/focus |
 | `src/backdrop.rs` | Acrylic blur behind the taskbar and Start menu |
 | `src/systray.rs` | Tray icons from apps, and the hidden-icons flyout |
+| `src/mouseedge.rs` | Pointer matching across screens of different sizes |
+| `src/usage.rs` | Cascade's own memory and CPU use, for Settings → About |
 | `src/helper.rs` | Optional admin helper for the Win key over admin apps |
 | `src/sysmon.rs` | CPU, memory, network, GPU and disk readings for the stats widgets |
 | `src/widgets.rs` | The widgets panel |

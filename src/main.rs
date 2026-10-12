@@ -16,6 +16,7 @@ mod icons;
 mod keyhook;
 mod launcher;
 mod media;
+mod mouseedge;
 mod mousehook;
 mod pomodoro;
 mod preview;
@@ -28,6 +29,7 @@ mod sysmon;
 mod systray;
 mod ui;
 mod update;
+mod usage;
 mod weather;
 mod widgets;
 

@@ -25,8 +25,8 @@ const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
 const CHOICE_W: f32 = 84.0;
 
-pub const SECTIONS: [&str; 8] =
-    ["General", "Notch", "Taskbar", "Start menu", "Widgets", "Focus & weather", "Updates", "About"];
+pub const SECTIONS: [&str; 9] =
+    ["General", "Notch", "Taskbar", "Start menu", "Widgets", "Screens", "Focus & weather", "Updates", "About"];
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -216,6 +216,27 @@ fn rows(section: usize) -> Vec<Row> {
             ),
         ],
         5 => vec![
+            row(
+                "mouse_match",
+                "Match the pointer across screens",
+                "Keeps the pointer's real-world height when it crosses between screens of different sizes.",
+                Toggle,
+            ),
+            row(
+                "mouse_align",
+                "Screens line up at the",
+                "Auto reads it from the Windows arrangement.",
+                Choice(&[("auto", "Auto"), ("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")]),
+            ),
+            row(
+                "screen_inches",
+                "Screen sizes",
+                "Diagonal inches, left to right (27,24). Empty = read from the screens.",
+                Text { secret: false },
+            ),
+            row("screens_info", "Detected", "", Note),
+        ],
+        6 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
             row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
@@ -227,13 +248,14 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("fahrenheit", "Use Fahrenheit", "Otherwise Celsius.", Toggle),
         ],
-        6 => vec![
+        7 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
         ],
         _ => vec![
-            row("about", "Cascade", "A tiny native notch, dock and launcher for Windows.", Note),
+            row("about", "Cascade", "A tiny native notch, taskbar and Start menu for Windows.", Note),
+            row("resources", "Resource use", "", Note),
             row("open_config", "Config file", "Every setting, as plain text.", Button("Open")),
             row("open_folder", "Data folder", "Config, pinned apps and logs.", Button("Open")),
         ],
@@ -709,6 +731,10 @@ impl Settings {
                     let text_w = cw - 330.0;
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
+                    } else if r.key == "screens_info" {
+                        crate::mouseedge::info()
+                    } else if r.key == "resources" {
+                        crate::usage::summary()
                     } else if r.key == "admin_helper" && get(r.key) == "true" {
                         // Live status, so it's clear whether it's working.
                         if crate::helper::running() {
