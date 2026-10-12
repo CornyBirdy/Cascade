@@ -28,6 +28,7 @@ use crate::msg;
 
 /// Set in the admin helper, which tells the main Cascade window instead.
 static IN_HELPER: AtomicBool = AtomicBool::new(false);
+static MAIN_SEEN: AtomicBool = AtomicBool::new(false);
 static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Sent to the admin helper's window to check the keys afterwards.
@@ -62,8 +63,12 @@ fn request_check() {
 /// the main app while it runs, and quits once Cascade has gone.
 fn handled_here() -> bool {
     if IN_HELPER.load(Ordering::Relaxed) {
+        // The helper starts at sign-in, possibly before Cascade does: only
+        // quit once Cascade has been seen and has gone again.
         let up = crate::helper::main_window().is_some();
-        if !up {
+        if up {
+            MAIN_SEEN.store(true, Ordering::Relaxed);
+        } else if MAIN_SEEN.load(Ordering::Relaxed) {
             unsafe { PostQuitMessage(0) };
         }
         up
