@@ -970,7 +970,7 @@ impl App {
                 ABN_FULLSCREENAPP => {
                     self.fullscreen = lp.0 != 0;
                     self.retarget();
-                    self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
+                    self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen) || self.launcher.open);
                     if self.fullscreen {
                         self.preview.hide();
                     }
@@ -1662,7 +1662,9 @@ impl App {
             return;
         }
         self.preview.hide();
-        // With auto-hide the taskbar comes up with the menu.
+        // The taskbar comes up with the menu, even if it was hidden for a
+        // fullscreen app or is set to auto-hide.
+        self.dock.set_visible(true);
         self.dock_held = true;
         self.dock.set_held(true);
         self.launcher.show(self.dpi, self.dock.pinned_apps());
@@ -2372,6 +2374,10 @@ impl App {
         let hold = self.launcher.open || self.flyout.open || self.widgets.open;
         if hold != self.dock_held {
             self.dock_held = hold;
+            if !hold {
+                // Back to hidden if a fullscreen app is still in front.
+                self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
+            }
             if self.dock.set_held(hold) {
                 unsafe {
                     SetTimer(Some(self.dock.hwnd), TIMER_DOCK_HIDE, 500, None);
