@@ -417,15 +417,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.open_settings());
             return LRESULT(0);
         }
-        msg::POWER_MENU => {
-            let action = shell::show_power_menu(hwnd);
-            with_app(|a| {
-                a.launcher_menu = false;
-                a.launcher.hide();
-            });
-            shell::power(action);
-            return LRESULT(0);
-        }
         msg::APPS => {
             let list = Box::from_raw(lp.0 as *mut Vec<AppEntry>);
             with_app(move |a| a.launcher.set_apps(*list));
@@ -1696,11 +1687,10 @@ impl App {
                 self.launcher.hide();
                 self.open_settings();
             }
-            launcher::Action::Power => unsafe {
-                // Menus run outside the app borrow, so post to ourselves.
-                self.launcher_menu = true;
-                let _ = PostMessageW(Some(self.launcher.hwnd), msg::POWER_MENU, WPARAM(0), LPARAM(0));
-            },
+            launcher::Action::Power(p) => {
+                self.launcher.hide();
+                shell::power(p);
+            }
         }
     }
 

@@ -23,14 +23,17 @@ use crate::config::Config;
 use crate::dock::{Dock, ACCENT};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::msg;
+use crate::shell::Power;
 use crate::spring::Spring;
 
-/// Sidebar width (when shown).
+/// Sidebar width (when shown), and the slim icon rail it shrinks to.
 const SIDE: f32 = 184.0;
+const RAIL: f32 = 52.0;
 const CELL_W: f32 = 90.0;
 const CELL_H: f32 = 84.0;
-/// All-apps column width.
+/// All-apps column width (wider when it has the menu to itself).
 const RIGHT_W: f32 = 220.0;
+const ALONE_W: f32 = 300.0;
 const PAD: f32 = 16.0;
 const TOP: f32 = 76.0;
 const LIST_ROW: f32 = 34.0;
@@ -64,6 +67,23 @@ struct RecentFile {
     path: String,
     ago: String,
 }
+
+/// The power menu's entries, in order (a rule is drawn before Restart).
+const POWER_ITEMS: [(&str, Power); 5] = [
+    ("Lock", Power::Lock),
+    ("Sleep", Power::Sleep),
+    ("Sign out", Power::SignOut),
+    ("Restart", Power::Restart),
+    ("Shut down", Power::ShutDown),
+];
+const POWER_ROW: f32 = 34.0;
+const POWER_W: f32 = 156.0;
+
+/// The "go to letter" grid: # then A to Z.
+const LETTERS: [char; 27] = [
+    '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V',
+    'W', 'X', 'Y', 'Z',
+];
 
 #[derive(Clone, Copy)]
 enum Row {
@@ -195,12 +215,25 @@ pub enum Target {
     Profile,
     Settings,
     Power,
+    /// A letter heading in All apps (opens the go-to-letter grid).
+    Header(char),
+    /// A letter in the grid.
+    Jump(char),
+    /// The grid's backdrop (a click closes it).
+    JumpBg,
+    PowerItem(usize),
+    /// The power menu's backdrop (a click closes it).
+    PowerBg,
+    /// The sidebar's expand / collapse button.
+    Burger,
+    /// The expanded sidebar's backdrop (swallows clicks).
+    SideBg,
 }
 
 pub enum Action {
     Launch(String),
     Settings,
-    Power,
+    Power(Power),
     Close,
 }
 
@@ -215,6 +248,7 @@ enum Glyph {
     Video,
     Globe,
     Power,
+    Menu,
 }
 
 /// Where the menu's parts sit, worked out from the settings.
@@ -228,8 +262,13 @@ struct Geo {
     mx: f32,
     cols: usize,
     prows: usize,
-    /// Left edge of the all-apps column.
+    /// Left edge of the all-apps column, and its width.
     rx: f32,
+    rw: f32,
+    /// Whether the middle column (pinned and / or recent) exists at all.
+    mid: bool,
+    /// The sidebar is a slim rail that expands over the menu.
+    compact: bool,
     show_side: bool,
     show_recent: bool,
     show_pinned: bool,
@@ -249,12 +288,20 @@ enum Position {
 impl Geo {
     fn new(cfg: &Config) -> Self {
         let show_side = cfg.start_show_sidebar;
-        let side = if show_side { SIDE } else { 0.0 };
+        let compact = show_side && cfg.start_sidebar_compact;
+        let side = match (show_side, compact) {
+            (false, _) => 0.0,
+            (true, true) => RAIL,
+            (true, false) => SIDE,
+        };
         let mx = side + 20.0;
         let cols = cfg.start_columns as usize;
-        let rx = mx + cols as f32 * CELL_W + 16.0;
+        let mid = cfg.start_show_pinned || cfg.start_show_recent;
         let show_all = cfg.start_show_all_apps;
-        let w = if show_all { rx + RIGHT_W + PAD } else { mx + cols as f32 * CELL_W + PAD + 4.0 };
+        // With no pinned apps or recent files the middle column goes away and
+        // All apps takes its place.
+        let (rx, rw) = if mid { (mx + cols as f32 * CELL_W + 16.0, RIGHT_W) } else { (mx, ALONE_W) };
+        let w = if show_all { rx + rw + PAD } else { mx + cols as f32 * CELL_W + PAD + 4.0 };
         Geo {
             w,
             h: cfg.start_height,
@@ -263,6 +310,9 @@ impl Geo {
             cols,
             prows: cfg.start_pinned_rows as usize,
             rx,
+            rw,
+            mid,
+            compact,
             show_side,
             show_recent: cfg.start_show_recent,
             show_pinned: cfg.start_show_pinned,
@@ -295,6 +345,20 @@ pub struct Launcher {
     results: Vec<usize>,
     selected: usize,
     scroll: f32,
+    /// Where the smooth scroll is heading.
+    scroll_target: f32,
+    /// Fades the scroll bar in while the list moves (1 = just scrolled).
+    bar: f32,
+    /// Rows slide in when the list opens or the search changes.
+    list_anim: Spring,
+    /// The expanded sidebar (compact mode).
+    side_open: bool,
+    side_anim: Spring,
+    /// The go-to-letter grid.
+    jump_open: bool,
+    jump: Spring,
+    power_open: bool,
+    power_anim: Spring,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -347,6 +411,15 @@ impl Launcher {
             results: Vec::new(),
             selected: 0,
             scroll: 0.0,
+            scroll_target: 0.0,
+            bar: 0.0,
+            list_anim: Spring::new(1.0, 170.0, 20.0),
+            side_open: false,
+            side_anim: Spring::new(0.0, 420.0, 34.0),
+            jump_open: false,
+            jump: Spring::new(0.0, 380.0, 32.0),
+            power_open: false,
+            power_anim: Spring::new(0.0, 480.0, 34.0),
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -368,7 +441,8 @@ impl Launcher {
         };
         let tint = ((cfg.start_opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
         self.backdrop.style(cfg.acrylic, tint, self.radius);
-        self.scroll = 0.0;
+        self.reset_scroll();
+        self.close_popups();
         self.dirty = true;
     }
 
@@ -413,7 +487,11 @@ impl Launcher {
         self.recent = load_recent(8);
         self.query.clear();
         self.filter();
-        self.scroll = 0.0;
+        self.reset_scroll();
+        self.close_popups();
+        self.side_anim.snap(0.0);
+        self.list_anim.snap(0.0);
+        self.list_anim.set(1.0);
         self.hovered = None;
         self.open = true;
         // Pick up newly installed apps now and then.
@@ -439,6 +517,7 @@ impl Launcher {
 
     pub fn hide(&mut self) {
         crate::mousehook::set_rect(0, None);
+        self.close_popups();
         if self.open {
             self.open = false;
             self.reveal.set(0.0);
@@ -453,7 +532,61 @@ impl Launcher {
         scored.sort_by_key(|(s, i)| (*s, *i));
         self.results = scored.into_iter().map(|(_, i)| i).collect();
         self.selected = 0;
+        self.reset_scroll();
+        // Results ripple in again.
+        self.list_anim.snap(0.0);
+        self.list_anim.set(1.0);
+    }
+
+    fn reset_scroll(&mut self) {
         self.scroll = 0.0;
+        self.scroll_target = 0.0;
+    }
+
+    /// Closes the side panel, the letter grid and the power menu.
+    fn close_popups(&mut self) {
+        self.side_open = false;
+        self.jump_open = false;
+        self.power_open = false;
+        self.side_anim.set(0.0);
+        self.jump.set(0.0);
+        self.power_anim.set(0.0);
+    }
+
+    fn open_jump(&mut self, on: bool) {
+        self.jump_open = on;
+        self.jump.set(if on { 1.0 } else { 0.0 });
+        self.dirty = true;
+    }
+
+    fn open_power(&mut self, on: bool) {
+        self.power_open = on;
+        self.power_anim.set(if on { 1.0 } else { 0.0 });
+        self.dirty = true;
+    }
+
+    fn open_side(&mut self, on: bool) {
+        self.side_open = on;
+        self.side_anim.set(if on { 1.0 } else { 0.0 });
+        self.dirty = true;
+    }
+
+    /// Scrolls the list so a letter's heading is at the top.
+    fn jump_to(&mut self, letter: char) {
+        if let Some(i) = self.rows.iter().position(|r| matches!(r, Row::Letter(l) if *l == letter)) {
+            self.set_scroll(i as f32 * LIST_ROW);
+        }
+    }
+
+    /// Smoothly scrolls to `y` (clamped to the list).
+    fn set_scroll(&mut self, y: f32) {
+        let (top, bottom) = self.list_area();
+        let rows =
+            if self.searching() { self.results.len() as f32 * RESULT_ROW } else { self.rows.len() as f32 * LIST_ROW };
+        let max = (rows - (bottom - top)).max(0.0);
+        self.scroll_target = y.clamp(0.0, max);
+        self.bar = 1.0;
+        self.dirty = true;
     }
 
     fn searching(&self) -> bool {
@@ -472,6 +605,7 @@ impl Launcher {
 
     pub fn on_char(&mut self, c: char) {
         if !c.is_control() {
+            self.close_popups();
             self.query.push(c);
             self.filter();
             self.dirty = true;
@@ -486,6 +620,9 @@ impl Launcher {
         const UP: u16 = 0x26;
         const DOWN: u16 = 0x28;
         match vk {
+            ESC if self.power_open => self.open_power(false),
+            ESC if self.jump_open => self.open_jump(false),
+            ESC if self.side_open => self.open_side(false),
             ESC if self.searching() => {
                 self.query.clear();
                 self.filter();
@@ -515,10 +652,10 @@ impl Launcher {
         let (top, bottom) = self.list_area();
         let y = self.selected as f32 * RESULT_ROW;
         let view = bottom - top;
-        if y < self.scroll {
-            self.scroll = y;
-        } else if y + RESULT_ROW > self.scroll + view {
-            self.scroll = y + RESULT_ROW - view;
+        if y < self.scroll_target {
+            self.set_scroll(y);
+        } else if y + RESULT_ROW > self.scroll_target + view {
+            self.set_scroll(y + RESULT_ROW - view);
         }
     }
 
@@ -542,6 +679,10 @@ impl Launcher {
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
         }
+        // The expanded sidebar folds away when the pointer leaves it.
+        if self.side_open && x as f32 / self.k > SIDE + 4.0 {
+            self.open_side(false);
+        }
         let h = self.hit(x, y);
         if h != self.hovered {
             self.hovered = h;
@@ -552,6 +693,9 @@ impl Launcher {
     pub fn on_leave(&mut self) {
         self.tracking = false;
         self.hovered = None;
+        if self.side_open {
+            self.open_side(false);
+        }
         self.dirty = true;
     }
 
@@ -560,24 +704,54 @@ impl Launcher {
     }
 
     pub fn on_click(&mut self, x: i32, y: i32) -> Option<Action> {
-        match self.hit(x, y)? {
+        let t = self.hit(x, y)?;
+        // Anything but the controls of an open popup closes it.
+        if self.jump_open && !matches!(t, Target::Jump(_) | Target::JumpBg | Target::Header(_)) {
+            self.open_jump(false);
+        }
+        if !matches!(t, Target::PowerItem(_) | Target::Power) && self.power_open {
+            self.open_power(false);
+        }
+        if matches!(t, Target::Place(_) | Target::Settings | Target::Profile) {
+            self.open_side(false);
+        }
+        match t {
+            Target::Header(_) => {
+                self.open_jump(!self.jump_open);
+                None
+            }
+            Target::Jump(l) => {
+                self.jump_to(l);
+                self.open_jump(false);
+                None
+            }
+            Target::JumpBg | Target::PowerBg | Target::SideBg => None,
+            Target::Burger => {
+                self.open_side(!self.side_open);
+                None
+            }
+            Target::PowerItem(i) => {
+                self.open_power(false);
+                Some(Action::Power(POWER_ITEMS[i].1))
+            }
+            Target::Power => {
+                self.open_power(!self.power_open);
+                None
+            }
             Target::Pinned(i) => self.pinned.get(i).map(|p| self.launch(p.0.clone())),
             Target::App(i) => self.apps.get(i).map(|a| self.launch(a.target.clone())),
             Target::Recent(i) => self.recent.get(i).map(|r| Action::Launch(r.path.clone())),
             Target::Place(i) => Some(Action::Launch(PLACES[i].1.to_string())),
             Target::Profile => Some(Action::Launch("ms-settings:yourinfo".into())),
             Target::Settings => Some(Action::Settings),
-            Target::Power => Some(Action::Power),
         }
     }
 
     pub fn on_wheel(&mut self, delta: i16) {
-        let (top, bottom) = self.list_area();
-        let rows =
-            if self.searching() { self.results.len() as f32 * RESULT_ROW } else { self.rows.len() as f32 * LIST_ROW };
-        let max = (rows - (bottom - top)).max(0.0);
-        self.scroll = (self.scroll - delta as f32 / 120.0 * LIST_ROW * 3.0).clamp(0.0, max);
-        self.dirty = true;
+        if self.jump_open || self.power_open {
+            return;
+        }
+        self.set_scroll(self.scroll_target - delta as f32 / 120.0 * LIST_ROW * 3.0);
     }
 
     // ------------------------------------------------------------- frames --
@@ -588,11 +762,36 @@ impl Launcher {
     }
 
     pub fn wants_frame(&self) -> bool {
-        self.window_visible && (self.dirty || !self.reveal.settled())
+        self.window_visible
+            && (self.dirty
+                || !self.reveal.settled()
+                || !self.side_anim.settled()
+                || !self.jump.settled()
+                || !self.power_anim.settled()
+                || !self.list_anim.settled()
+                || self.scroll != self.scroll_target
+                || self.bar > 0.0)
     }
 
     pub fn step(&mut self, dt: f32) -> bool {
-        self.reveal.step(dt)
+        let mut moving = self.reveal.step(dt);
+        for s in [&mut self.side_anim, &mut self.jump, &mut self.power_anim, &mut self.list_anim] {
+            moving |= s.step(dt);
+        }
+        // Scrolling eases toward its target instead of jumping.
+        let d = self.scroll_target - self.scroll;
+        if d.abs() > 0.4 {
+            self.scroll += d * (1.0 - (-dt * 16.0).exp());
+            moving = true;
+        } else if d != 0.0 {
+            self.scroll = self.scroll_target;
+            moving = true;
+        }
+        if self.bar > 0.0 {
+            self.bar = (self.bar - dt * 0.8).max(0.0);
+            moving = true;
+        }
+        moving
     }
 
     /// Draws the launcher above `bottom` (screen px) on `monitor`: centred,
@@ -699,55 +898,6 @@ impl Launcher {
             }
             p.stroke_rrect(0.5, 0.5, g.w - 1.0, g.h - 1.0, r, Color::white(0.10), 1.0);
 
-            if g.show_side {
-                // Sidebar: profile, places, Cascade settings and power.
-                let user = std::env::var("USERNAME").unwrap_or_default();
-                let (px, py) = (10.0, 14.0);
-                if g.show_profile {
-                    if self.hovered == Some(Target::Profile) {
-                        p.rrect(px, py, g.side - 20.0, 44.0, 6.0, Color::white(0.07));
-                    }
-                    p.circle(px + 22.0, py + 22.0, 15.0, ACCENT);
-                    let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                    p.text(&initial, &f.label, px + 7.0, py + 7.0, 30.0, 30.0, Align::Center, Color::white(1.0));
-                    p.text(&user, &f.title, px + 44.0, py, g.side - 64.0, 44.0, Align::Left, Color::white(0.95));
-                    self.hits.push((Target::Profile, px, py, g.side - 20.0, 44.0));
-                }
-
-                let side_item = |hits: &mut Vec<_>, t: Target, label: &str, glyph: Glyph, y: f32| {
-                    if self.hovered == Some(t) {
-                        p.rrect(10.0, y, g.side - 20.0, SIDE_ROW - 4.0, 5.0, Color::white(0.07));
-                    }
-                    draw_glyph(&p, glyph, 32.0, y + (SIDE_ROW - 4.0) / 2.0, Color::white(0.88));
-                    p.text(label, &f.body, 54.0, y, g.side - 64.0, SIDE_ROW - 4.0, Align::Left, Color::white(0.9));
-                    hits.push((t, 10.0, y, g.side - 20.0, SIDE_ROW - 4.0));
-                };
-                let shown = PLACES.iter().enumerate().filter(|(i, _)| g.places[*i]);
-                for (slot, (i, (label, _, glyph))) in shown.enumerate() {
-                    let top = if g.show_profile { TOP } else { py };
-                    side_item(&mut self.hits, Target::Place(i), label, *glyph, top + slot as f32 * SIDE_ROW);
-                }
-                let rule_y = if g.show_cascade { g.h - PAD - SIDE_ROW * 2.0 - 6.0 } else { g.h - PAD - SIDE_ROW - 6.0 };
-                p.line(18.0, rule_y, g.side - 18.0, rule_y, Color::white(0.08), 1.0);
-                if g.show_cascade {
-                    side_item(&mut self.hits, Target::Settings, "Cascade", Glyph::Gear, g.h - PAD - SIDE_ROW * 2.0);
-                }
-                side_item(&mut self.hits, Target::Power, "Power", Glyph::Power, g.h - PAD - SIDE_ROW);
-            } else {
-                // No sidebar: just Cascade settings and power, bottom left.
-                let buttons = [(Target::Settings, Glyph::Gear), (Target::Power, Glyph::Power)];
-                let shown = buttons.iter().filter(|(t, _)| g.show_cascade || *t != Target::Settings);
-                for (n, &(t, glyph)) in shown.enumerate() {
-                    let cx = g.mx + 14.0 + n as f32 * 40.0;
-                    let cy = g.h - PAD - 16.0;
-                    if self.hovered == Some(t) {
-                        p.circle(cx, cy, 16.0, Color::white(0.10));
-                    }
-                    draw_glyph(&p, glyph, cx, cy, Color::white(0.88));
-                    self.hits.push((t, cx - 16.0, cy - 16.0, 32.0, 32.0));
-                }
-            }
-
             // Search box across the two right-hand columns.
             let (sx, sw, sh) = (g.mx, g.w - PAD - g.mx, 38.0);
             p.rrect(sx, 18.0, sw, sh, sh / 2.0, Color::white(0.07));
@@ -763,22 +913,47 @@ impl Launcher {
                 p.line(caret, 28.0, caret, 46.0, Color::white(0.8), 1.2);
             }
 
+            // Rows ease in one after another when the list opens or changes.
+            let ripple = self.list_anim.value;
+            let ease = |n: usize| {
+                let t = (ripple * 1.9 - n.min(10) as f32 * 0.09).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            // Scroll bar, visible only while the list is moving.
+            let bar_alpha = (self.bar * 2.0).min(1.0) * 0.3;
+            let draw_bar = |total: f32, x: f32| {
+                let view = list_bottom - top;
+                if bar_alpha > 0.01 && total > view {
+                    let bh = (view * view / total).max(24.0);
+                    let by = top + self.scroll / (total - view) * (view - bh);
+                    p.rrect(x, by, 3.0, bh, 1.5, Color::white(bar_alpha));
+                }
+            };
+
             if searching {
                 p.text("Best matches", &f.label, g.mx + 4.0, TOP, 300.0, 22.0, Align::Left, Color::white(0.9));
                 p.clip(g.mx - 6.0, top, g.w - PAD - g.mx + 6.0, list_bottom - top);
-                for (&(row, item), icon) in visible.iter().zip(&row_icons) {
+                for (vi, (&(row, item), icon)) in visible.iter().zip(&row_icons).enumerate() {
                     let Row::App(i) = item else { continue };
-                    let y = top + row as f32 * RESULT_ROW - self.scroll;
+                    let e = ease(vi);
+                    let y = top + row as f32 * RESULT_ROW - self.scroll + (1.0 - e) * 14.0;
                     let t = Target::App(i);
                     let selected = row == self.selected;
                     if self.hovered == Some(t) || selected {
                         let a = if selected { 0.10 } else { 0.06 };
-                        p.rrect(g.mx - 6.0, y + 2.0, g.w - PAD - g.mx + 6.0, RESULT_ROW - 4.0, 6.0, Color::white(a));
+                        p.rrect(
+                            g.mx - 6.0,
+                            y + 2.0,
+                            g.w - PAD - g.mx + 6.0,
+                            RESULT_ROW - 4.0,
+                            6.0,
+                            Color::white(a * e),
+                        );
                     }
                     if selected {
-                        p.rrect(g.mx - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, ACCENT);
+                        p.rrect(g.mx - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, ACCENT.alpha(e));
                     }
-                    draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0);
+                    draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0, e);
                     let name = &self.apps[i].name;
                     p.text(
                         name,
@@ -788,7 +963,7 @@ impl Launcher {
                         g.w - g.mx - 90.0,
                         RESULT_ROW,
                         Align::Left,
-                        Color::white(0.95),
+                        Color::white(0.95 * e),
                     );
                     let (vy0, vy1) = (y.max(top), (y + RESULT_ROW).min(list_bottom));
                     if vy1 > vy0 {
@@ -804,10 +979,11 @@ impl Launcher {
                         g.w - g.mx - PAD,
                         30.0,
                         Align::Left,
-                        Color::white(0.5),
+                        Color::white(0.5 * ease(0)),
                     );
                 }
                 p.unclip();
+                draw_bar(self.results.len() as f32 * RESULT_ROW, g.w - 8.0);
             } else {
                 // Pinned.
                 let grid_y = TOP + 28.0;
@@ -820,7 +996,7 @@ impl Launcher {
                         if self.hovered == Some(t) {
                             p.rrect(x + 2.0, y, CELL_W - 4.0, CELL_H - 4.0, 6.0, Color::white(0.07));
                         }
-                        draw_icon(&p, icon.as_ref(), x + CELL_W / 2.0 - 16.0, y + 12.0, 32.0);
+                        draw_icon(&p, icon.as_ref(), x + CELL_W / 2.0 - 16.0, y + 12.0, 32.0, 1.0);
                         p.text(
                             name,
                             &f.small,
@@ -858,7 +1034,7 @@ impl Launcher {
                         if self.hovered == Some(t) {
                             p.rrect(g.mx, y, w, RECENT_ROW - 4.0, 6.0, Color::white(0.07));
                         }
-                        draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + 7.0, 28.0);
+                        draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + 7.0, 28.0, 1.0);
                         p.text(
                             &file.name,
                             &f.body,
@@ -889,23 +1065,43 @@ impl Launcher {
 
                 if g.show_all {
                     // All apps, A to Z.
-                    let rw = g.w - PAD - g.rx;
-                    p.line(g.rx - 8.0, TOP, g.rx - 8.0, g.h - PAD, Color::white(0.06), 1.0);
+                    let rw = g.rw;
+                    let mark = self.hits.len();
+                    if g.mid {
+                        p.line(g.rx - 8.0, TOP, g.rx - 8.0, g.h - PAD, Color::white(0.06), 1.0);
+                    }
                     p.text("All apps", &f.label, g.rx + 4.0, TOP, rw, 22.0, Align::Left, Color::white(0.9));
                     p.clip(g.rx - 4.0, top, rw + 4.0, list_bottom - top);
-                    for (&(row, item), icon) in visible.iter().zip(&row_icons) {
-                        let y = top + row as f32 * LIST_ROW - self.scroll;
+                    for (vi, (&(row, item), icon)) in visible.iter().zip(&row_icons).enumerate() {
+                        let e = ease(vi);
+                        let y = top + row as f32 * LIST_ROW - self.scroll + (1.0 - e) * 12.0;
                         match item {
                             Row::Letter(l) => {
                                 let s = l.to_string();
-                                p.text(&s, &f.label, g.rx + 8.0, y + 6.0, rw, LIST_ROW - 6.0, Align::Left, ACCENT);
+                                if self.hovered == Some(Target::Header(l)) && !self.jump_open {
+                                    p.rrect(g.rx - 4.0, y + 1.0, rw + 4.0, LIST_ROW - 2.0, 5.0, Color::white(0.05 * e));
+                                }
+                                p.text(
+                                    &s,
+                                    &f.label,
+                                    g.rx + 8.0,
+                                    y + 6.0,
+                                    rw,
+                                    LIST_ROW - 6.0,
+                                    Align::Left,
+                                    ACCENT.alpha(e),
+                                );
+                                let (vy0, vy1) = (y.max(top), (y + LIST_ROW).min(list_bottom));
+                                if vy1 > vy0 {
+                                    self.hits.push((Target::Header(l), g.rx - 4.0, vy0, rw + 4.0, vy1 - vy0));
+                                }
                             }
                             Row::App(i) => {
                                 let t = Target::App(i);
                                 if self.hovered == Some(t) {
-                                    p.rrect(g.rx - 4.0, y + 1.0, rw + 4.0, LIST_ROW - 2.0, 5.0, Color::white(0.07));
+                                    p.rrect(g.rx - 4.0, y + 1.0, rw + 4.0, LIST_ROW - 2.0, 5.0, Color::white(0.07 * e));
                                 }
-                                draw_icon(&p, icon.as_ref(), g.rx + 6.0, y + (LIST_ROW - 22.0) / 2.0, 22.0);
+                                draw_icon(&p, icon.as_ref(), g.rx + 6.0, y + (LIST_ROW - 22.0) / 2.0, 22.0, e);
                                 let name = &self.apps[i].name;
                                 p.text(
                                     name,
@@ -915,7 +1111,7 @@ impl Launcher {
                                     rw - 40.0,
                                     LIST_ROW,
                                     Align::Left,
-                                    Color::white(0.92),
+                                    Color::white(0.92 * e),
                                 );
                                 let (vy0, vy1) = (y.max(top), (y + LIST_ROW).min(list_bottom));
                                 if vy1 > vy0 {
@@ -928,7 +1124,182 @@ impl Launcher {
                         p.text("Loading\u{2026}", &f.body, g.rx + 8.0, top, rw, 30.0, Align::Left, Color::white(0.5));
                     }
                     p.unclip();
+                    draw_bar(self.rows.len() as f32 * LIST_ROW, g.w - 8.0);
+
+                    // The go-to-letter grid, over the list.
+                    let ja = self.jump.value.clamp(0.0, 1.0);
+                    if ja > 0.01 {
+                        self.hits.truncate(mark);
+                        let (ox, oy, ow, oh) = (g.rx - 6.0, top - 4.0, rw + 10.0, list_bottom - top + 4.0);
+                        p.rrect(ox, oy, ow, oh, 10.0, Color(0.11, 0.11, 0.12, 0.97 * ja));
+                        p.stroke_rrect(ox + 0.5, oy + 0.5, ow - 1.0, oh - 1.0, 10.0, Color::white(0.08 * ja), 1.0);
+                        let (cw, ch) = ((ow - 16.0) / 4.0, ((oh - 16.0) / 7.0).min(54.0));
+                        let mut cells = Vec::new();
+                        for (n, &l) in LETTERS.iter().enumerate() {
+                            let has = self.rows.iter().any(|r| matches!(r, Row::Letter(x) if *x == l));
+                            let t = (ja * 1.8 - n as f32 * 0.03).clamp(0.0, 1.0);
+                            let e = t * t * (3.0 - 2.0 * t);
+                            let (cx, cy) =
+                                (ox + 8.0 + (n % 4) as f32 * cw, oy + 8.0 + (n / 4) as f32 * ch + (1.0 - e) * 10.0);
+                            let hot = has && self.hovered == Some(Target::Jump(l));
+                            if has {
+                                p.rrect(
+                                    cx + 3.0,
+                                    cy + 3.0,
+                                    cw - 6.0,
+                                    ch - 6.0,
+                                    8.0,
+                                    Color::white((if hot { 0.17 } else { 0.07 }) * e),
+                                );
+                            }
+                            let col = if has { ACCENT.alpha(e) } else { Color::white(0.2 * e) };
+                            p.text(&l.to_string(), &f.title, cx, cy, cw, ch, Align::Center, col);
+                            if has && self.jump_open {
+                                cells.push((Target::Jump(l), cx + 3.0, cy + 3.0, cw - 6.0, ch - 6.0));
+                            }
+                        }
+                        self.hits.extend(cells);
+                        if self.jump_open {
+                            self.hits.push((Target::JumpBg, ox, oy, ow, oh));
+                        }
+                    }
                 }
+            }
+
+            // Sidebar, drawn last so it can open over the menu. Its hit areas
+            // go first in the list so they win over what's underneath.
+            let mut side_hits: Vec<(Target, f32, f32, f32, f32)> = Vec::new();
+            let mut power_pos = (g.mx, g.h - PAD - 36.0);
+            if g.show_side {
+                let ea = if g.compact { self.side_anim.value.clamp(0.0, 1.0) } else { 1.0 };
+                let sw = if g.compact { RAIL + (SIDE - RAIL) * ea } else { SIDE };
+                // Labels fade in once the panel is mostly open.
+                let la = if g.compact { ((ea - 0.4) / 0.6).clamp(0.0, 1.0) } else { 1.0 };
+                let iw = sw - 20.0;
+                let ih = SIDE_ROW - 4.0;
+                if g.compact && ea > 0.01 {
+                    p.clip(0.0, 0.0, sw, g.h);
+                    p.rrect(0.0, 0.0, sw + r * 2.0, g.h, r, Color(0.085, 0.085, 0.095, 0.97 * (ea * 2.0).min(1.0)));
+                    p.unclip();
+                    p.line(sw - 0.5, 14.0, sw - 0.5, g.h - 14.0, Color::white(0.06 * ea), 1.0);
+                }
+                p.clip(0.0, 0.0, sw, g.h);
+                let user = std::env::var("USERNAME").unwrap_or_default();
+                let mut py = 14.0;
+                if g.compact {
+                    py = 12.0;
+                    if self.hovered == Some(Target::Burger) {
+                        p.rrect(10.0, py, iw, ih, 5.0, Color::white(0.07));
+                    }
+                    draw_glyph(&p, Glyph::Menu, 26.0, py + ih / 2.0, Color::white(0.88));
+                    side_hits.push((Target::Burger, 10.0, py, iw, ih));
+                    py += SIDE_ROW;
+                }
+                let mut top = py;
+                if g.show_profile {
+                    let ph = if g.compact { 40.0 } else { 44.0 };
+                    if self.hovered == Some(Target::Profile) {
+                        p.rrect(10.0, py, iw, ph, 6.0, Color::white(0.07));
+                    }
+                    p.circle(26.0, py + ph / 2.0, 14.0, ACCENT);
+                    let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                    p.text(
+                        &initial,
+                        &f.label,
+                        12.0,
+                        py + ph / 2.0 - 15.0,
+                        28.0,
+                        30.0,
+                        Align::Center,
+                        Color::white(1.0),
+                    );
+                    if la > 0.02 {
+                        p.text(&user, &f.title, 48.0, py, sw - 60.0, ph, Align::Left, Color::white(0.95 * la));
+                    }
+                    side_hits.push((Target::Profile, 10.0, py, iw, ph));
+                    top = if g.compact { py + ph + 6.0 } else { TOP };
+                }
+
+                let side_item = |hits: &mut Vec<_>, t: Target, label: &str, glyph: Glyph, y: f32| {
+                    if self.hovered == Some(t) {
+                        p.rrect(10.0, y, iw, ih, 5.0, Color::white(0.07));
+                    }
+                    draw_glyph(&p, glyph, 26.0, y + ih / 2.0, Color::white(0.88));
+                    if la > 0.02 {
+                        p.text(label, &f.body, 48.0, y, sw - 58.0, ih, Align::Left, Color::white(0.9 * la));
+                    }
+                    hits.push((t, 10.0, y, iw, ih));
+                };
+                let shown = PLACES.iter().enumerate().filter(|(i, _)| g.places[*i]);
+                for (slot, (i, (label, _, glyph))) in shown.enumerate() {
+                    side_item(&mut side_hits, Target::Place(i), label, *glyph, top + slot as f32 * SIDE_ROW);
+                }
+                let rule_y = if g.show_cascade { g.h - PAD - SIDE_ROW * 2.0 - 6.0 } else { g.h - PAD - SIDE_ROW - 6.0 };
+                p.line(18.0, rule_y, sw - 18.0, rule_y, Color::white(0.08), 1.0);
+                if g.show_cascade {
+                    side_item(&mut side_hits, Target::Settings, "Cascade", Glyph::Gear, g.h - PAD - SIDE_ROW * 2.0);
+                }
+                side_item(&mut side_hits, Target::Power, "Power", Glyph::Power, g.h - PAD - SIDE_ROW);
+                p.unclip();
+                if g.compact && ea > 0.01 {
+                    side_hits.push((Target::SideBg, 0.0, 0.0, sw, g.h));
+                }
+                power_pos = (10.0, g.h - PAD - SIDE_ROW - 4.0);
+            } else {
+                // No sidebar: just Cascade settings and power, bottom left.
+                let buttons = [(Target::Settings, Glyph::Gear), (Target::Power, Glyph::Power)];
+                let shown = buttons.iter().filter(|(t, _)| g.show_cascade || *t != Target::Settings);
+                for (n, &(t, glyph)) in shown.enumerate() {
+                    let cx = g.mx + 14.0 + n as f32 * 40.0;
+                    let cy = g.h - PAD - 16.0;
+                    if self.hovered == Some(t) {
+                        p.circle(cx, cy, 16.0, Color::white(0.10));
+                    }
+                    draw_glyph(&p, glyph, cx, cy, Color::white(0.88));
+                    side_hits.push((t, cx - 16.0, cy - 16.0, 32.0, 32.0));
+                }
+            }
+            self.hits.splice(0..0, side_hits);
+
+            // The power menu, drawn by Cascade instead of a Windows popup.
+            let pa = self.power_anim.value.clamp(0.0, 1.0);
+            if pa > 0.01 {
+                let mut pop: Vec<(Target, f32, f32, f32, f32)> = Vec::new();
+                let h = POWER_ITEMS.len() as f32 * POWER_ROW + 8.0 + 12.0;
+                let (x0, y1) = power_pos;
+                let y0 = y1 - h + (1.0 - pa) * 10.0;
+                p.rrect(x0 - 1.0, y0 - 1.0, POWER_W + 2.0, h + 2.0, 11.0, Color(0.0, 0.0, 0.0, 0.25 * pa));
+                p.rrect(x0, y0, POWER_W, h, 10.0, Color(0.13, 0.13, 0.14, 0.98 * pa));
+                p.stroke_rrect(x0 + 0.5, y0 + 0.5, POWER_W - 1.0, h - 1.0, 10.0, Color::white(0.12 * pa), 1.0);
+                let mut y = y0 + 6.0;
+                for (i, (label, _)) in POWER_ITEMS.iter().enumerate() {
+                    if i == 3 {
+                        p.line(x0 + 12.0, y + 4.0, x0 + POWER_W - 12.0, y + 4.0, Color::white(0.10 * pa), 1.0);
+                        y += 8.0;
+                    }
+                    let t = Target::PowerItem(i);
+                    if self.hovered == Some(t) {
+                        p.rrect(x0 + 6.0, y, POWER_W - 12.0, POWER_ROW - 2.0, 6.0, Color::white(0.10 * pa));
+                    }
+                    p.text(
+                        label,
+                        &f.body,
+                        x0 + 18.0,
+                        y,
+                        POWER_W - 30.0,
+                        POWER_ROW - 2.0,
+                        Align::Left,
+                        Color::white(0.93 * pa),
+                    );
+                    if self.power_open {
+                        pop.push((t, x0 + 6.0, y, POWER_W - 12.0, POWER_ROW - 2.0));
+                    }
+                    y += POWER_ROW;
+                }
+                if self.power_open {
+                    pop.push((Target::PowerBg, 0.0, 0.0, g.w, g.h));
+                }
+                self.hits.splice(0..0, pop);
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
@@ -936,10 +1307,10 @@ impl Launcher {
     }
 }
 
-fn draw_icon(p: &Painter, icon: Option<&ID2D1Bitmap>, x: f32, y: f32, s: f32) {
+fn draw_icon(p: &Painter, icon: Option<&ID2D1Bitmap>, x: f32, y: f32, s: f32, a: f32) {
     match icon {
-        Some(b) => p.icon(b, x + s / 2.0, y + s / 2.0, 1.0),
-        None => p.rrect(x + s * 0.1, y + s * 0.1, s * 0.8, s * 0.8, s * 0.2, Color::white(0.12)),
+        Some(b) => p.icon(b, x + s / 2.0, y + s / 2.0, a),
+        None => p.rrect(x + s * 0.1, y + s * 0.1, s * 0.8, s * 0.8, s * 0.2, Color::white(0.12 * a)),
     }
 }
 
@@ -992,6 +1363,11 @@ fn draw_glyph(p: &Painter, g: Glyph, cx: f32, cy: f32, c: Color) {
             p.stroke_circle(cx, cy, 7.5, c, w);
             p.line(cx - 7.5, cy, cx + 7.5, cy, c, w);
             p.stroke_rrect(cx - 3.5, cy - 7.5, 7.0, 15.0, 3.5, c, w);
+        }
+        Glyph::Menu => {
+            for dy in [-5.0, 0.0, 5.0] {
+                p.line(cx - 7.0, cy + dy, cx + 7.0, cy + dy, c, w + 0.2);
+            }
         }
         Glyph::Power => {
             p.arc(cx, cy + 0.5, 7.0, -1.05, 4.19, c, w + 0.3);

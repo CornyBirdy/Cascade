@@ -42,9 +42,9 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 
 - **Opening it:** tap the **Win key** on its own, or click **Start** or the search box on the taskbar. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal.
 - **Over admin apps** (Task Manager, installers): Windows hides keys typed into apps running as administrator from normal apps. Turn on **Work over admin apps** in Settings → Start menu. It asks for permission once, then a tiny helper with admin rights starts with Windows and watches only the Win key. It has no windows and no timers.
-- **Left:** your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down).
-- **Middle:** pinned apps (the same as your taskbar's) and recently opened files.
-- **Right:** every installed app A to Z, Store apps included.
+- **Left:** a slim icon rail with your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down, in a menu drawn by Cascade). The button at the top opens the full sidebar over the menu; it folds away when the pointer leaves. Untick **Compact sidebar** in Settings for the always-wide one.
+- **Middle:** pinned apps (the same as your taskbar's) and recently opened files. Turn both off and the column goes away, leaving All apps.
+- **Right:** every installed app A to Z, Store apps included. Scrolling is smooth, and click any letter heading to open a grid of letters and jump straight to one.
 - **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
 
 **Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, whether to show the sidebar, recent files and the all-apps list, and the glass tint. Turn off the Win-key takeover or the whole Start menu there too.

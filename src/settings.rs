@@ -219,6 +219,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_show_recent", "Recent files", "Under the pinned apps.", Toggle),
             row("start_show_all_apps", "All apps list", "Every app A to Z on the right.", Toggle),
             row("start_show_sidebar", "Sidebar", "Account, folders, settings and power.", Toggle),
+            row(
+                "start_sidebar_compact",
+                "Compact sidebar",
+                "A slim icon rail. The button at its top opens the full sidebar.",
+                Toggle,
+            ),
             heading("h_side", "Sidebar buttons"),
             row("start_show_profile", "Account button", "Your name at the top of the sidebar.", Toggle),
             row("start_show_cascade", "Cascade button", "Opens Cascade's settings, above Power.", Toggle),
@@ -586,8 +592,8 @@ impl Settings {
     fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         if lx < SIDEBAR {
-            let i = ((ly - 80.0) / 40.0).floor();
-            return (ly >= 80.0 && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
+            let i = ((ly - 24.0) / 40.0).floor();
+            return (ly >= 24.0 && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
         }
         for (i, r) in rows(self.section).iter().enumerate() {
             let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
@@ -736,12 +742,8 @@ impl Settings {
                 let f = &gfx.fonts;
                 // Sidebar.
                 p.rrect(0.0, 0.0, SIDEBAR, CH, 0.0, Color(0.09, 0.09, 0.10, 1.0));
-                p.rrect(24.0, 26.0, 26.0, 26.0, 7.0, Color(0.16, 0.19, 0.30, 1.0));
-                p.rrect(31.0, 26.0, 12.0, 7.0, 3.0, Color::white(0.95));
-                p.rrect(29.0, 44.0, 16.0, 3.0, 1.5, ACCENT);
-                p.text("Cascade", &f.title, 60.0, 24.0, 150.0, 30.0, Align::Left, Color::white(0.95));
                 for (i, name) in SECTIONS.iter().enumerate() {
-                    let y = 80.0 + i as f32 * 40.0;
+                    let y = 24.0 + i as f32 * 40.0;
                     let active = i == self.section;
                     if active || self.hovered == Some(Hit::Nav(i)) {
                         p.rrect(

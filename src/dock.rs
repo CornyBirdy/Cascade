@@ -395,20 +395,15 @@ fn clock_text() -> (String, String) {
     }
 }
 
-/// The four-pane Windows logo, in Windows 11 blues.
+/// The Windows 11 logo: four flat, square-cornered panes in one blue.
 pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
-    let q = size * 0.46;
-    let g = size * 0.08;
-    let colours = [
-        Color(0.18, 0.62, 1.0, alpha),
-        Color(0.30, 0.72, 1.0, alpha),
-        Color(0.10, 0.50, 0.92, alpha),
-        Color(0.22, 0.62, 0.98, alpha),
-    ];
-    for (i, (left, top)) in [(true, true), (false, true), (true, false), (false, false)].into_iter().enumerate() {
+    let g = size * 0.07;
+    let q = size * 0.44;
+    let blue = Color(0.0, 0.47, 0.83, alpha);
+    for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
         let x = if left { cx - q - g / 2.0 } else { cx + g / 2.0 };
         let y = if top { cy - q - g / 2.0 } else { cy + g / 2.0 };
-        p.rrect(x, y, q, q, q * 0.12, colours[i]);
+        p.rrect(x, y, q, q, 0.0, blue);
     }
 }
 

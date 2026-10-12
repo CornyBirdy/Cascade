@@ -98,6 +98,8 @@ start_height = 620
 start_columns = 4
 start_pinned_rows = 3
 start_show_sidebar = true
+# Shrink the sidebar to a slim icon rail (the button at its top opens it).
+start_sidebar_compact = true
 start_show_recent = true
 # Show the Pinned apps grid, and the account button at the top of the sidebar.
 start_show_pinned = true
@@ -196,6 +198,7 @@ pub struct Config {
     pub start_columns: u32,
     pub start_pinned_rows: u32,
     pub start_show_sidebar: bool,
+    pub start_sidebar_compact: bool,
     pub start_show_recent: bool,
     pub start_show_pinned: bool,
     pub start_show_profile: bool,
@@ -255,6 +258,7 @@ impl Default for Config {
             start_columns: 4,
             start_pinned_rows: 3,
             start_show_sidebar: true,
+            start_sidebar_compact: true,
             start_show_recent: true,
             start_show_pinned: true,
             start_show_profile: true,
@@ -437,6 +441,7 @@ impl Config {
                 "start_columns" => set_u(&mut c.start_columns, 3.0, 6.0),
                 "start_pinned_rows" => set_u(&mut c.start_pinned_rows, 1.0, 4.0),
                 "start_show_sidebar" => set_b(&mut c.start_show_sidebar),
+                "start_sidebar_compact" => set_b(&mut c.start_sidebar_compact),
                 "start_show_recent" => set_b(&mut c.start_show_recent),
                 "start_show_pinned" => set_b(&mut c.start_show_pinned),
                 "start_show_profile" => set_b(&mut c.start_show_profile),
@@ -542,6 +547,7 @@ impl Config {
             "start_columns" => self.start_columns.to_string(),
             "start_pinned_rows" => self.start_pinned_rows.to_string(),
             "start_show_sidebar" => b(self.start_show_sidebar),
+            "start_sidebar_compact" => b(self.start_sidebar_compact),
             "start_show_recent" => b(self.start_show_recent),
             "start_show_pinned" => b(self.start_show_pinned),
             "start_show_profile" => b(self.start_show_profile),
