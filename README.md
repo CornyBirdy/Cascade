@@ -21,8 +21,9 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 - **Left:** the current weather. **Centre:** Start, a search box, then your pinned and running apps. **Right:** hidden icons, network / volume / battery, and the clock.
 - **App buttons** work like Windows: a short line marks apps with open windows and a longer blue one the app in front. Hover for a name and live window previews; click a preview to switch to it, or its × to close it.
 - **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin or close. **Drag** pinned apps to reorder them.
-- **Clicks on the right:** the chevron opens the Windows hidden-icons flyout, the status icons open quick settings, and the clock opens notifications.
-- **Look:** full width or floating islands, centred or left-aligned, height, icon size, gap from the screen edge, corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
+- **Tray icons:** apps' notification-area icons show by the clock, the same ones you chose to show in Windows' taskbar settings. The rest are under the **^** button. Click and right-click them as usual. Cascade gets them the way alternative taskbars like RetroBar do: it keeps its own hidden tray window and passes everything on to Explorer, without touching Explorer itself.
+- **Clicks on the right:** the status icons open quick settings, and the clock opens notifications.
+- **Look:** full width or floating islands, centred or left-aligned, height, padding, icon size, gap from the screen edge, corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
 - **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
 - **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
@@ -32,7 +33,8 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
 Cascade's own Start menu. Windows doesn't let other apps restyle its real one, so Cascade replaces it.
 
-- **Opening it:** tap the **Win key** on its own, or click **Start** or the search box on the taskbar. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal. If the Windows Start menu still gets the key (Windows hides keys typed into apps running as administrator, such as Task Manager, from other apps), Cascade notices it opening and swaps in its own.
+- **Opening it:** tap the **Win key** on its own, or click **Start** or the search box on the taskbar. Shortcuts like Win+E, Win+R and Win+Shift+S work as normal.
+- **Over admin apps** (Task Manager, installers): Windows hides keys typed into apps running as administrator from normal apps. Turn on **Work over admin apps** in Settings → Start menu. It asks for permission once, then a tiny helper with admin rights starts with Windows and watches only the Win key. It has no windows and no timers.
 - **Left:** your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down).
 - **Middle:** pinned apps (the same as your taskbar's) and recently opened files.
 - **Right:** every installed app A to Z, Store apps included.
@@ -42,7 +44,7 @@ Turn off the Win-key takeover or the whole Start menu in Settings.
 
 ## Settings
 
-Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider or text box, and changes apply immediately. Starting Cascade again while it's already running also opens Settings.
+Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Starting Cascade again while it's already running also opens Settings.
 
 ## Running it
 
@@ -93,6 +95,8 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/settings.rs` | Settings window |
 | `src/dock.rs` | Taskbar: window tracking, layout, drawing, drag, launch/focus |
 | `src/backdrop.rs` | Acrylic blur behind the taskbar and Start menu |
+| `src/systray.rs` | Tray icons from apps, and the hidden-icons flyout |
+| `src/helper.rs` | Optional admin helper for the Win key over admin apps |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |
