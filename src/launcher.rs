@@ -1146,21 +1146,24 @@ impl Launcher {
                             Color::white(0.55 * ja),
                         );
                         let (gx, gy) = (ox + pad, oy + pad + 28.0 + slide);
-                        let (cw, ch) = ((ow - pad * 2.0) / 4.0, ((oh - pad * 2.0 - 28.0) / 7.0).min(48.0));
+                        let (cw, ch) = ((ow - pad * 2.0) / 4.0, ((oh - pad * 2.0 - 28.0) / 7.0).min(56.0));
                         let mut cells = Vec::new();
+                        // A big typographic index: no tiles, just the letters.
                         for (n, &l) in LETTERS.iter().enumerate() {
                             let has = self.rows.iter().any(|r| matches!(r, Row::Letter(x) if *x == l));
-                            let (cx, cy) = (gx + (n % 4) as f32 * cw + 2.0, gy + (n / 4) as f32 * ch + 2.0);
-                            let (tw, th) = (cw - 4.0, ch - 4.0);
+                            let (cx, cy) = (gx + (n % 4) as f32 * cw, gy + (n / 4) as f32 * ch);
                             let hot = has && self.hovered == Some(Target::Jump(l));
-                            if has {
-                                let tile = if hot { ACCENT.alpha(0.32) } else { Color::white(0.06) };
-                                p.rrect(cx, cy, tw, th, 6.0, tile.alpha(ja));
+                            if hot {
+                                p.rrect(cx + 3.0, cy + 3.0, cw - 6.0, ch - 6.0, 10.0, Color::white(0.06 * ja));
                             }
-                            let col = if has { Color::white(0.95 * ja) } else { Color::white(0.2 * ja) };
-                            p.text(&l.to_string(), &f.title, cx, cy, tw, th, Align::Center, col);
+                            let col = match (has, hot) {
+                                (true, true) => ACCENT.alpha(ja),
+                                (true, false) => Color::white(0.92 * ja),
+                                (false, _) => Color::white(0.13 * ja),
+                            };
+                            p.text(&l.to_string(), &f.big, cx, cy, cw, ch, Align::Center, col);
                             if has && self.jump_open {
-                                cells.push((Target::Jump(l), cx, cy, tw, th));
+                                cells.push((Target::Jump(l), cx + 3.0, cy + 3.0, cw - 6.0, ch - 6.0));
                             }
                         }
                         self.hits.extend(cells);
