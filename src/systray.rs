@@ -566,6 +566,7 @@ impl Flyout {
     }
 
     pub fn hide(&mut self) {
+        crate::mousehook::set_rect(1, None);
         if self.open {
             self.open = false;
             self.reveal.set(0.0);
@@ -652,6 +653,9 @@ impl Flyout {
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 10.0 * k) as i32;
         let (x, y) = (self.anchor.0 - pw / 2, self.anchor.1 - ph);
         let pos = POINT { x, y: y + slide };
+        if self.open {
+            crate::mousehook::set_rect(1, Some(RECT { left: x, top: y, right: x + pw, bottom: y + ph }));
+        }
         let settled = self.open && self.acrylic && self.reveal.value > 0.97;
         if settled {
             self.backdrop.place(RECT { left: x, top: y, right: x + pw, bottom: y + ph }, self.hwnd);

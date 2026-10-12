@@ -16,6 +16,7 @@ mod icons;
 mod keyhook;
 mod launcher;
 mod media;
+mod mousehook;
 mod pomodoro;
 mod preview;
 mod radios;
@@ -50,6 +51,8 @@ pub mod msg {
     pub const APPS: u32 = WM_APP + 15;
     pub const POWER_MENU: u32 = WM_APP + 16;
     pub const TRAY_ICON: u32 = WM_APP + 17;
+    pub const OUTSIDE_CLICK: u32 = WM_APP + 18;
+    pub const KEY_CHECK: u32 = WM_APP + 19;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

@@ -1,16 +1,19 @@
 //! Opens the Cascade launcher on a lone Win key press. Win+anything
 //! (Win+E, Win+R, Win+Shift+S...) is left completely alone.
 //!
-//! On a lone Win release, an unassigned "mask" key is tapped just before the
-//! release goes through. To Windows that looks like a key combination, so it
-//! doesn't open its own Start menu. Keys sent from inside the hook are
-//! queued ahead of the key being hooked, which gives exactly the order
-//! Win down, mask down, mask up, Win up. Nothing is swallowed or replayed,
-//! so the Win key can't get stuck down.
+//! When Win is released without another key in between, the release is
+//! swallowed and replaced by one batch of input: an unassigned "mask" key tap,
+//! then the Win release. To Windows that looks like a key combination, so it
+//! doesn't open its own Start menu. (Tapping the mask after the real release
+//! is too late, and tapping it before leaves the real release to open Start.)
+//!
+//! Swallowing a release risks leaving Windows thinking Win is still held, so:
+//! nothing is swallowed unless the replacement was accepted, and shortly
+//! afterwards the key state is checked and a release sent if it's still down.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -18,12 +21,28 @@ use crate::msg;
 
 /// Set in the admin helper, which tells the main Cascade window instead.
 static IN_HELPER: AtomicBool = AtomicBool::new(false);
+static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Sent to the admin helper's window to check the Win key afterwards.
+pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
 
 fn on_lone_win() {
     if IN_HELPER.load(Ordering::Relaxed) {
         crate::helper::lone_win();
     } else {
         msg::post(msg::OPEN_LAUNCHER, 0, 0);
+    }
+}
+
+/// Asks the owner of this hook to call `fix_stuck` in a moment.
+fn request_check() {
+    if IN_HELPER.load(Ordering::Relaxed) {
+        let h = HWND(HELPER_WINDOW.load(Ordering::Relaxed) as *mut _);
+        unsafe {
+            let _ = PostMessageW(Some(h), KEY_CHECK_MSG, WPARAM(0), LPARAM(0));
+        }
+    } else {
+        msg::post(msg::KEY_CHECK, 0, 0);
     }
 }
 
@@ -41,13 +60,9 @@ fn handled_here() -> bool {
     }
 }
 
-pub fn set_helper_mode() {
+pub fn set_helper_mode(hwnd: HWND) {
     IN_HELPER.store(true, Ordering::Relaxed);
-}
-
-fn send_mask() {
-    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];
-    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    HELPER_WINDOW.store(hwnd.0 as isize, Ordering::Relaxed);
 }
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
@@ -72,6 +87,22 @@ fn key(vk: u16, up: bool) -> INPUT {
     }
 }
 
+/// Releases a Win key that Windows still thinks is held, if there is one.
+pub fn fix_stuck() {
+    if WIN_DOWN.load(Ordering::Relaxed) {
+        return; // really held right now
+    }
+    let mut inputs = Vec::new();
+    for vk in [VK_LWIN.0, VK_RWIN.0] {
+        if unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0 {
+            inputs.push(key(vk, true));
+        }
+    }
+    if !inputs.is_empty() {
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
@@ -90,8 +121,16 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             } else if is_win && up {
                 let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                 if was_down && !COMBO.load(Ordering::Relaxed) {
-                    send_mask();
                     on_lone_win();
+                    // Mask tap and Win release as one batch, in that order.
+                    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
+                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                    if sent as usize == inputs.len() {
+                        request_check();
+                        return LRESULT(1);
+                    }
+                    // Refused (e.g. an admin window is in front): let the real
+                    // release through rather than risk a stuck key.
                 }
             } else if down && WIN_DOWN.load(Ordering::Relaxed) {
                 COMBO.store(true, Ordering::Relaxed);

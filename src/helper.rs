@@ -114,6 +114,15 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             PostQuitMessage(0);
             LRESULT(0)
         }
+        keyhook::KEY_CHECK_MSG => {
+            SetTimer(Some(hwnd), 1, 150, None);
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            let _ = KillTimer(Some(hwnd), 1);
+            keyhook::fix_stuck();
+            LRESULT(0)
+        }
         MINIMIZE => {
             let _ = ShowWindow(HWND(wp.0 as *mut _), SW_MINIMIZE);
             LRESULT(0)
@@ -161,7 +170,7 @@ pub fn run() {
         for m in [FOCUS, QUIT, MINIMIZE] {
             let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
         }
-        keyhook::set_helper_mode();
+        keyhook::set_helper_mode(hwnd);
         keyhook::set(true);
         crate::config::log(&format!("helper: started (admin: {})", is_elevated()));
         let mut m = MSG::default();

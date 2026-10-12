@@ -61,6 +61,7 @@ const TIMER_PEEK: usize = 3;
 const TIMER_TICK: usize = 4;
 const TIMER_FLYOUT: usize = 5;
 const TIMER_POMODORO: usize = 6;
+const TIMER_KEYFIX: usize = 7;
 // Dock timers (on the dock window).
 const TIMER_SCAN: usize = 10;
 const TIMER_DOCK_HIDE: usize = 11;
@@ -209,6 +210,9 @@ struct App {
     flyout: Flyout,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
+    /// When a click outside last closed the Start menu or tray flyout, so the
+    /// same click on its button doesn't open it again.
+    outside_close: Option<Instant>,
 
     message: String,
     message_color: Color,
@@ -363,6 +367,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 {
                 return LRESULT(MA_NOACTIVATE as isize);
             }
+        }
+        msg::OUTSIDE_CLICK => {
+            with_app(|a| a.on_outside_click());
+            return LRESULT(0);
+        }
+        msg::KEY_CHECK => {
+            with_app(|a| unsafe {
+                SetTimer(Some(a.hwnd), TIMER_KEYFIX, 150, None);
+            });
+            return LRESULT(0);
         }
         msg::OPEN_LAUNCHER => {
             with_app(|a| a.toggle_launcher());
@@ -602,6 +616,7 @@ impl App {
             systray: Systray::default(),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             tray_rect: RECT::default(),
+            outside_close: None,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -1271,6 +1286,7 @@ impl App {
             }
             TIMER_TICK => self.dirty = true,
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
+            TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_POMODORO => {
                 if self.pomo.tick() {
                     unsafe {
@@ -1465,6 +1481,27 @@ impl App {
     }
 
     // --------------------------------------------------- launcher glue --
+
+    /// A click landed outside every open pop-up: close them.
+    fn on_outside_click(&mut self) {
+        let mut closed = false;
+        // While a right-click menu is up, its clicks are "outside" too.
+        if self.launcher.open && !self.launcher_menu {
+            self.launcher.hide();
+            closed = true;
+        }
+        if self.flyout.open {
+            self.flyout.hide();
+            closed = true;
+        }
+        if closed {
+            self.outside_close = Some(Instant::now());
+        }
+    }
+
+    fn just_closed(&self) -> bool {
+        self.outside_close.is_some_and(|t| t.elapsed() < Duration::from_millis(400))
+    }
 
     fn toggle_launcher(&mut self) {
         if self.launcher.open {
@@ -1741,7 +1778,9 @@ impl App {
     fn on_dock_click(&mut self, hot: DockHot) {
         match hot {
             DockHot::Start | DockHot::Search => {
-                if self.cfg.launcher {
+                if self.just_closed() {
+                    // That click already closed the open menu.
+                } else if self.cfg.launcher {
                     self.toggle_launcher();
                 } else {
                     shell::open_start_menu();
@@ -1778,6 +1817,9 @@ impl App {
 
     /// The hidden tray icons, above the ^ button.
     fn toggle_flyout(&mut self) {
+        if self.just_closed() {
+            return;
+        }
         if self.flyout.open {
             self.flyout.hide();
             return;

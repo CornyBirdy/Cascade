@@ -375,6 +375,7 @@ impl Launcher {
     }
 
     pub fn hide(&mut self) {
+        crate::mousehook::set_rect(0, None);
         if self.open {
             self.open = false;
             self.reveal.set(0.0);
@@ -559,6 +560,9 @@ impl Launcher {
         };
         let y = (bottom - ph - (12.0 * k) as i32).max(monitor.top);
         let pos = POINT { x, y: y + slide };
+        if self.open {
+            crate::mousehook::set_rect(0, Some(RECT { left: x, top: y, right: x + pw, bottom: y + ph }));
+        }
 
         let settled = self.open && self.acrylic && self.reveal.value > 0.97;
         if settled {
