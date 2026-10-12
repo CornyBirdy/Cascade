@@ -36,18 +36,14 @@ type SetWindowCompositionAttribute = unsafe extern "system" fn(HWND, *mut Compos
 /// Undocumented (but what Explorer itself uses), so it isn't in the import
 /// library: look it up once at run time.
 fn set_composition() -> Option<SetWindowCompositionAttribute> {
-    static F: OnceLock<Option<usize>> = OnceLock::new();
-    let addr = *F.get_or_init(|| unsafe {
+    static F: OnceLock<Option<SetWindowCompositionAttribute>> = OnceLock::new();
+    *F.get_or_init(|| unsafe {
         let user32 = GetModuleHandleW(w!("user32.dll")).ok()?;
-        GetProcAddress(user32, s!("SetWindowCompositionAttribute")).map(|f| f as usize)
-    });
-    // SAFETY: the address is user32's SetWindowCompositionAttribute.
-    addr.map(|a| unsafe { std::mem::transmute::<usize, SetWindowCompositionAttribute>(a) })
+        let f = GetProcAddress(user32, s!("SetWindowCompositionAttribute"))?;
+        // SAFETY: it is user32's SetWindowCompositionAttribute, which has this signature.
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, SetWindowCompositionAttribute>(f))
+    })
 }
-
-const WCA_ACCENT_POLICY: u32 = 19;
-const ACCENT_DISABLED: u32 = 0;
-const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
