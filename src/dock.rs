@@ -308,7 +308,7 @@ fn is_cloaked(h: HWND) -> bool {
 }
 
 /// Whether a window belongs on the taskbar, the same way Windows decides.
-fn is_app_window(h: HWND, own_pid: u32) -> bool {
+pub fn is_app_window(h: HWND, own_pid: u32) -> bool {
     unsafe {
         if !IsWindowVisible(h).as_bool() {
             return false;
@@ -345,6 +345,19 @@ pub fn process_path(pid: u32) -> Option<String> {
         let _ = CloseHandle(h);
         ok.ok()?;
         Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// The id the dock uses for the app that owns `h`: the exe path, or
+/// `shell:AppsFolder\<AppUserModelID>` for Store apps.
+pub fn window_app_id(h: HWND) -> Option<String> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    let path = process_path(pid)?;
+    if path.to_ascii_lowercase().ends_with("\\applicationframehost.exe") {
+        app_user_model_id(h).map(|a| format!("shell:AppsFolder\\{a}"))
+    } else {
+        Some(path)
     }
 }
 

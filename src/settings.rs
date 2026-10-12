@@ -74,6 +74,7 @@ fn rows(section: usize) -> Vec<Row> {
         0 => vec![
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
+            row("alt_tab", "Alt+Tab switcher", "Cascade's own, with live previews, instead of Windows'.", Toggle),
             row(
                 "max_fps",
                 "Animation frame cap",

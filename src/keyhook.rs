@@ -1,14 +1,18 @@
-//! Opens the Cascade launcher on a lone Win key press. Win+anything
-//! (Win+E, Win+R, Win+Shift+S...) is left completely alone.
+//! Global keyboard hook: opens the Cascade launcher on a lone Win key press
+//! and drives the Alt+Tab switcher. Win+anything (Win+E, Win+R, Win+Shift+S...)
+//! is left completely alone.
 //!
 //! When Win is released without another key in between, the release is
 //! swallowed and replaced by one batch of input: an unassigned "mask" key tap,
 //! then the Win release. To Windows that looks like a key combination, so it
 //! doesn't open its own Start menu. (Tapping the mask after the real release
 //! is too late, and tapping it before leaves the real release to open Start.)
+//! Alt+Tab works the same way: Tab is swallowed while Alt is held, and when
+//! Alt is released it is replaced by mask + release, so the app in front
+//! doesn't see a lone Alt and light up its menu bar.
 //!
-//! Swallowing a release risks leaving Windows thinking Win is still held, so:
-//! nothing is swallowed unless the replacement was accepted, and shortly
+//! Swallowing a release risks leaving Windows thinking the key is still held,
+//! so: nothing is swallowed unless the replacement was accepted, and shortly
 //! afterwards the key state is checked and a release sent if it's still down.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -23,15 +27,20 @@ use crate::msg;
 static IN_HELPER: AtomicBool = AtomicBool::new(false);
 static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-/// Sent to the admin helper's window to check the Win key afterwards.
+/// Sent to the admin helper's window to check the keys afterwards.
 pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
 
-fn on_lone_win() {
+/// Tells the main Cascade window something happened.
+fn notify(m: u32, wparam: usize) {
     if IN_HELPER.load(Ordering::Relaxed) {
-        crate::helper::lone_win();
+        crate::helper::post_main(m, wparam);
     } else {
-        msg::post(msg::OPEN_LAUNCHER, 0, 0);
+        msg::post(m, wparam, 0);
     }
+}
+
+fn on_lone_win() {
+    notify(msg::OPEN_LAUNCHER, 0);
 }
 
 /// Asks the owner of this hook to call `fix_stuck` in a moment.
@@ -46,8 +55,8 @@ fn request_check() {
     }
 }
 
-/// Whether this copy should act on the Win key: the admin helper takes over
-/// from the main app while it runs, and quits once Cascade has gone.
+/// Whether this copy should act on keys: the admin helper takes over from
+/// the main app while it runs, and quits once Cascade has gone.
 fn handled_here() -> bool {
     if IN_HELPER.load(Ordering::Relaxed) {
         let up = crate::helper::main_window().is_some();
@@ -66,10 +75,18 @@ pub fn set_helper_mode(hwnd: HWND) {
 }
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
+static WIN_ON: AtomicBool = AtomicBool::new(false);
+static TAB_ON: AtomicBool = AtomicBool::new(false);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
+static ALT_DOWN: AtomicBool = AtomicBool::new(false);
+static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
+static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+/// A Tab was swallowed while Alt was held: the switcher is in use.
+static TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TAB_CANCEL: AtomicBool = AtomicBool::new(false);
 
-/// An unassigned virtual key, used only to "break" the lone Win press.
+/// An unassigned virtual key, used only to "break" a lone Win or Alt press.
 const MASK_KEY: u16 = 0xE8;
 
 fn key(vk: u16, up: bool) -> INPUT {
@@ -87,19 +104,37 @@ fn key(vk: u16, up: bool) -> INPUT {
     }
 }
 
-/// Releases a Win key that Windows still thinks is held, if there is one.
+/// Releases a Win or Alt key that Windows still thinks is held, if there is one.
 pub fn fix_stuck() {
-    if WIN_DOWN.load(Ordering::Relaxed) {
-        return; // really held right now
-    }
     let mut inputs = Vec::new();
-    for vk in [VK_LWIN.0, VK_RWIN.0] {
-        if unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0 {
+    for (vk, tracked) in [
+        (VK_LWIN.0, &WIN_DOWN),
+        (VK_RWIN.0, &WIN_DOWN),
+        (VK_LMENU.0, &ALT_DOWN),
+        (VK_RMENU.0, &ALT_DOWN),
+    ] {
+        // Really held right now? Then it isn't stuck.
+        if !tracked.load(Ordering::Relaxed) && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0 {
             inputs.push(key(vk, true));
         }
     }
     if !inputs.is_empty() {
         unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
+/// Mask tap and the key's release as one batch, in that order. True if
+/// Windows accepted all of it (so the real release can be swallowed).
+unsafe fn masked_release(vk: u16) -> bool {
+    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
+    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
+}
+
+fn track(flag: &AtomicBool, down: bool, up: bool) {
+    if down {
+        flag.store(true, Ordering::Relaxed);
+    } else if up {
+        flag.store(false, Ordering::Relaxed);
     }
 }
 
@@ -112,47 +147,99 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let up = msg_id == WM_KEYUP || msg_id == WM_SYSKEYUP;
         let vk = k.vkCode as u16;
         let is_win = vk == VK_LWIN.0 || vk == VK_RWIN.0;
+        let is_alt = vk == VK_LMENU.0 || vk == VK_RMENU.0;
         if !injected {
-            if is_win && down {
-                if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
-                    WIN_DOWN.store(true, Ordering::Relaxed);
-                    COMBO.store(false, Ordering::Relaxed);
-                }
-            } else if is_win && up {
-                let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
-                if was_down && !COMBO.load(Ordering::Relaxed) {
-                    on_lone_win();
-                    // Mask tap and Win release as one batch, in that order.
-                    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
-                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    if sent as usize == inputs.len() {
-                        request_check();
+            if is_alt {
+                track(&ALT_DOWN, down, up);
+            } else if vk == VK_LCONTROL.0 || vk == VK_RCONTROL.0 {
+                track(&CTRL_DOWN, down, up);
+            } else if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 {
+                track(&SHIFT_DOWN, down, up);
+            }
+
+            // Alt+Tab.
+            if TAB_ON.load(Ordering::Relaxed) {
+                if vk == VK_TAB.0 && ALT_DOWN.load(Ordering::Relaxed) && !CTRL_DOWN.load(Ordering::Relaxed) {
+                    // Games and fullscreen video keep Windows' own Alt+Tab.
+                    if down && handled_here() && !crate::shell::fullscreen_now() {
+                        TAB_ACTIVE.store(true, Ordering::Relaxed);
+                        TAB_CANCEL.store(false, Ordering::Relaxed);
+                        notify(msg::SWITCH, SHIFT_DOWN.load(Ordering::Relaxed) as usize);
                         return LRESULT(1);
                     }
-                    // Refused (e.g. an admin window is in front): let the real
-                    // release through rather than risk a stuck key.
+                    if up && TAB_ACTIVE.load(Ordering::Relaxed) {
+                        return LRESULT(1);
+                    }
                 }
-            } else if down && WIN_DOWN.load(Ordering::Relaxed) {
-                COMBO.store(true, Ordering::Relaxed);
+                if TAB_ACTIVE.load(Ordering::Relaxed) {
+                    if down && vk == VK_ESCAPE.0 {
+                        TAB_CANCEL.store(true, Ordering::Relaxed);
+                        notify(msg::SWITCH, 3);
+                        return LRESULT(1);
+                    }
+                    if down && (vk == VK_LEFT.0 || vk == VK_RIGHT.0) {
+                        notify(msg::SWITCH, (vk == VK_LEFT.0) as usize);
+                        return LRESULT(1);
+                    }
+                    if is_alt && up {
+                        TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        if !TAB_CANCEL.load(Ordering::Relaxed) {
+                            notify(msg::SWITCH, 2);
+                        }
+                        // Break the lone Alt so the app in front doesn't show its menu bar.
+                        if masked_release(vk) {
+                            request_check();
+                            return LRESULT(1);
+                        }
+                    }
+                }
+            }
+
+            // Win key.
+            if WIN_ON.load(Ordering::Relaxed) {
+                if is_win && down {
+                    if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
+                        WIN_DOWN.store(true, Ordering::Relaxed);
+                        COMBO.store(false, Ordering::Relaxed);
+                    }
+                } else if is_win && up {
+                    let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
+                    if was_down && !COMBO.load(Ordering::Relaxed) {
+                        on_lone_win();
+                        // Refused (e.g. an admin window is in front): let the real
+                        // release through rather than risk a stuck key.
+                        if masked_release(vk) {
+                            request_check();
+                            return LRESULT(1);
+                        }
+                    }
+                } else if down && WIN_DOWN.load(Ordering::Relaxed) {
+                    COMBO.store(true, Ordering::Relaxed);
+                }
             }
         }
     }
     CallNextHookEx(None, code, wp, lp)
 }
 
-/// Installs or removes the hook. Must be called on the UI thread (the hook
+/// Turns the Win-key launcher and the Alt+Tab switcher on or off, installing
+/// or removing the hook as needed. Must be called on the UI thread (the hook
 /// runs on the thread that installed it, through its message loop).
-pub fn set(enabled: bool) {
+pub fn configure(win: bool, tab: bool) {
+    WIN_ON.store(win, Ordering::Relaxed);
+    TAB_ON.store(tab, Ordering::Relaxed);
     let current = HOOK.load(Ordering::Relaxed);
     unsafe {
-        if enabled && current == 0 {
+        if (win || tab) && current == 0 {
             if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
                 HOOK.store(h.0 as isize, Ordering::Relaxed);
             }
-        } else if !enabled && current != 0 {
+        } else if !(win || tab) && current != 0 {
             let _ = UnhookWindowsHookEx(HHOOK(current as *mut _));
             HOOK.store(0, Ordering::Relaxed);
             WIN_DOWN.store(false, Ordering::Relaxed);
+            ALT_DOWN.store(false, Ordering::Relaxed);
+            TAB_ACTIVE.store(false, Ordering::Relaxed);
         }
     }
 }

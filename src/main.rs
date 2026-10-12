@@ -23,6 +23,7 @@ mod radios;
 mod settings;
 mod shell;
 mod spring;
+mod switcher;
 mod sysmon;
 mod systray;
 mod ui;
@@ -55,6 +56,8 @@ pub mod msg {
     pub const TRAY_ICON: u32 = WM_APP + 17;
     pub const OUTSIDE_CLICK: u32 = WM_APP + 18;
     pub const KEY_CHECK: u32 = WM_APP + 19;
+    /// Alt+Tab: wParam 0 next, 1 previous, 2 commit, 3 cancel.
+    pub const SWITCH: u32 = WM_APP + 20;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

@@ -368,6 +368,17 @@ impl Painter<'_> {
         }
     }
 
+    /// Makes a rectangle see-through but still clickable (a layered window
+    /// ignores the mouse where it is fully transparent), so a DWM thumbnail
+    /// under the window shows through.
+    pub fn hole(&self, x: f32, y: f32, w: f32, h: f32) {
+        unsafe {
+            self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            self.gfx.rt.Clear(Some(&Color(0.0, 0.0, 0.0, 0.004).d2d()));
+            self.gfx.rt.PopAxisAlignedClip();
+        }
+    }
+
     pub fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
         unsafe { self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
     }

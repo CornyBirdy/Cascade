@@ -23,7 +23,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_MENU,
 };
 use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -44,6 +44,7 @@ use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
+use crate::switcher::Switcher;
 use crate::systray::{self, Flyout, Systray};
 use crate::sysmon::Sampler;
 use crate::widgets::{self, Widgets};
@@ -65,6 +66,7 @@ const TIMER_FLYOUT: usize = 5;
 const TIMER_POMODORO: usize = 6;
 const TIMER_KEYFIX: usize = 7;
 const TIMER_STATS: usize = 8;
+const TIMER_SWITCH: usize = 9;
 // Dock timers (on the dock window).
 const TIMER_SCAN: usize = 10;
 const TIMER_DOCK_HIDE: usize = 11;
@@ -210,6 +212,7 @@ struct App {
     settings: Option<Settings>,
     /// Tray icons from apps, and the flyout for the hidden ones.
     systray: Systray,
+    switcher: Switcher,
     flyout: Flyout,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
@@ -272,6 +275,8 @@ pub fn run() -> Result<()> {
         let flyout = (flyout_hwnd, Backdrop::create(instance)?);
         let widgets_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         let widgets = (widgets_hwnd, Backdrop::create(instance)?);
+        let switcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
+        let switcher = (switcher_hwnd, Backdrop::create(instance)?);
 
         let app = App::new(
             hwnd,
@@ -282,6 +287,7 @@ pub fn run() -> Result<()> {
             dock_backdrops,
             flyout,
             widgets,
+            switcher,
             instance,
         )?;
         APP.with(|c| *c.borrow_mut() = Some(app));
@@ -380,6 +386,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 {
                 return LRESULT(MA_NOACTIVATE as isize);
             }
+        }
+        msg::SWITCH => {
+            with_app(|a| a.on_switch(wp.0));
+            return LRESULT(0);
         }
         msg::OUTSIDE_CLICK => {
             with_app(|a| a.on_outside_click());
@@ -555,6 +565,7 @@ impl App {
         dock_backdrops: Vec<Backdrop>,
         (flyout_hwnd, flyout_backdrop): (HWND, Backdrop),
         (widgets_hwnd, widgets_backdrop): (HWND, Backdrop),
+        (switcher_hwnd, switcher_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -628,6 +639,7 @@ impl App {
             launcher_menu: false,
             settings: None,
             systray: Systray::default(),
+            switcher: Switcher::new(switcher_hwnd, switcher_backdrop),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             tray_rect: RECT::default(),
             outside_close: None,
@@ -668,7 +680,7 @@ impl App {
     }
 
     fn shutdown(&mut self) {
-        keyhook::set(false);
+        keyhook::configure(false, false);
         self.settings = None;
         self.visualizer.set(false);
         weather::stop();
@@ -760,7 +772,10 @@ impl App {
                 }
             }
         }
-        keyhook::set(self.cfg.launcher && self.cfg.launcher_win_key);
+        keyhook::configure(self.cfg.launcher && self.cfg.launcher_win_key, self.cfg.alt_tab);
+        if !self.cfg.alt_tab {
+            self.switcher.hide();
+        }
         if !self.cfg.launcher {
             self.launcher.hide();
         }
@@ -769,6 +784,7 @@ impl App {
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.arm_stats();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
@@ -925,6 +941,9 @@ impl App {
         }
         if hwnd == self.widgets.hwnd {
             return self.handle_widgets(m, wp, lp);
+        }
+        if hwnd == self.switcher.overlay {
+            return self.handle_switcher(m, lp);
         }
         if m == msg::APPBAR {
             match wp.0 as u32 {
@@ -1289,7 +1308,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if id != TIMER_TICK && id != TIMER_POMODORO && id != TIMER_STATS {
+            if id != TIMER_TICK && id != TIMER_POMODORO && id != TIMER_STATS && id != TIMER_SWITCH {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -1313,6 +1332,14 @@ impl App {
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_STATS => self.sample_stats(),
+            TIMER_SWITCH => {
+                self.switcher.show_now();
+                // Alt let go without the hook seeing it (an admin window took the
+                // keys): finish the switch rather than leave the panel up.
+                if self.switcher.active && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } as u16 & 0x8000 == 0 {
+                    self.finish_switch();
+                }
+            }
             TIMER_POMODORO => {
                 if self.pomo.tick() {
                     unsafe {
@@ -1373,7 +1400,7 @@ impl App {
     }
 
     fn right_click_target(&mut self, hwnd: HWND) -> RightClick {
-        if hwnd == self.widgets.hwnd {
+        if hwnd == self.widgets.hwnd || hwnd == self.switcher.overlay {
             return RightClick::Nothing;
         }
         if hwnd == self.flyout.hwnd {
@@ -1859,6 +1886,66 @@ impl App {
         }
     }
 
+    /// Alt+Tab: 0 next, 1 previous, 2 Alt released, 3 cancelled.
+    fn on_switch(&mut self, op: usize) {
+        if !self.cfg.alt_tab {
+            return;
+        }
+        match op {
+            0 | 1 => {
+                if !self.switcher.active {
+                    if !self.switcher.begin(self.dpi, self.monitor) {
+                        return;
+                    }
+                    // The panel appears after a moment, so a quick flip between
+                    // two windows never flashes it. The timer also guards
+                    // against a missed Alt release.
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_SWITCH, 100, None);
+                    }
+                }
+                self.switcher.step(op == 1);
+            }
+            2 => self.finish_switch(),
+            _ => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_SWITCH);
+                }
+                self.switcher.hide();
+            }
+        }
+    }
+
+    fn finish_switch(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_SWITCH);
+        }
+        if let Some(h) = self.switcher.commit() {
+            dock::focus_window(h);
+        }
+    }
+
+    fn handle_switcher(&mut self, m: u32, lp: LPARAM) -> Option<LRESULT> {
+        match m {
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                self.switcher.on_move(x, y);
+            }
+            WM_MOUSELEAVE => self.switcher.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(h) = self.switcher.on_click(x, y) {
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_SWITCH);
+                    }
+                    dock::focus_window(h);
+                }
+            }
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+
     fn toggle_play(&mut self) {
         // Flip right away; the real state follows from the player.
         if let Some(m) = &mut self.media {
@@ -2111,6 +2198,7 @@ impl App {
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
             || self.widgets.wants_frame()
+            || self.switcher.wants_frame()
     }
 
     /// Steps the springs, draws, and returns how long to wait for the next frame.
@@ -2159,6 +2247,9 @@ impl App {
         if self.flyout.wants_frame() {
             fast |= self.flyout.step(dt);
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
+        }
+        if self.switcher.wants_frame() {
+            let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
         }
         if self.widgets.wants_frame() {
             fast |= self.widgets.step(dt);

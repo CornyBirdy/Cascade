@@ -59,6 +59,10 @@ dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
 
+# ---- Alt+Tab ----
+# Cascade's own window switcher (live previews, same theme) instead of Windows'.
+alt_tab = true
+
 # ---- Widgets ----
 # Widgets on the taskbar, left to right on each side. Any of: weather, music,
 # cpu, ram, gpu, net, widgets (the button that opens the panel). Put a name in
@@ -146,6 +150,7 @@ pub struct Config {
     pub show_status: bool,
     pub show_clock: bool,
     pub tray_icons: bool,
+    pub alt_tab: bool,
     pub taskbar_left: String,
     pub taskbar_right: String,
     pub widgets_panel: String,
@@ -214,6 +219,7 @@ impl Default for Config {
             start_show_recent: true,
             start_show_all_apps: true,
             start_opacity: 0.55,
+            alt_tab: true,
             taskbar_left: "weather".into(),
             taskbar_right: "music,cpu,ram,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
@@ -376,6 +382,7 @@ impl Config {
                 "show_search" => set_b(&mut c.show_search),
                 "show_status" => set_b(&mut c.show_status),
                 "show_clock" => set_b(&mut c.show_clock),
+                "alt_tab" => set_b(&mut c.alt_tab),
                 "taskbar_left" => c.taskbar_left = v.trim_matches('"').to_string(),
                 "taskbar_right" => c.taskbar_right = v.trim_matches('"').to_string(),
                 "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
@@ -465,6 +472,7 @@ impl Config {
             "show_search" => b(self.show_search),
             "show_status" => b(self.show_status),
             "show_clock" => b(self.show_clock),
+            "alt_tab" => b(self.alt_tab),
             "taskbar_left" => self.taskbar_left.clone(),
             "taskbar_right" => self.taskbar_right.clone(),
             k if k.starts_with("place_") => self.place_of(&k["place_".len()..]).to_string(),

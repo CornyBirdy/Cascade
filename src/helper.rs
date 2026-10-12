@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{keyhook, msg};
+use crate::keyhook;
 
 const TASK: &str = "Cascade Win key helper";
 const CLASS: PCWSTR = w!("CascadeKeyHelper");
@@ -63,11 +63,12 @@ fn is_elevated() -> bool {
     }
 }
 
-/// Called by the key hook (in the helper) on a lone Win press.
-pub fn lone_win() {
+/// Called by the key hook (in the helper): tells the main window something
+/// happened (a lone Win press, an Alt+Tab step).
+pub fn post_main(m: u32, wparam: usize) {
     if let Some(h) = main_window() {
         unsafe {
-            let _ = PostMessageW(Some(h), msg::OPEN_LAUNCHER, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(h), m, WPARAM(wparam), LPARAM(0));
         }
     }
 }
@@ -171,14 +172,15 @@ pub fn run() {
             let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
         }
         keyhook::set_helper_mode(hwnd);
-        keyhook::set(true);
+        let cfg = crate::config::Config::load();
+        keyhook::configure(cfg.launcher && cfg.launcher_win_key, cfg.alt_tab);
         crate::config::log(&format!("helper: started (admin: {})", is_elevated()));
         let mut m = MSG::default();
         while GetMessageW(&mut m, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&m);
             DispatchMessageW(&m);
         }
-        keyhook::set(false);
+        keyhook::configure(false, false);
     }
 }
 
