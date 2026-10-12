@@ -60,14 +60,11 @@ dock_icon_size = 24
 dock_magnify = 0
 
 # ---- Widgets ----
-# A button at the right of the taskbar that opens the widgets panel.
-widgets_button = true
-# Small widgets on the taskbar, left of the tray icons. Click one to open the panel.
-chip_music = true
-chip_cpu = true
-chip_ram = true
-chip_gpu = false
-chip_net = false
+# Widgets on the taskbar, left to right on each side. Any of: weather, music,
+# cpu, ram, gpu, net, widgets (the button that opens the panel). Put a name in
+# either list, or leave it out of both to hide it. Click one to open the panel.
+taskbar_left = weather
+taskbar_right = music,cpu,ram,widgets
 # The panel's cards, in order (remove one to hide it): media, system, weather, calendar.
 widgets_panel = media,system,weather,calendar
 # 1 or 2 columns of cards.
@@ -149,12 +146,8 @@ pub struct Config {
     pub show_status: bool,
     pub show_clock: bool,
     pub tray_icons: bool,
-    pub widgets_button: bool,
-    pub chip_music: bool,
-    pub chip_cpu: bool,
-    pub chip_ram: bool,
-    pub chip_gpu: bool,
-    pub chip_net: bool,
+    pub taskbar_left: String,
+    pub taskbar_right: String,
     pub widgets_panel: String,
     pub widgets_columns: u32,
     pub stats_seconds: u32,
@@ -221,12 +214,8 @@ impl Default for Config {
             start_show_recent: true,
             start_show_all_apps: true,
             start_opacity: 0.55,
-            widgets_button: true,
-            chip_music: true,
-            chip_cpu: true,
-            chip_ram: true,
-            chip_gpu: false,
-            chip_net: false,
+            taskbar_left: "weather".into(),
+            taskbar_right: "music,cpu,ram,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
             widgets_columns: 1,
             stats_seconds: 2,
@@ -261,7 +250,47 @@ fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
+fn list_has(list: &str, name: &str) -> bool {
+    list.split(',').any(|n| n.trim().eq_ignore_ascii_case(name))
+}
+
+fn list_without(list: &str, name: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(name))
+        .map(String::from)
+        .collect()
+}
+
 impl Config {
+    /// Whether the taskbar widget `name` is on either side.
+    pub fn placed(&self, name: &str) -> bool {
+        list_has(&self.taskbar_left, name) || list_has(&self.taskbar_right, name)
+    }
+
+    /// "left", "right" or "off".
+    pub fn place_of(&self, name: &str) -> &'static str {
+        if list_has(&self.taskbar_left, name) {
+            "left"
+        } else if list_has(&self.taskbar_right, name) {
+            "right"
+        } else {
+            "off"
+        }
+    }
+
+    /// The two lists with `name` moved to `place` (the end of that side's list).
+    pub fn with_place(&self, name: &str, place: &str) -> (String, String) {
+        let mut left = list_without(&self.taskbar_left, name);
+        let mut right = list_without(&self.taskbar_right, name);
+        match place {
+            "left" => left.push(name.to_string()),
+            "right" => right.push(name.to_string()),
+            _ => {}
+        }
+        (left.join(","), right.join(","))
+    }
+
     /// Corner radius (layout px) matching the DWM corner style.
     pub fn corner_radius(&self) -> f32 {
         match self.taskbar_corners.as_str() {
@@ -347,12 +376,8 @@ impl Config {
                 "show_search" => set_b(&mut c.show_search),
                 "show_status" => set_b(&mut c.show_status),
                 "show_clock" => set_b(&mut c.show_clock),
-                "widgets_button" => set_b(&mut c.widgets_button),
-                "chip_music" => set_b(&mut c.chip_music),
-                "chip_cpu" => set_b(&mut c.chip_cpu),
-                "chip_ram" => set_b(&mut c.chip_ram),
-                "chip_gpu" => set_b(&mut c.chip_gpu),
-                "chip_net" => set_b(&mut c.chip_net),
+                "taskbar_left" => c.taskbar_left = v.trim_matches('"').to_string(),
+                "taskbar_right" => c.taskbar_right = v.trim_matches('"').to_string(),
                 "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
                 "widgets_columns" => set_u(&mut c.widgets_columns, 1.0, 2.0),
                 "stats_seconds" => set_u(&mut c.stats_seconds, 1.0, 10.0),
@@ -440,12 +465,9 @@ impl Config {
             "show_search" => b(self.show_search),
             "show_status" => b(self.show_status),
             "show_clock" => b(self.show_clock),
-            "widgets_button" => b(self.widgets_button),
-            "chip_music" => b(self.chip_music),
-            "chip_cpu" => b(self.chip_cpu),
-            "chip_ram" => b(self.chip_ram),
-            "chip_gpu" => b(self.chip_gpu),
-            "chip_net" => b(self.chip_net),
+            "taskbar_left" => self.taskbar_left.clone(),
+            "taskbar_right" => self.taskbar_right.clone(),
+            k if k.starts_with("place_") => self.place_of(&k["place_".len()..]).to_string(),
             "widgets_panel" => self.widgets_panel.clone(),
             "widgets_columns" => self.widgets_columns.to_string(),
             "stats_seconds" => self.stats_seconds.to_string(),

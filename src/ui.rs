@@ -1637,6 +1637,12 @@ impl App {
     fn apply_change(&mut self, change: Change) {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Set(key, v) if key.starts_with("place_") => {
+                let (left, right) = self.cfg.with_place(&key["place_".len()..], &v);
+                Config::set("taskbar_left", &left);
+                Config::set("taskbar_right", &right);
+                self.reload_config();
+            }
             Change::Set("admin_helper", v) => {
                 let on = v == "true";
                 if on != self.cfg.admin_helper {
@@ -1921,7 +1927,7 @@ impl App {
     /// Starts or stops the stats timer: it runs only while a stats widget
     /// is on screen (taskbar chips or the open panel).
     fn arm_stats(&mut self) {
-        let chips = self.cfg.chip_cpu || self.cfg.chip_ram || self.cfg.chip_gpu || self.cfg.chip_net;
+        let chips = ["cpu", "ram", "gpu", "net"].iter().any(|n| self.cfg.placed(n));
         let want = (self.cfg.dock && self.dock.shown && chips) || self.widgets.open;
         unsafe {
             if want {
@@ -1942,7 +1948,7 @@ impl App {
     fn sample_stats(&mut self) {
         let before = self.sysmon.stats.signature();
         // GPU and disk load cost a bit more: only when they are shown.
-        self.sysmon.sample(self.cfg.chip_gpu || self.widgets.open);
+        self.sysmon.sample(self.cfg.placed("gpu") || self.widgets.open);
         if self.sysmon.stats.signature() != before {
             self.dock.dirty = true;
         }

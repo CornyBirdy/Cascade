@@ -65,6 +65,9 @@ fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
     Ctl::Slider { min, max, step, unit }
 }
 
+/// Where a taskbar widget goes.
+const PLACE: Ctl = Ctl::Choice(&[("off", "Off"), ("left", "Left"), ("right", "Right")]);
+
 fn rows(section: usize) -> Vec<Row> {
     use Ctl::*;
     match section {
@@ -178,12 +181,25 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
         ],
         4 => vec![
-            row("widgets_button", "Widgets button", "A button at the right of the taskbar that opens the panel.", Toggle),
-            row("chip_music", "Music", "What's playing, with a play / pause button.", Toggle),
-            row("chip_cpu", "CPU", "Processor load on the taskbar.", Toggle),
-            row("chip_ram", "Memory", "Memory in use on the taskbar.", Toggle),
-            row("chip_gpu", "GPU", "Graphics load on the taskbar.", Toggle),
-            row("chip_net", "Network", "Download and upload speed on the taskbar.", Toggle),
+            row("place_weather", "Weather", "Where the weather sits on the taskbar.", PLACE),
+            row("place_music", "Music", "What's playing, with a play / pause button.", PLACE),
+            row("place_cpu", "CPU", "Processor load.", PLACE),
+            row("place_ram", "Memory", "Memory in use.", PLACE),
+            row("place_gpu", "GPU", "Graphics load.", PLACE),
+            row("place_net", "Network", "Download and upload speed.", PLACE),
+            row("place_widgets", "Widgets button", "Opens the widgets panel.", PLACE),
+            row(
+                "taskbar_left",
+                "Left side order",
+                "Left to right: weather, music, cpu, ram, gpu, net, widgets.",
+                Text { secret: false },
+            ),
+            row(
+                "taskbar_right",
+                "Right side order",
+                "Left to right, ending at the system tray.",
+                Text { secret: false },
+            ),
             row(
                 "widgets_panel",
                 "Panel cards",

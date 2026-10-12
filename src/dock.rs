@@ -46,6 +46,8 @@ const CHIP_STAT_W: f32 = 48.0;
 const CHIP_NET_W: f32 = 84.0;
 const CHIP_MUSIC_W: f32 = 196.0;
 const WIDGETS_BTN_W: f32 = 28.0;
+/// Space between widgets on the same side.
+const ITEM_GAP: f32 = 2.0;
 pub const ACCENT: Color = Color(0.38, 0.67, 1.0, 1.0);
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
@@ -108,11 +110,42 @@ impl Icon {
 /// Small live widgets on the taskbar.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Chip {
+    Weather,
     Music,
     Cpu,
     Ram,
     Gpu,
     Net,
+    /// The button that opens the widgets panel.
+    Widgets,
+}
+
+impl Chip {
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "weather" => Chip::Weather,
+            "music" => Chip::Music,
+            "cpu" => Chip::Cpu,
+            "ram" | "memory" => Chip::Ram,
+            "gpu" => Chip::Gpu,
+            "net" | "network" => Chip::Net,
+            "widgets" => Chip::Widgets,
+            _ => return None,
+        })
+    }
+}
+
+/// "weather, cpu" -> the widgets, in that order (unknown names and repeats ignored).
+fn parse_chips(list: &str) -> Vec<Chip> {
+    let mut out = Vec::new();
+    for name in list.split(',') {
+        if let Some(c) = Chip::parse(name) {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// What the taskbar widgets show.
@@ -173,13 +206,13 @@ struct Geo {
     y1: f32,
     start: Span,
     search: Option<Span>,
-    weather: Option<Span>,
     apps: Vec<Span>,
     /// The ^ button, when some icons are hidden under it.
     tray: Option<Span>,
     tray_icons: Vec<(usize, Span)>,
-    widgets_btn: Option<Span>,
-    chips: Vec<(Chip, Span)>,
+    /// Widgets on the left and right sides, in screen order.
+    left: Vec<(Chip, Span)>,
+    right: Vec<(Chip, Span)>,
     status: Span,
     clock: Span,
     /// Rounded panels (x0, x1) that get a blur behind them.
@@ -227,8 +260,8 @@ pub struct Dock {
     show_clock: bool,
     show_weather: bool,
     show_tray: bool,
-    show_widgets_btn: bool,
-    chips_cfg: Vec<Chip>,
+    left_cfg: Vec<Chip>,
+    right_cfg: Vec<Chip>,
 
     k: f32,
     monitor: RECT,
@@ -366,6 +399,17 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
     }
 }
 
+/// How wide a widget is, or None if it has nothing to show right now.
+fn chip_width(c: Chip, has_media: bool, has_weather: bool) -> Option<f32> {
+    match c {
+        Chip::Weather => has_weather.then_some(WEATHER_W),
+        Chip::Music => has_media.then_some(CHIP_MUSIC_W),
+        Chip::Net => Some(CHIP_NET_W),
+        Chip::Widgets => Some(WIDGETS_BTN_W),
+        Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
+    }
+}
+
 impl Dock {
     pub fn new(hwnd: HWND, trigger: HWND, icon_tx: Sender<String>, backdrops: Vec<Backdrop>) -> Self {
         let mut d = Self {
@@ -403,8 +447,8 @@ impl Dock {
             show_clock: true,
             show_weather: true,
             show_tray: true,
-            show_widgets_btn: true,
-            chips_cfg: Vec::new(),
+            left_cfg: Vec::new(),
+            right_cfg: Vec::new(),
             k: 1.0,
             monitor: RECT::default(),
             bottom: 0,
@@ -533,17 +577,8 @@ impl Dock {
         self.show_clock = cfg.show_clock;
         self.show_weather = cfg.weather;
         self.show_tray = cfg.tray_icons;
-        self.show_widgets_btn = cfg.widgets_button;
-        self.chips_cfg = [
-            (cfg.chip_music, Chip::Music),
-            (cfg.chip_cpu, Chip::Cpu),
-            (cfg.chip_ram, Chip::Ram),
-            (cfg.chip_gpu, Chip::Gpu),
-            (cfg.chip_net, Chip::Net),
-        ]
-        .into_iter()
-        .filter_map(|(on, c)| on.then_some(c))
-        .collect();
+        self.left_cfg = parse_chips(&cfg.taskbar_left);
+        self.right_cfg = parse_chips(&cfg.taskbar_right);
         self.monitor = monitor;
         self.k = k;
         let tint = ((self.opacity * 255.0) as u32) << 24 | 0x00_1C1C1E;
@@ -767,10 +802,10 @@ impl Dock {
         ww: f32,
         wh: f32,
         status: &Status,
-        weather: bool,
         tray: &[usize],
         overflow: bool,
         has_media: bool,
+        has_weather: bool,
     ) -> Geo {
         let b = self.button();
         let pad = self.edge();
@@ -783,12 +818,22 @@ impl Dock {
         let slots: Vec<f32> = self.apps.iter().map(|a| (b + GAP) * a.presence.value.clamp(0.0, 1.0)).collect();
         let search_w = if self.show_search { SEARCH_W + GAP } else { 0.0 };
         let group_w = b + GAP + search_w + slots.iter().sum::<f32>() - GAP;
-        let weather_island = x0 + pad * 2.0 + WEATHER_W;
-        let gx = match (self.left, weather, self.full) {
+
+        // Left side widgets, from the bar's left end.
+        let mut left = Vec::new();
+        let mut lx = x0 + pad;
+        for &c in &self.left_cfg {
+            if let Some(w) = chip_width(c, has_media, has_weather) {
+                left.push((c, Span { x: lx, w }));
+                lx += w + ITEM_GAP;
+            }
+        }
+        let left_end = if left.is_empty() { x0 } else { lx - ITEM_GAP + pad };
+        let gx = match (self.left, left.is_empty(), self.full) {
             (false, ..) => (ww - group_w) / 2.0,
-            (true, false, _) => x0 + pad,
-            (true, true, true) => weather_island + pad,
-            (true, true, false) => weather_island + ISLAND_GAP + pad,
+            (true, true, _) => x0 + pad,
+            (true, false, true) => left_end + 16.0,
+            (true, false, false) => left_end + ISLAND_GAP + pad,
         };
 
         let start = Span { x: gx, w: b };
@@ -821,34 +866,24 @@ impl Dock {
             rx -= TRAY_W;
             Span { x: rx, w: TRAY_W }
         });
-        // Widgets: the button, then the chips, left of the tray.
-        let mut chips = Vec::new();
-        for &c in self.chips_cfg.iter().rev() {
-            let w = match c {
-                Chip::Music if has_media => CHIP_MUSIC_W,
-                Chip::Music => continue,
-                Chip::Net => CHIP_NET_W,
-                _ => CHIP_STAT_W,
-            };
-            rx -= w;
-            chips.push((c, Span { x: rx, w }));
+        // Right side widgets, ending at the tray.
+        let mut right = Vec::new();
+        for &c in self.right_cfg.iter().rev() {
+            if let Some(w) = chip_width(c, has_media, has_weather) {
+                rx -= w;
+                right.push((c, Span { x: rx, w }));
+                rx -= ITEM_GAP;
+            }
         }
-        chips.reverse();
-        let widgets_btn = self.show_widgets_btn.then(|| {
-            rx -= WIDGETS_BTN_W;
-            Span { x: rx, w: WIDGETS_BTN_W }
-        });
+        right.reverse();
         let right_x = rx - pad;
-
-        // Left: weather.
-        let weather_span = weather.then_some(Span { x: x0 + pad, w: WEATHER_W });
 
         let islands = if self.full {
             vec![(x0, x1)]
         } else {
             let mut v = Vec::new();
-            if weather {
-                v.push((x0, weather_island));
+            if !left.is_empty() {
+                v.push((x0, left_end));
             }
             v.push((gx - pad, gx + group_w + pad));
             if right_x < x1 - pad - 1.0 {
@@ -861,12 +896,11 @@ impl Dock {
             y1,
             start,
             search,
-            weather: weather_span,
             apps,
             tray: tray_span,
             tray_icons,
-            widgets_btn,
-            chips,
+            left,
+            right,
             status: status_span,
             clock,
             islands,
@@ -884,18 +918,17 @@ impl Dock {
         if g.search.is_some_and(|s| s.contains(x)) {
             return Some(Hot::Search);
         }
-        if g.weather.is_some_and(|s| s.contains(x)) {
-            return Some(Hot::Weather);
-        }
         if let Some(i) = g.apps.iter().position(|s| s.w > 4.0 && s.contains(x)) {
             return Some(Hot::App(i));
         }
-        if g.widgets_btn.is_some_and(|s| s.contains(x)) {
-            return Some(Hot::Widgets);
-        }
-        if let Some((c, s)) = g.chips.iter().find(|(_, s)| s.contains(x)) {
-            // The play/pause button is the music widget's right edge.
-            return Some(if *c == Chip::Music && x >= s.x + s.w - 30.0 { Hot::MusicToggle } else { Hot::Chip(*c) });
+        if let Some((c, s)) = g.left.iter().chain(g.right.iter()).find(|(_, s)| s.contains(x)) {
+            return Some(match c {
+                Chip::Weather => Hot::Weather,
+                Chip::Widgets => Hot::Widgets,
+                // The play/pause button is the music widget's right edge.
+                Chip::Music if x >= s.x + s.w - 30.0 => Hot::MusicToggle,
+                c => Hot::Chip(*c),
+            });
         }
         if g.tray.is_some_and(|s| s.contains(x)) {
             return Some(Hot::Tray);
@@ -1120,8 +1153,8 @@ impl Dock {
         let hidden_px = (14.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
-        let show_weather = self.show_weather && weather.is_some();
-        self.geo = self.layout(ww, wh, status, show_weather, &inline, overflow, wd.media.is_some());
+        let has_weather = self.show_weather && weather.is_some();
+        self.geo = self.layout(ww, wh, status, &inline, overflow, wd.media.is_some(), has_weather);
         let g = &self.geo;
 
         // Blur behind each island, just under this window.
@@ -1190,18 +1223,6 @@ impl Dock {
                 p.text("Search", &f.body, s.x + 32.0, sy, s.w - 36.0, sh, Align::Left, Color::white(0.75));
             }
 
-            // Weather.
-            if let (Some(s), Some(wx)) = (g.weather, weather) {
-                if let Some(c) = hover_bg(Hot::Weather) {
-                    p.rrect(s.x, by, s.w, b, 5.0, c);
-                }
-                crate::ui::weather_icon(&p, s.x + 18.0, g.y0 + bh / 2.0, 24.0, wx.code, wx.day, 1.0);
-                let unit = if wx.fahrenheit { "F" } else { "C" };
-                let ty = g.y0 + bh / 2.0;
-                p.text(&format!("{:.0}\u{b0}{unit}", wx.temp), &f.label, s.x + 36.0, ty - 17.0, s.w - 38.0, 17.0, Align::Left, Color::white(0.95));
-                p.text(wx.describe(), &f.small, s.x + 36.0, ty, s.w - 38.0, 15.0, Align::Left, Color::white(0.6));
-            }
-
             // Apps.
             let mut tip: Option<(f32, String)> = None;
             for (i, a) in self.apps.iter().enumerate() {
@@ -1261,19 +1282,16 @@ impl Dock {
                 }
             }
 
-            // Widgets button and the small widgets.
+            // Widgets, left and right side.
             let mid_y = g.y0 + bh / 2.0;
-            if let Some(s) = g.widgets_btn {
-                if let Some(c) = hover_bg(Hot::Widgets) {
-                    p.rrect(s.x, by, s.w, b, 5.0, c);
-                }
-                let c = Color::white(0.85);
-                for (dx, dy) in [(-4.5, -4.5), (0.5, -4.5), (-4.5, 0.5), (0.5, 0.5)] {
-                    p.rrect(s.centre() + dx, mid_y + dy, 4.0, 4.0, 1.2, c);
-                }
-            }
-            for &(chip, s) in &g.chips {
-                if let Some(c) = hover_bg(Hot::Chip(chip)).or_else(|| (chip == Chip::Music).then(|| hover_bg(Hot::MusicToggle)).flatten()) {
+            for &(chip, s) in g.left.iter().chain(g.right.iter()) {
+                let hot = match chip {
+                    Chip::Weather => Hot::Weather,
+                    Chip::Widgets => Hot::Widgets,
+                    c => Hot::Chip(c),
+                };
+                let hover = hover_bg(hot).or_else(|| if chip == Chip::Music { hover_bg(Hot::MusicToggle) } else { None });
+                if let Some(c) = hover {
                     p.rrect(s.x, by, s.w, b, 5.0, c);
                 }
                 let st = wd.stats;
@@ -1284,6 +1302,19 @@ impl Dock {
                     p.text(bottom, font_b, s.x, mid_y, s.w, 16.0, Align::Center, bottom_c);
                 };
                 match chip {
+                    Chip::Weather => {
+                        let Some(wx) = weather else { continue };
+                        crate::ui::weather_icon(&p, s.x + 18.0, mid_y, 24.0, wx.code, wx.day, 1.0);
+                        let unit = if wx.fahrenheit { "F" } else { "C" };
+                        p.text(&format!("{:.0}\u{b0}{unit}", wx.temp), &f.label, s.x + 36.0, mid_y - 17.0, s.w - 38.0, 17.0, Align::Left, white);
+                        p.text(wx.describe(), &f.small, s.x + 36.0, mid_y, s.w - 38.0, 15.0, Align::Left, Color::white(0.6));
+                    }
+                    Chip::Widgets => {
+                        let c = Color::white(0.85);
+                        for (dx, dy) in [(-4.5, -4.5), (0.5, -4.5), (-4.5, 0.5), (0.5, 0.5)] {
+                            p.rrect(s.centre() + dx, mid_y + dy, 4.0, 4.0, 1.2, c);
+                        }
+                    }
                     Chip::Cpu => two("CPU", &format!("{:.0}%", st.cpu), grey, white, &f.label),
                     Chip::Ram => two("RAM", &format!("{:.0}%", st.ram), grey, white, &f.label),
                     Chip::Gpu => match st.gpu {
