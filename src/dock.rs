@@ -1449,7 +1449,10 @@ impl Dock {
 
     /// Screen y of the bar's top edge.
     pub fn panel_top(&self) -> i32 {
-        self.screen.top + (self.geo.y0 * self.k) as i32
+        // Where the bar sits fully revealed, so the Start menu doesn't land
+        // on a bar that is still sliding up from auto-hide.
+        let sunk = (14.0 * self.k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
+        self.screen.top - sunk + (self.geo.y0 * self.k) as i32
     }
 
     /// Screen x the Start menu should line up with (its left edge when the

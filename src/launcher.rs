@@ -1131,31 +1131,36 @@ impl Launcher {
                     if ja > 0.01 {
                         self.hits.truncate(mark);
                         let (ox, oy, ow, oh) = (g.rx - 6.0, top - 4.0, rw + 10.0, list_bottom - top + 4.0);
-                        p.rrect(ox, oy, ow, oh, 10.0, Color(0.11, 0.11, 0.12, 0.97 * ja));
-                        p.stroke_rrect(ox + 0.5, oy + 0.5, ow - 1.0, oh - 1.0, 10.0, Color::white(0.08 * ja), 1.0);
-                        let (cw, ch) = ((ow - 16.0) / 4.0, ((oh - 16.0) / 7.0).min(54.0));
+                        // Same flat panel as the menu, fading in; no outline.
+                        p.rrect(ox, oy, ow, oh, 8.0, Color(0.14, 0.14, 0.15, 0.97 * ja));
+                        let slide = (1.0 - ja) * 6.0;
+                        let pad = 10.0;
+                        p.text(
+                            "Jump to",
+                            &f.label,
+                            ox + pad + 2.0,
+                            oy + pad + slide,
+                            ow,
+                            20.0,
+                            Align::Left,
+                            Color::white(0.55 * ja),
+                        );
+                        let (gx, gy) = (ox + pad, oy + pad + 28.0 + slide);
+                        let (cw, ch) = ((ow - pad * 2.0) / 4.0, ((oh - pad * 2.0 - 28.0) / 7.0).min(48.0));
                         let mut cells = Vec::new();
                         for (n, &l) in LETTERS.iter().enumerate() {
                             let has = self.rows.iter().any(|r| matches!(r, Row::Letter(x) if *x == l));
-                            let t = (ja * 1.8 - n as f32 * 0.03).clamp(0.0, 1.0);
-                            let e = t * t * (3.0 - 2.0 * t);
-                            let (cx, cy) =
-                                (ox + 8.0 + (n % 4) as f32 * cw, oy + 8.0 + (n / 4) as f32 * ch + (1.0 - e) * 10.0);
+                            let (cx, cy) = (gx + (n % 4) as f32 * cw + 2.0, gy + (n / 4) as f32 * ch + 2.0);
+                            let (tw, th) = (cw - 4.0, ch - 4.0);
                             let hot = has && self.hovered == Some(Target::Jump(l));
                             if has {
-                                p.rrect(
-                                    cx + 3.0,
-                                    cy + 3.0,
-                                    cw - 6.0,
-                                    ch - 6.0,
-                                    8.0,
-                                    Color::white((if hot { 0.17 } else { 0.07 }) * e),
-                                );
+                                let tile = if hot { ACCENT.alpha(0.32) } else { Color::white(0.06) };
+                                p.rrect(cx, cy, tw, th, 6.0, tile.alpha(ja));
                             }
-                            let col = if has { ACCENT.alpha(e) } else { Color::white(0.2 * e) };
-                            p.text(&l.to_string(), &f.title, cx, cy, cw, ch, Align::Center, col);
+                            let col = if has { Color::white(0.95 * ja) } else { Color::white(0.2 * ja) };
+                            p.text(&l.to_string(), &f.title, cx, cy, tw, th, Align::Center, col);
                             if has && self.jump_open {
-                                cells.push((Target::Jump(l), cx + 3.0, cy + 3.0, cw - 6.0, ch - 6.0));
+                                cells.push((Target::Jump(l), cx, cy, tw, th));
                             }
                         }
                         self.hits.extend(cells);
