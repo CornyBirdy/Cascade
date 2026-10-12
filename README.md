@@ -23,7 +23,7 @@ A small black notch at the top centre of your main screen. Turn it off in the ri
 - **Drag pinned icons** to reorder them.
 - **Right-click an icon** to pin or unpin it, open a new window, or close its windows.
 - **Auto-hide** (optional): the dock fades away until you push the mouse to the bottom edge. This works best with the Windows taskbar hidden.
-- **Hide Windows taskbar** (optional): Cascade becomes your taskbar. The real one is restored when Cascade quits, and also on the next start if Cascade crashed.
+- **Replaces the Windows taskbar** while the dock is on (untick *Hide Windows taskbar* to keep both). The real taskbar is restored when Cascade quits, when the dock is turned off, and on the next start if Cascade crashed.
 
 Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
@@ -36,6 +36,12 @@ Grab `cascade.exe` from the latest successful **build** run in the Actions tab (
 - Hide Windows volume flyout
 - Open / reload config (`%APPDATA%\Cascade\config.ini`; focus-timer lengths, weather location, sizes and more)
 - Quit
+
+## Updating
+
+Right-click the notch, dock or tray icon and choose **Update Cascade**. One click checks GitHub for a newer build, downloads it, swaps the exe and restarts. Cascade also checks every few hours and shows a note in the notch when an update is out.
+
+Every push to the default branch is published as a GitHub release (`build-N`), and that's where the updater looks. While the repo is **private**, GitHub only serves releases to signed-in users. In that case, create a fine-grained token with read-only *Contents* access to this repo and paste it after `github_token =` in the config file. If the repo is public, no token is needed.
 
 To build it yourself, install [Rust](https://rustup.rs) on Windows and run `cargo build --release`. The exe lands in `target\release\cascade.exe`.
 
@@ -73,5 +79,7 @@ Frames are only drawn while something is animating. Rendering uses Direct2D's so
 | `src/weather.rs` | Open-Meteo over WinHTTP |
 | `src/pomodoro.rs` | Focus timer |
 | `src/icons.rs` | App icons and names for the dock |
+| `src/update.rs` | One-click updates from GitHub releases |
+| `src/http.rs` | Tiny WinHTTP client |
 | `src/shell.rs` | Tray, autostart, fullscreen, taskbar, flyout, menus |
 | `src/config.rs` | `config.ini` |

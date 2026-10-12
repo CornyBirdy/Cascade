@@ -15,9 +15,13 @@ use crate::msg;
 /// Returns false if Cascade is already running.
 pub fn claim_single_instance() -> bool {
     unsafe {
-        let handle = CreateMutexW(None, true, w!("Local\\CascadeNotchSingleInstance"));
-        // The mutex handle is intentionally leaked; it lives as long as we do.
-        handle.is_ok() && GetLastError() != ERROR_ALREADY_EXISTS
+        let Ok(handle) = CreateMutexW(None, true, w!("Local\\CascadeNotchSingleInstance")) else { return false };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            return false;
+        }
+        // The mutex handle is intentionally kept; it lives as long as we do.
+        true
     }
 }
 
@@ -360,14 +364,17 @@ pub enum MenuCmd {
     Flyout,
     OpenConfig,
     Reload,
+    Update,
     Quit,
 }
 
 pub struct MenuState {
+    pub update_label: String,
     pub notch: bool,
     pub dock: bool,
     pub dock_autohide: bool,
     pub hide_taskbar: bool,
+    pub hide_taskbar_allowed: bool,
     pub autostart: bool,
     pub flyout_hidden: bool,
 }
@@ -395,7 +402,7 @@ fn track(hwnd: HWND, menu: HMENU) -> usize {
 }
 
 pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 10] = [
+    const IDS: [MenuCmd; 11] = [
         MenuCmd::None,
         MenuCmd::Notch,
         MenuCmd::Dock,
@@ -406,6 +413,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         MenuCmd::OpenConfig,
         MenuCmd::Reload,
         MenuCmd::Quit,
+        MenuCmd::Update,
     ];
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
@@ -415,7 +423,9 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show dock"));
         let flags = if state.dock { check(state.dock_autohide) } else { check(state.dock_autohide) | MF_GRAYED };
         let _ = AppendMenuW(menu, flags, 3, w!("Auto-hide dock"));
-        let _ = AppendMenuW(menu, check(state.hide_taskbar), 4, w!("Hide Windows taskbar"));
+        let flags =
+            if state.hide_taskbar_allowed { check(state.hide_taskbar) } else { check(state.hide_taskbar) | MF_GRAYED };
+        let _ = AppendMenuW(menu, flags, 4, w!("Hide Windows taskbar while the dock is on"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
         let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
@@ -423,6 +433,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, MF_STRING, 7, w!("Open config file"));
         let _ = AppendMenuW(menu, MF_STRING, 8, w!("Reload config"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 10, &HSTRING::from(state.update_label.as_str()));
         let _ = AppendMenuW(menu, MF_STRING, 9, w!("Quit Cascade"));
         IDS.get(track(hwnd, menu)).copied().unwrap_or(MenuCmd::None)
     }

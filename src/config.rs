@@ -31,8 +31,8 @@ scale = 1.0
 dock = true
 # Slide the dock away until the mouse touches the bottom edge.
 dock_autohide = false
-# Hide the Windows taskbar (restored when Cascade quits).
-hide_taskbar = false
+# Hide the Windows taskbar while the dock is on (restored when Cascade quits).
+hide_taskbar = true
 dock_icon_size = 46
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0.35
@@ -46,6 +46,13 @@ weather = true
 # Empty = detect from your IP. Or a city name, or \"lat,lon\".
 weather_location =
 fahrenheit = false
+
+# ---- Updates ----
+# Check GitHub for a newer build every few hours (right-click > Update to install).
+update_check = true
+# Only needed while the GitHub repo is private: a fine-grained token with
+# read-only \"Contents\" access to CornyBirdy/Cascade.
+github_token =
 
 # ---- General ----
 # Frame-rate cap while animating (also capped to your refresh rate).
@@ -77,6 +84,8 @@ pub struct Config {
     pub weather: bool,
     pub weather_location: String,
     pub fahrenheit: bool,
+    pub update_check: bool,
+    pub github_token: String,
     pub max_fps: u32,
 }
 
@@ -98,7 +107,7 @@ impl Default for Config {
             scale: 1.0,
             dock: true,
             dock_autohide: false,
-            hide_taskbar: false,
+            hide_taskbar: true,
             dock_icon_size: 46.0,
             dock_magnify: 0.35,
             focus_minutes: 25,
@@ -106,6 +115,8 @@ impl Default for Config {
             weather: true,
             weather_location: String::new(),
             fahrenheit: false,
+            update_check: true,
+            github_token: String::new(),
             max_fps: 144,
         }
     }
@@ -189,6 +200,8 @@ impl Config {
                 "weather" => set_b(&mut c.weather),
                 "weather_location" => c.weather_location = v.trim_matches('"').to_string(),
                 "fahrenheit" => set_b(&mut c.fahrenheit),
+                "update_check" => set_b(&mut c.update_check),
+                "github_token" => c.github_token = v.trim_matches('"').to_string(),
                 "max_fps" => set_u(&mut c.max_fps, 15.0, 500.0),
                 _ => {}
             }

@@ -41,6 +41,7 @@ use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::spring::Spring;
+use crate::update;
 use crate::weather::{self, Weather};
 
 /// Width of the concave flares joining the notch to the screen edge.
@@ -99,6 +100,8 @@ enum PeekKind {
     Volume,
     Brightness,
     Timer,
+    /// A short status line (`App::message`), e.g. update progress.
+    Message,
 }
 
 /// Clickable things in the open notch.
@@ -190,6 +193,11 @@ struct App {
     preview: Preview,
     hooks: Vec<HWINEVENTHOOK>,
     taskbar_hidden: bool,
+
+    message: String,
+    message_color: Color,
+    update_available: Option<u32>,
+    updating: bool,
 }
 
 fn create_window(class: PCWSTR, instance: HINSTANCE, ex: WINDOW_EX_STYLE) -> Result<HWND> {
@@ -464,11 +472,18 @@ impl App {
             preview: Preview::new(preview_hwnd),
             hooks: Vec::new(),
             taskbar_hidden: false,
+            message: String::new(),
+            message_color: ACCENT,
+            update_available: None,
+            updating: false,
             cfg,
         })
     }
 
     fn start(&mut self) {
+        if self.cfg.update_check {
+            update::spawn_checker(self.cfg.github_token.clone());
+        }
         self.apply_taskbar();
         self.update_display();
         self.apply_flyout();
@@ -529,7 +544,7 @@ impl App {
     }
 
     fn apply_taskbar(&mut self) {
-        if self.cfg.hide_taskbar {
+        if self.cfg.dock && self.cfg.hide_taskbar {
             shell::hide_taskbar();
             self.taskbar_hidden = true;
         } else {
@@ -540,7 +555,7 @@ impl App {
     }
 
     fn apply_dock(&mut self) {
-        let hooks_wanted = self.cfg.dock || self.cfg.hide_taskbar;
+        let hooks_wanted = self.cfg.dock;
         if hooks_wanted && self.hooks.is_empty() {
             let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
             let ranges = [
@@ -596,6 +611,7 @@ impl App {
             View::Idle => (iw, ih, ih * 0.36),
             View::Live => (iw + 104.0, ih, ih * 0.42),
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
+            View::Peek if self.peek == Some(PeekKind::Message) => (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek => (iw + 110.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Expanded => match self.mode {
                 Mode::Media if self.media.is_some() => (420.0, 166.0, 30.0),
@@ -668,7 +684,7 @@ impl App {
         let value = match kind {
             PeekKind::Volume => self.vol.0,
             PeekKind::Brightness => self.brightness as f32 / 100.0,
-            PeekKind::Timer => 0.0,
+            PeekKind::Timer | PeekKind::Message => 0.0,
         };
         if self.peek != Some(kind) {
             self.level.snap(value);
@@ -676,8 +692,12 @@ impl App {
         self.level.set(value);
         self.peek = Some(kind);
         unsafe {
-            SetTimer(Some(self.hwnd), TIMER_PEEK, if kind == PeekKind::Timer { 4000 } else { PEEK_MS }, None);
-            if self.flyout_hidden && kind != PeekKind::Timer {
+            let ms = match kind {
+                PeekKind::Timer | PeekKind::Message => 4000,
+                _ => PEEK_MS,
+            };
+            SetTimer(Some(self.hwnd), TIMER_PEEK, ms, None);
+            if self.flyout_hidden && matches!(kind, PeekKind::Volume | PeekKind::Brightness) {
                 // The flyout host can be created lazily on first use.
                 shell::set_flyout_hidden(true);
                 SetTimer(Some(self.hwnd), TIMER_FLYOUT, 60, None);
@@ -781,6 +801,7 @@ impl App {
                 self.brightness_ok = lp.0 != 0;
                 self.dirty = true;
             }
+            msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
             msg::RADIOS => {
                 self.radios = Radios::unpack(wp.0);
                 self.dirty = true;
@@ -804,6 +825,58 @@ impl App {
             _ => return None,
         }
         Some(LRESULT(0))
+    }
+
+    /// Shows a status line in the notch, or a message box if the notch is off.
+    fn notify(&mut self, text: String, color: Color, important: bool) {
+        if self.shown {
+            self.message = text;
+            self.message_color = color;
+            self.show_peek(PeekKind::Message);
+        } else if important {
+            std::thread::spawn(move || unsafe {
+                MessageBoxW(None, &windows::core::HSTRING::from(text), w!("Cascade"), MB_OK | MB_ICONINFORMATION);
+            });
+        }
+    }
+
+    fn on_update(&mut self, outcome: usize, build: u32) {
+        match outcome {
+            update::AVAILABLE => {
+                if self.update_available != Some(build) {
+                    self.update_available = Some(build);
+                    self.notify(
+                        format!("Update available (build {build}) \u{2014} right-click to install"),
+                        ACCENT,
+                        false,
+                    );
+                }
+            }
+            update::UP_TO_DATE => {
+                self.updating = false;
+                self.notify(format!("Cascade is up to date (build {build})"), GREEN, true);
+            }
+            update::INSTALLING => self.notify(format!("Downloading build {build}\u{2026}"), ACCENT, false),
+            update::INSTALLED => {
+                self.notify("Restarting into the new version\u{2026}".into(), GREEN, false);
+                // Quit outside this borrow so shutdown can run normally.
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            update::NO_ACCESS => {
+                self.updating = false;
+                self.notify(
+                    "Can't reach the GitHub repo. If it is private, add a github_token in the config file.".into(),
+                    Color(1.0, 0.45, 0.4, 1.0),
+                    true,
+                );
+            }
+            _ => {
+                self.updating = false;
+                self.notify("Update failed \u{2014} try again later".into(), Color(1.0, 0.45, 0.4, 1.0), true);
+            }
+        }
     }
 
     fn on_media(&mut self, info: Option<MediaInfo>) {
@@ -1074,7 +1147,15 @@ impl App {
     }
 
     fn menu_state(&self) -> MenuState {
+        let update_label = match self.update_available {
+            _ if self.updating => "Updating\u{2026}".to_string(),
+            Some(b) => format!("Update Cascade (build {b} available)"),
+            None if update::current() > 0 => format!("Update Cascade (on build {})", update::current()),
+            None => "Update Cascade".to_string(),
+        };
         MenuState {
+            update_label,
+            hide_taskbar_allowed: self.cfg.dock,
             notch: self.cfg.notch,
             dock: self.cfg.dock,
             dock_autohide: self.cfg.dock_autohide,
@@ -1097,6 +1178,7 @@ impl App {
             }
             MenuCmd::Dock => {
                 flip(&mut self.cfg.dock, "dock");
+                self.apply_taskbar();
                 self.apply_dock();
             }
             MenuCmd::DockAutohide => {
@@ -1114,6 +1196,13 @@ impl App {
                 self.apply_flyout();
             }
             MenuCmd::OpenConfig => shell::open_file(&config::path()),
+            MenuCmd::Update => {
+                if !self.updating {
+                    self.updating = true;
+                    self.notify("Checking for updates\u{2026}".into(), ACCENT, false);
+                    update::spawn_install(self.cfg.github_token.clone());
+                }
+            }
             MenuCmd::Reload => {
                 let old = self.cfg.clone();
                 self.cfg = Config::load();
@@ -1397,7 +1486,9 @@ impl App {
                 match self.view {
                     View::Idle => {}
                     View::Live => self.draw_live(&p, alpha),
-                    View::Peek if self.peek == Some(PeekKind::Timer) => self.draw_timer_peek(&p, alpha),
+                    View::Peek if matches!(self.peek, Some(PeekKind::Timer | PeekKind::Message)) => {
+                        self.draw_timer_peek(&p, alpha)
+                    }
                     View::Peek => {
                         let (_, th, _) = self.size_of(View::Peek);
                         self.draw_level_row(&p, self.origin + 16.0, th / 2.0, tw - 32.0, self.peek, alpha);
@@ -1506,9 +1597,13 @@ impl App {
 
     fn draw_timer_peek(&self, p: &Painter, alpha: f32) {
         let (tw, th, _) = self.size_of(View::Peek);
-        let text =
-            if self.pomo.focus { "Break over \u{2014} time to focus" } else { "Focus done \u{2014} take a break" };
-        let c = if self.pomo.focus { ACCENT } else { GREEN };
+        let (text, c) = if self.peek == Some(PeekKind::Message) {
+            (self.message.as_str(), self.message_color)
+        } else if self.pomo.focus {
+            ("Break over \u{2014} time to focus", ACCENT)
+        } else {
+            ("Focus done \u{2014} take a break", GREEN)
+        };
         p.circle(self.origin + 22.0, th / 2.0, 5.0, c.alpha(alpha));
         p.text(
             text,

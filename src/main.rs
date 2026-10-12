@@ -9,6 +9,7 @@ mod brightness;
 mod config;
 mod dock;
 mod gfx;
+mod http;
 mod icons;
 mod media;
 mod pomodoro;
@@ -17,6 +18,7 @@ mod radios;
 mod shell;
 mod spring;
 mod ui;
+mod update;
 mod weather;
 
 /// Messages worker threads post to the main (notch) window.
@@ -36,6 +38,7 @@ pub mod msg {
     pub const BRIGHTNESS_LEVEL: u32 = WM_APP + 9;
     pub const ICON: u32 = WM_APP + 10;
     pub const WEATHER: u32 = WM_APP + 11;
+    pub const UPDATE: u32 = WM_APP + 12;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -56,9 +59,18 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    if !shell::claim_single_instance() {
-        return;
+    // After an update the new copy starts while the old one is still
+    // shutting down, so give it a few seconds to let go.
+    let updated = std::env::args().any(|a| a == "--updated");
+    let mut tries = if updated { 50 } else { 1 };
+    while !shell::claim_single_instance() {
+        tries -= 1;
+        if tries == 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    update::cleanup();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
