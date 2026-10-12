@@ -825,6 +825,8 @@ impl Launcher {
         let x = match (self.position, anchor) {
             (Position::Center, _) | (Position::Auto, None) => centred,
             (Position::Left, _) => monitor.left + (12.0 * k) as i32,
+            // A Start button at the far right: the menu sits against that edge.
+            (Position::Auto, Some(ax)) if ax >= monitor.right => monitor.right - pw - (12.0 * k) as i32,
             (Position::Auto, Some(ax)) => ax.clamp(monitor.left, monitor.right - pw),
         };
         let x = x.clamp(monitor.left, (monitor.right - pw).max(monitor.left));

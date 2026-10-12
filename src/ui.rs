@@ -277,7 +277,7 @@ pub fn run() -> Result<()> {
         backdrop::register(instance);
         mouseedge::register(instance);
         // Blur panels: up to three taskbar islands, plus the launcher.
-        let dock_backdrops = (0..3).filter_map(|_| Backdrop::create(instance).ok()).collect();
+        let dock_backdrops = (0..4).filter_map(|_| Backdrop::create(instance).ok()).collect();
         let launcher_backdrop = Backdrop::create(instance)?;
         let flyout_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         let flyout = (flyout_hwnd, Backdrop::create(instance)?);
