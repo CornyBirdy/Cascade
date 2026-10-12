@@ -89,6 +89,18 @@ start_columns = 4
 start_pinned_rows = 3
 start_show_sidebar = true
 start_show_recent = true
+# Show the Pinned apps grid, and the account button at the top of the sidebar.
+start_show_pinned = true
+start_show_profile = true
+# Sidebar shortcuts (each can be turned off).
+start_place_settings = true
+start_place_explorer = true
+start_place_downloads = true
+start_place_documents = true
+start_place_pictures = true
+start_place_music = true
+start_place_videos = true
+start_place_network = true
 start_show_all_apps = true
 # Tint over the blur behind the Start menu (0 = clear glass, 1 = solid).
 start_opacity = 0.55
@@ -165,6 +177,10 @@ pub struct Config {
     pub start_pinned_rows: u32,
     pub start_show_sidebar: bool,
     pub start_show_recent: bool,
+    pub start_show_pinned: bool,
+    pub start_show_profile: bool,
+    /// Sidebar shortcuts, in `PLACE_KEYS` order.
+    pub start_places: [bool; 8],
     pub start_show_all_apps: bool,
     pub start_opacity: f32,
     pub focus_minutes: u32,
@@ -217,6 +233,9 @@ impl Default for Config {
             start_pinned_rows: 3,
             start_show_sidebar: true,
             start_show_recent: true,
+            start_show_pinned: true,
+            start_show_profile: true,
+            start_places: [true; 8],
             start_show_all_apps: true,
             start_opacity: 0.55,
             alt_tab: true,
@@ -374,6 +393,13 @@ impl Config {
                 "start_pinned_rows" => set_u(&mut c.start_pinned_rows, 1.0, 4.0),
                 "start_show_sidebar" => set_b(&mut c.start_show_sidebar),
                 "start_show_recent" => set_b(&mut c.start_show_recent),
+                "start_show_pinned" => set_b(&mut c.start_show_pinned),
+                "start_show_profile" => set_b(&mut c.start_show_profile),
+                _ if place_index(k).is_some() => {
+                    if let (Some(i), Some(on)) = (place_index(k), parse_bool(v)) {
+                        c.start_places[i] = on;
+                    }
+                }
                 "start_show_all_apps" => set_b(&mut c.start_show_all_apps),
                 "start_opacity" => set_f(&mut c.start_opacity, 0.0, 1.0),
                 "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
@@ -464,6 +490,9 @@ impl Config {
             "start_pinned_rows" => self.start_pinned_rows.to_string(),
             "start_show_sidebar" => b(self.start_show_sidebar),
             "start_show_recent" => b(self.start_show_recent),
+            "start_show_pinned" => b(self.start_show_pinned),
+            "start_show_profile" => b(self.start_show_profile),
+            _ if place_index(key).is_some() => b(self.start_places[place_index(key).unwrap_or(0)]),
             "start_show_all_apps" => b(self.start_show_all_apps),
             "start_opacity" => self.start_opacity.to_string(),
             "taskbar_corners" => self.taskbar_corners.clone(),
