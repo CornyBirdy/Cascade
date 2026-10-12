@@ -210,6 +210,8 @@ struct App {
     flyout: Flyout,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
+    /// Whether the taskbar is being held in view for an open pop-up.
+    dock_held: bool,
     /// When a click outside last closed the Start menu or tray flyout, so the
     /// same click on its button doesn't open it again.
     outside_close: Option<Instant>,
@@ -617,6 +619,7 @@ impl App {
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             tray_rect: RECT::default(),
             outside_close: None,
+            dock_held: false,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -1516,6 +1519,9 @@ impl App {
             return;
         }
         self.preview.hide();
+        // With auto-hide the taskbar comes up with the menu.
+        self.dock_held = true;
+        self.dock.set_held(true);
         self.launcher.show(self.dpi, self.dock.pinned_apps());
     }
 
@@ -2010,6 +2016,17 @@ impl App {
         if self.flyout.wants_frame() {
             fast |= self.flyout.step(dt);
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
+        }
+        // Keep an auto-hidden taskbar up while the menu or flyout is open,
+        // and let it go again shortly after they close.
+        let hold = self.launcher.open || self.flyout.open;
+        if hold != self.dock_held {
+            self.dock_held = hold;
+            if self.dock.set_held(hold) {
+                unsafe {
+                    SetTimer(Some(self.dock.hwnd), TIMER_DOCK_HIDE, 500, None);
+                }
+            }
         }
         if self.launcher.wants_frame() {
             fast |= self.launcher.step(dt);

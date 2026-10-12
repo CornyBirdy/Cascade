@@ -207,6 +207,9 @@ pub struct Dock {
     pressed: Option<(Hot, i32)>,
     dragging: Option<usize>,
     tracking: bool,
+    /// A pop-up from the taskbar (Start menu, tray flyout) is open, so
+    /// auto-hide keeps it in view.
+    held: bool,
     pub foreground: HWND,
     pub dirty: bool,
     /// Last frame's window rect in screen pixels.
@@ -374,6 +377,7 @@ impl Dock {
             pressed: None,
             dragging: None,
             tracking: false,
+            held: false,
             foreground: HWND::default(),
             dirty: true,
             screen: RECT::default(),
@@ -609,9 +613,20 @@ impl Dock {
         self.dirty = true;
     }
 
+    /// Keeps the taskbar in view while a pop-up is open. Returns true when
+    /// the last one closed and auto-hide should be armed again.
+    pub fn set_held(&mut self, held: bool) -> bool {
+        let was = self.held;
+        self.held = held;
+        if held {
+            self.show_now();
+        }
+        was && !held && self.autohide
+    }
+
     /// Slides the taskbar away if auto-hide is on and nothing holds it open.
     pub fn hide_if_idle(&mut self) -> bool {
-        if self.autohide && self.hover_x.is_none() && self.pressed.is_none() {
+        if self.autohide && self.hover_x.is_none() && self.pressed.is_none() && !self.held {
             self.reveal.set(0.0);
             for b in &mut self.backdrops {
                 b.hide();
