@@ -40,6 +40,8 @@ taskbar_align = center
 taskbar_height = 48
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
 taskbar_margin = 8
+# Space between the taskbar's edges and the buttons inside, on every side.
+taskbar_padding = 4
 # round, small or square
 taskbar_corners = round
 # Blur what's behind the taskbar and Start menu (acrylic).
@@ -49,6 +51,8 @@ taskbar_opacity = 0.55
 show_search = true
 show_status = true
 show_clock = true
+# App icons in the notification area (as set in Windows' taskbar settings).
+tray_icons = true
 dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
@@ -58,6 +62,9 @@ dock_magnify = 0
 launcher = true
 # Open the launcher with a lone Win key press (Win+E etc. still work).
 launcher_win_key = true
+# A small helper with admin rights, so the Win key works over apps run as
+# administrator (Task Manager). Turn on in Settings: asks for permission once.
+admin_helper = false
 
 # ---- Focus timer ----
 focus_minutes = 25
@@ -105,14 +112,17 @@ pub struct Config {
     pub taskbar_align: String,
     pub taskbar_height: f32,
     pub taskbar_margin: f32,
+    pub taskbar_padding: f32,
     pub taskbar_corners: String,
     pub acrylic: bool,
     pub taskbar_opacity: f32,
     pub show_search: bool,
     pub show_status: bool,
     pub show_clock: bool,
+    pub tray_icons: bool,
     pub launcher: bool,
     pub launcher_win_key: bool,
+    pub admin_helper: bool,
     pub focus_minutes: u32,
     pub break_minutes: u32,
     pub weather: bool,
@@ -148,12 +158,15 @@ impl Default for Config {
             taskbar_align: "center".into(),
             taskbar_height: 48.0,
             taskbar_margin: 8.0,
+            taskbar_padding: 4.0,
             taskbar_corners: "round".into(),
             acrylic: true,
             taskbar_opacity: 0.55,
             show_search: true,
             show_status: true,
             show_clock: true,
+            tray_icons: true,
+            admin_helper: false,
             launcher: true,
             launcher_win_key: true,
             focus_minutes: 25,
@@ -254,6 +267,9 @@ impl Config {
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
                 "taskbar_height" => set_f(&mut c.taskbar_height, 32.0, 80.0),
                 "taskbar_margin" => set_f(&mut c.taskbar_margin, 0.0, 32.0),
+                "taskbar_padding" => set_f(&mut c.taskbar_padding, 0.0, 16.0),
+                "tray_icons" => set_b(&mut c.tray_icons),
+                "admin_helper" => set_b(&mut c.admin_helper),
                 "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
                 "acrylic" => set_b(&mut c.acrylic),
                 "taskbar_opacity" => set_f(&mut c.taskbar_opacity, 0.0, 1.0),
@@ -327,6 +343,9 @@ impl Config {
             "taskbar_align" => self.taskbar_align.clone(),
             "taskbar_height" => self.taskbar_height.to_string(),
             "taskbar_margin" => self.taskbar_margin.to_string(),
+            "taskbar_padding" => self.taskbar_padding.to_string(),
+            "tray_icons" => b(self.tray_icons),
+            "admin_helper" => b(self.admin_helper),
             "taskbar_corners" => self.taskbar_corners.clone(),
             "acrylic" => b(self.acrylic),
             "taskbar_opacity" => self.taskbar_opacity.to_string(),

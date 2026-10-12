@@ -202,7 +202,7 @@ pub fn set_autostart(on: bool) {
 /// touching Explorer otherwise; restoring flips it back.
 pub fn set_flyout_hidden(hide: bool) {
     unsafe {
-        let Ok(tray) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) else { return };
+        let Some(tray) = explorer_tray() else { return };
         let mut explorer = 0u32;
         GetWindowThreadProcessId(tray, Some(&mut explorer));
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
@@ -234,11 +234,21 @@ pub fn set_flyout_hidden(hide: bool) {
 
 // --------------------------------------------------------------- taskbar --
 
+/// Explorer's taskbars, main one first (Cascade's own hidden tray window,
+/// which shares the class name, is skipped).
 fn taskbars() -> Vec<HWND> {
     let mut out = Vec::new();
     unsafe {
-        if let Ok(h) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) {
-            out.push(h);
+        let own = windows::Win32::System::Threading::GetCurrentProcessId();
+        let mut after: Option<HWND> = None;
+        while let Ok(h) = FindWindowExW(None, after, w!("Shell_TrayWnd"), PCWSTR::null()) {
+            after = Some(h);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid != own {
+                out.push(h);
+                break;
+            }
         }
         let mut after: Option<HWND> = None;
         while let Ok(h) = FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) {
@@ -247,6 +257,17 @@ fn taskbars() -> Vec<HWND> {
         }
     }
     out
+}
+
+/// Explorer's main taskbar window.
+pub fn explorer_tray() -> Option<HWND> {
+    taskbars().first().copied().filter(|h| unsafe { class_is(*h, "Shell_TrayWnd") })
+}
+
+unsafe fn class_is(h: HWND, name: &str) -> bool {
+    let mut class = [0u16; 32];
+    let n = GetClassNameW(h, &mut class) as usize;
+    String::from_utf16_lossy(&class[..n]) == name
 }
 
 pub fn is_taskbar(hwnd: HWND) -> bool {
@@ -318,11 +339,8 @@ fn send_keys(keys: &[(u16, bool)]) {
     }
 }
 
-const VK_LWIN: u16 = 0x5B;
 const VK_CONTROL: u16 = 0x11;
 const VK_ESCAPE: u16 = 0x1B;
-const VK_RETURN: u16 = 0x0D;
-const VK_B: u16 = 0x42;
 
 /// Whether `hwnd` is the Windows Start menu.
 pub fn is_start_menu(hwnd: HWND) -> bool {
@@ -339,57 +357,6 @@ pub fn is_start_menu(hwnd: HWND) -> bool {
 /// Opens the real Windows Start menu (Ctrl+Esc).
 pub fn open_start_menu() {
     send_keys(&[(VK_CONTROL, false), (VK_ESCAPE, false), (VK_ESCAPE, true), (VK_CONTROL, true)]);
-}
-
-fn explorer_pid() -> Option<u32> {
-    let tray = *taskbars().first()?;
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(tray, Some(&mut pid)) };
-    (pid != 0).then_some(pid)
-}
-
-/// Step one of opening the Windows "hidden icons" flyout: Win+B moves the
-/// keyboard focus to the taskbar's tray. When Cascade hides the taskbar it is
-/// first shown fully transparent and click-through, so only the flyout shows.
-pub fn focus_tray(invisible: bool) {
-    if invisible {
-        if let Some(&tray) = taskbars().first() {
-            unsafe {
-                let ex = GetWindowLongW(tray, GWL_EXSTYLE) as u32;
-                SetWindowLongW(tray, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0) as i32);
-                let _ = SetLayeredWindowAttributes(tray, COLORREF(0), 0, LWA_ALPHA);
-                let _ = ShowWindow(tray, SW_SHOWNA);
-            }
-        }
-    }
-    send_keys(&[(VK_LWIN, false), (VK_B, false), (VK_B, true), (VK_LWIN, true)]);
-}
-
-/// Whether the shell (taskbar, tray or its flyouts) has the foreground.
-pub fn shell_focused() -> bool {
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
-    explorer_pid().is_some_and(|e| e == pid)
-}
-
-/// Step two: Enter on the focused "Show hidden icons" button.
-pub fn press_enter() {
-    send_keys(&[(VK_RETURN, false), (VK_RETURN, true)]);
-}
-
-/// Puts the taskbar back after `focus_tray(true)`.
-pub fn end_tray_overflow(invisible: bool) {
-    if !invisible {
-        return;
-    }
-    if let Some(&tray) = taskbars().first() {
-        unsafe {
-            let _ = ShowWindow(tray, SW_HIDE);
-            let _ = SetLayeredWindowAttributes(tray, COLORREF(0), 255, LWA_ALPHA);
-            let ex = GetWindowLongW(tray, GWL_EXSTYLE) as u32;
-            SetWindowLongW(tray, GWL_EXSTYLE, (ex & !(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0)) as i32);
-        }
-    }
 }
 
 /// Restores the taskbar if Cascade hid it (now or in a run that crashed).

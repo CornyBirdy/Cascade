@@ -12,9 +12,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::config::Config;
 use crate::gfx::{Align, Color, Gfx};
 
-const CW: f32 = 820.0;
+const CW: f32 = 900.0;
 const CH: f32 = 620.0;
 const SIDEBAR: f32 = 220.0;
 const ROW_H: f32 = 58.0;
@@ -108,6 +109,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("taskbar_align", "Alignment", "Where Start and your apps sit.", Choice(&[("center", "Centre"), ("left", "Left")])),
             row("taskbar_height", "Height", "Height of the bar.", slider(32.0, 80.0, 1.0, Unit::Px)),
+            row(
+                "taskbar_padding",
+                "Padding",
+                "Space around the buttons, the same on every side.",
+                slider(0.0, 16.0, 1.0, Unit::Px),
+            ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
                 "taskbar_margin",
@@ -127,6 +134,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("show_status", "Network, volume and battery", "Opens quick settings when clicked.", Toggle),
             row("show_clock", "Clock", "Opens notifications when clicked.", Toggle),
             row(
+                "tray_icons",
+                "App icons by the clock",
+                "Tray icons. Which show is set in Windows' taskbar settings.",
+                Toggle,
+            ),
+            row(
                 "dock_magnify",
                 "Magnification",
                 "Grow icons under the cursor (0 for the Windows look).",
@@ -136,6 +149,12 @@ fn rows(section: usize) -> Vec<Row> {
         3 => vec![
             row("launcher", "Cascade Start menu", "Opened by the Start button on the taskbar.", Toggle),
             row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
+            row(
+                "admin_helper",
+                "Work over admin apps",
+                "So the Win key works over Task Manager. Asks for permission once.",
+                Toggle,
+            ),
         ],
         4 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
@@ -177,6 +196,31 @@ fn fmt(v: f32, unit: Unit) -> String {
 enum Hit {
     Nav(usize),
     Row(usize),
+    /// The "reset to default" button of a row.
+    Reset(usize),
+}
+
+/// The default for `key`, if the row should offer a reset button.
+fn default_of(key: &str) -> Option<String> {
+    if matches!(key, "autostart" | "github_token" | "admin_helper") {
+        return None;
+    }
+    let d = Config::default().get(key);
+    (!d.is_empty() || key == "weather_location").then_some(d)
+}
+
+/// Whether `value` differs from the default (sliders compare as numbers).
+fn changed(r: &Row, value: &str) -> Option<String> {
+    let d = default_of(r.key)?;
+    let differs = match r.ctl {
+        Ctl::Slider { step, .. } => match (value.parse::<f32>(), d.parse::<f32>()) {
+            (Ok(a), Ok(b)) => (a - b).abs() > step / 2.0,
+            _ => value != d,
+        },
+        Ctl::Toggle | Ctl::Choice(_) | Ctl::Text { .. } => value != d,
+        _ => false,
+    };
+    differs.then_some(d)
 }
 
 pub enum Change {
@@ -313,8 +357,8 @@ impl Settings {
         let y = self.row_y(i);
         match ctl {
             Ctl::Toggle => (x1 - 44.0, y + (ROW_H - 22.0) / 2.0, 44.0, 22.0),
-            Ctl::Slider { .. } => (x1 - 200.0, y + 14.0, 200.0, ROW_H - 28.0),
-            Ctl::Text { .. } => (x1 - 260.0, y + (ROW_H - 30.0) / 2.0, 260.0, 30.0),
+            Ctl::Slider { .. } => (x1 - 170.0, y + 14.0, 170.0, ROW_H - 28.0),
+            Ctl::Text { .. } => (x1 - 250.0, y + (ROW_H - 30.0) / 2.0, 250.0, 30.0),
             Ctl::Choice(opts) => {
                 let w = opts.len() as f32 * CHOICE_W;
                 (x1 - w, y + (ROW_H - 32.0) / 2.0, w, 32.0)
@@ -322,6 +366,16 @@ impl Settings {
             Ctl::Button(_) => (x1 - 130.0, y + (ROW_H - 32.0) / 2.0, 130.0, 32.0),
             Ctl::Note => (x1, y, 0.0, 0.0),
         }
+    }
+
+    /// The reset button of row `i` (x, y, size).
+    fn reset_rect(&self, i: usize, ctl: &Ctl) -> (f32, f32, f32) {
+        let (cx, _, _, _) = self.ctl_rect(i, ctl);
+        let x = match ctl {
+            Ctl::Slider { .. } => cx - 112.0,
+            _ => cx - 36.0,
+        };
+        (x, self.row_y(i) + (ROW_H - 26.0) / 2.0, 26.0)
     }
 
     /// Creates the text boxes for the current section.
@@ -374,11 +428,17 @@ impl Settings {
         self.edits.iter().filter_map(|(h, _)| self.commit_edit(*h)).collect()
     }
 
-    fn hit(&self, x: i32, y: i32) -> Option<Hit> {
+    fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         if lx < SIDEBAR {
             let i = ((ly - 80.0) / 40.0).floor();
             return (ly >= 80.0 && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
+        }
+        for (i, r) in rows(self.section).iter().enumerate() {
+            let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
+            if lx >= rx && lx < rx + rs && ly >= ry && ly < ry + rs && changed(r, &get(r.key)).is_some() {
+                return Some(Hit::Reset(i));
+            }
         }
         for (i, r) in rows(self.section).iter().enumerate() {
             let (cx, cy, cw, ch) = self.ctl_rect(i, &r.ctl);
@@ -399,7 +459,7 @@ impl Settings {
         Some(((v - min) / step).round() * step + min)
     }
 
-    pub fn on_move(&mut self, x: i32, y: i32) {
+    pub fn on_move(&mut self, x: i32, y: i32, get: &dyn Fn(&str) -> String) {
         unsafe {
             if !self.tracking {
                 let mut t = TRACKMOUSEEVENT {
@@ -418,7 +478,7 @@ impl Settings {
             }
             return;
         }
-        let h = self.hit(x, y);
+        let h = self.hit(x, y, get);
         if h != self.hovered {
             self.hovered = h;
             self.invalidate();
@@ -432,8 +492,23 @@ impl Settings {
     }
 
     pub fn on_down(&mut self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Change> {
-        let hit = self.hit(x, y)?;
+        let hit = self.hit(x, y, get)?;
         match hit {
+            Hit::Reset(i) => {
+                let r = rows(self.section).into_iter().nth(i)?;
+                let d = changed(&r, &get(r.key))?;
+                self.hovered = None;
+                if matches!(r.ctl, Ctl::Text { .. }) {
+                    // Show the default in the text box straight away.
+                    if let Some((h, _)) = self.edits.iter().find(|(_, j)| *j == i) {
+                        unsafe {
+                            let _ = SetWindowTextW(*h, &windows::core::HSTRING::from(d.as_str()));
+                        }
+                    }
+                }
+                self.invalidate();
+                Some(Change::Set(r.key, d))
+            }
             Hit::Nav(i) => {
                 if i != self.section {
                     self.section = i;
@@ -570,7 +645,7 @@ impl Settings {
                         continue;
                     }
                     p.rrect(x0, y, cw, ROW_H, 8.0, Color::white(0.045));
-                    let text_w = cw - 300.0;
+                    let text_w = cw - 330.0;
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
                     } else {
@@ -622,7 +697,7 @@ impl Settings {
                             p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, ACCENT);
                             let knob = if hovered || self.drag.is_some_and(|(d, _)| d == i) { 9.0 } else { 7.5 };
                             p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
-                            p.text(&fmt(v, unit), &f.num, cx - 90.0, y, 76.0, ROW_H, Align::Right, Color::white(0.8));
+                            p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, ROW_H, Align::Right, Color::white(0.8));
                         }
                         Ctl::Text { .. } => {
                             p.rrect(cx, cy, cwid, ch, 6.0, Color(0.17, 0.17, 0.17, 1.0));
@@ -647,6 +722,22 @@ impl Settings {
                             p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
                         }
                         Ctl::Note => {}
+                    }
+                    let value = match self.drag {
+                        Some((d, v)) if d == i => format!("{v}"),
+                        _ => get(r.key),
+                    };
+                    if changed(r, &value).is_some() {
+                        let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
+                        let (cx, cy) = (rx + rs / 2.0, ry + rs / 2.0);
+                        if self.hovered == Some(Hit::Reset(i)) {
+                            p.circle(cx, cy, rs / 2.0, Color::white(0.10));
+                        }
+                        // A circular "undo" arrow.
+                        let c = Color::white(0.75);
+                        p.arc(cx, cy, 6.0, -0.6, 4.1, c, 1.5);
+                        let (ax, ay) = (cx + 6.0 * (-0.6f32).cos(), cy + 6.0 * (-0.6f32).sin());
+                        p.polygon(&[(ax - 3.5, ay - 2.0), (ax + 2.5, ay - 3.5), (ax + 1.0, ay + 2.5)], c);
                     }
                 }
                 p.unclip();

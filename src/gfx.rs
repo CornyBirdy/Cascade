@@ -114,6 +114,8 @@ pub struct Gfx {
     /// Bumped whenever the render target is recreated; bitmaps made by an
     /// older generation must be thrown away.
     pub generation: u32,
+    /// Pixels per layout unit of the frame being drawn.
+    scale: std::cell::Cell<f32>,
 }
 
 fn text_format(dw: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
@@ -152,7 +154,7 @@ impl Gfx {
                 num: text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 label: text_format(&dw, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             };
-            Ok(Self { factory, dw, rt, brush, fonts, generation: 0 })
+            Ok(Self { factory, dw, rt, brush, fonts, generation: 0, scale: std::cell::Cell::new(1.0) })
         }
     }
 
@@ -189,6 +191,7 @@ impl Gfx {
         unsafe {
             self.rt.BindDC(dc, &RECT { left: 0, top: 0, right: width, bottom: height })?;
             self.rt.SetDpi(96.0 * scale, 96.0 * scale);
+            self.scale.set(scale);
             self.rt.BeginDraw();
             self.rt.Clear(Some(&clear.d2d()));
         }
@@ -331,6 +334,17 @@ impl Painter<'_> {
         };
     }
 
+    /// Draws a bitmap at its own pixel size, centred on (cx, cy) and snapped
+    /// to whole pixels, so icons stay sharp.
+    pub fn icon(&self, bmp: &ID2D1Bitmap, cx: f32, cy: f32, alpha: f32) {
+        let k = self.gfx.scale.get();
+        let size = unsafe { bmp.GetPixelSize() };
+        let (w, h) = (size.width as f32 / k, size.height as f32 / k);
+        let x = ((cx - w / 2.0) * k).round() / k;
+        let y = ((cy - h / 2.0) * k).round() / k;
+        self.image(bmp, x, y, w, h, alpha);
+    }
+
     pub fn text(&self, s: &str, font: &IDWriteTextFormat, x: f32, y: f32, w: f32, h: f32, align: Align, c: Color) {
         if s.is_empty() || w <= 0.0 {
             return;
@@ -435,5 +449,80 @@ impl Painter<'_> {
         }) {
             self.fill_geometry(&g, c);
         }
+    }
+}
+
+/// Which source pixels (and how much of each) make up each of `dst`
+/// output pixels when shrinking `src` pixels.
+fn spans(src: usize, dst: usize) -> Vec<Vec<(usize, f32)>> {
+    let r = src as f32 / dst as f32;
+    (0..dst)
+        .map(|i| {
+            let (a, b) = (i as f32 * r, (i + 1) as f32 * r);
+            let mut v = Vec::new();
+            let mut j = a.floor() as usize;
+            while (j as f32) < b && j < src {
+                let cover = ((j + 1) as f32).min(b) - (j as f32).max(a);
+                if cover > 0.0 {
+                    v.push((j, cover / r));
+                }
+                j += 1;
+            }
+            v
+        })
+        .collect()
+}
+
+/// Shrinks premultiplied BGRA pixels by averaging the area each output pixel
+/// covers: sharp, without the jagged edges plain scaling gives.
+pub fn shrink(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    if dw >= sw && dh >= sh {
+        return src.to_vec();
+    }
+    let (dw, dh) = (dw.min(sw).max(1), dh.min(sh).max(1));
+    let (xs, ys) = (spans(sw, dw), spans(sh, dh));
+    // Horizontal pass into floats, then vertical.
+    let mut tmp = vec![0f32; sh * dw * 4];
+    for y in 0..sh {
+        for (x, span) in xs.iter().enumerate() {
+            let out = &mut tmp[(y * dw + x) * 4..][..4];
+            for &(sx, f) in span {
+                let base = (y * sw + sx) * 4;
+                for (c, o) in out.iter_mut().enumerate() {
+                    *o += src[base + c] as f32 * f;
+                }
+            }
+        }
+    }
+    let mut out = vec![0u8; dw * dh * 4];
+    for (y, span) in ys.iter().enumerate() {
+        for x in 0..dw {
+            let mut acc = [0f32; 4];
+            for &(sy, f) in span {
+                let base = (sy * dw + x) * 4;
+                for (c, a) in acc.iter_mut().enumerate() {
+                    *a += tmp[base + c] * f;
+                }
+            }
+            for (c, a) in acc.iter().enumerate() {
+                out[(y * dw + x) * 4 + c] = a.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shrink;
+
+    #[test]
+    fn shrink_averages_area() {
+        // 2x2 -> 1x1: the average of the four pixels.
+        let src = [0, 0, 0, 0, 100, 100, 100, 100, 200, 200, 200, 200, 100, 100, 100, 100];
+        assert_eq!(shrink(&src, 2, 2, 1, 1), vec![100, 100, 100, 100]);
+        // A solid image stays solid at a fractional ratio.
+        let solid = vec![255u8; 96 * 96 * 4];
+        assert!(shrink(&solid, 96, 96, 36, 36).iter().all(|&v| v == 255));
     }
 }

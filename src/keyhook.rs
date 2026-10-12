@@ -1,9 +1,10 @@
 //! Opens the Cascade launcher on a lone Win key press. Win+anything
 //! (Win+E, Win+R, Win+Shift+S...) is left completely alone.
 //!
-//! When Win is released without another key in between, the release is
-//! swallowed and replayed after an unassigned "mask" key, so Windows sees a
-//! key combination and does not open its own Start menu.
+//! As soon as Win goes down, an unassigned "mask" key is tapped. To Windows
+//! that looks like a key combination, so releasing Win doesn't open its own
+//! Start menu. No real key event is ever swallowed or replayed, so the Win
+//! key can't get stuck down.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
@@ -12,6 +13,35 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::msg;
+
+/// Set in the admin helper, which tells the main Cascade window instead.
+static IN_HELPER: AtomicBool = AtomicBool::new(false);
+
+fn on_lone_win() {
+    if IN_HELPER.load(Ordering::Relaxed) {
+        crate::helper::lone_win();
+    } else {
+        msg::post(msg::OPEN_LAUNCHER, 0, 0);
+    }
+}
+
+/// Whether this copy should act on the Win key: the admin helper takes over
+/// from the main app while it runs, and quits once Cascade has gone.
+fn handled_here() -> bool {
+    if IN_HELPER.load(Ordering::Relaxed) {
+        let up = crate::helper::main_window().is_some();
+        if !up {
+            unsafe { PostQuitMessage(0) };
+        }
+        up
+    } else {
+        !crate::helper::running()
+    }
+}
+
+pub fn set_helper_mode() {
+    IN_HELPER.store(true, Ordering::Relaxed);
+}
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
@@ -46,17 +76,16 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let is_win = vk == VK_LWIN.0 || vk == VK_RWIN.0;
         if !injected {
             if is_win && down {
-                if !WIN_DOWN.swap(true, Ordering::Relaxed) {
+                if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
+                    WIN_DOWN.store(true, Ordering::Relaxed);
                     COMBO.store(false, Ordering::Relaxed);
+                    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];
+                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
                 }
             } else if is_win && up {
                 let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                 if was_down && !COMBO.load(Ordering::Relaxed) {
-                    // Replay the release after a mask key, then open ours.
-                    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
-                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    msg::post(msg::OPEN_LAUNCHER, 0, 0);
-                    return LRESULT(1);
+                    on_lone_win();
                 }
             } else if down && WIN_DOWN.load(Ordering::Relaxed) {
                 COMBO.store(true, Ordering::Relaxed);

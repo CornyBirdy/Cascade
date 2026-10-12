@@ -12,7 +12,9 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, SetFocus, TrackMouseEvent, INPUT, INPUT_MOUSE, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -256,6 +258,10 @@ pub fn force_foreground(h: HWND) {
         if attach {
             let _ = AttachThreadInput(me, fg_thread, true);
         }
+        // An empty mouse event makes this the process that received the
+        // last input, which Windows requires before handing over the front.
+        let nudge = INPUT { r#type: INPUT_MOUSE, ..Default::default() };
+        SendInput(&[nudge], std::mem::size_of::<INPUT>() as i32);
         let _ = SetForegroundWindow(h);
         let _ = BringWindowToTop(h);
         let _ = SetFocus(Some(h));
@@ -359,6 +365,11 @@ impl Launcher {
             }
         }
         force_foreground(self.hwnd);
+        if unsafe { GetForegroundWindow() } != self.hwnd {
+            // Windows refused (an admin app is in front): the admin helper,
+            // if it's on, is allowed to do it.
+            crate::helper::request_focus(self.hwnd);
+        }
         self.reveal.set(1.0);
         self.dirty = true;
     }
@@ -567,10 +578,13 @@ impl Launcher {
         } else {
             self.rows.iter().copied().enumerate().skip(first).take(count).collect()
         };
+        // Icons are fetched at exactly the pixel size they're drawn at.
+        let px = |s: f32| (s * k).round() as u32;
+        let row_px = px(if searching { 30.0 } else { 22.0 });
         let mut row_icons: Vec<Option<ID2D1Bitmap>> = Vec::with_capacity(visible.len());
         for &(_, row) in &visible {
             row_icons.push(match row {
-                Row::App(i) => dock.icon(self.icon_id(&self.apps[i].target), gfx),
+                Row::App(i) => dock.icon(self.icon_id(&self.apps[i].target), gfx, row_px),
                 Row::Letter(_) => None,
             });
         }
@@ -578,8 +592,8 @@ impl Launcher {
             (Vec::new(), Vec::new())
         } else {
             (
-                self.pinned.iter().take(COLS * PINNED_ROWS).map(|(t, _)| dock.icon(self.icon_id(t), gfx)).collect(),
-                self.recent.iter().map(|r| dock.icon(&r.path, gfx)).collect(),
+                self.pinned.iter().take(COLS * PINNED_ROWS).map(|(t, _)| dock.icon(self.icon_id(t), gfx, px(32.0))).collect(),
+                self.recent.iter().map(|r| dock.icon(&r.path, gfx, px(28.0))).collect(),
             )
         };
 
@@ -749,7 +763,7 @@ impl Launcher {
 
 fn draw_icon(p: &Painter, icon: Option<&ID2D1Bitmap>, x: f32, y: f32, s: f32) {
     match icon {
-        Some(b) => p.image(b, x, y, s, s, 1.0),
+        Some(b) => p.icon(b, x + s / 2.0, y + s / 2.0, 1.0),
         None => p.rrect(x + s * 0.1, y + s * 0.1, s * 0.8, s * 0.8, s * 0.2, Color::white(0.12)),
     }
 }

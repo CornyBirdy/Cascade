@@ -10,6 +10,7 @@ mod brightness;
 mod config;
 mod dock;
 mod gfx;
+mod helper;
 mod http;
 mod icons;
 mod keyhook;
@@ -21,6 +22,7 @@ mod radios;
 mod settings;
 mod shell;
 mod spring;
+mod systray;
 mod ui;
 mod update;
 mod weather;
@@ -47,6 +49,7 @@ pub mod msg {
     pub const OPEN_SETTINGS: u32 = WM_APP + 14;
     pub const APPS: u32 = WM_APP + 15;
     pub const POWER_MENU: u32 = WM_APP + 16;
+    pub const TRAY_ICON: u32 = WM_APP + 17;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -66,6 +69,10 @@ fn main() {
 
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    if std::env::args().any(|a| a == "--key-helper") {
+        helper::run();
+        return;
     }
     // After an update the new copy starts while the old one is still
     // shutting down, so give it a few seconds to let go.

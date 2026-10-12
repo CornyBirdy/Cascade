@@ -11,32 +11,45 @@ fn rrect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
     (0.5 - d).clamp(0.0, 1.0)
 }
 
-/// A dark rounded tile with a white notch at the top and a dock bar below.
+/// Three rounded windows, cascaded like Windows' "Cascade windows", each
+/// cut out from the one behind it, deep blue at the back to light at the front.
 fn render(size: u32) -> Vec<u8> {
     let s = size as f32;
+    let side = s * 0.56;
+    let radius = s * 0.13;
+    let gap = (s * 0.055).max(1.0);
+    let layers = [(0.0, [0.11, 0.27, 0.80]), (0.22, [0.20, 0.50, 1.00]), (0.44, [0.56, 0.84, 1.00])];
     let mut px = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let tile = rrect(fx, fy, 0.0, 0.0, s, s, s * 0.22);
-            // Background: deep blue-black vertical gradient.
-            let t = fy / s;
-            let bg = [0.10 + 0.06 * (1.0 - t), 0.11 + 0.08 * (1.0 - t), 0.16 + 0.16 * (1.0 - t)];
-            let notch = rrect(fx, fy, s * 0.28, -s, s * 0.72, s * 0.24, s * 0.09);
-            let dock = rrect(fx, fy, s * 0.18, s * 0.70, s * 0.82, s * 0.82, s * 0.06);
-            let mut c = bg;
-            for (cov, col) in [(notch, [0.96, 0.97, 1.0]), (dock, [0.36, 0.60, 1.0])] {
-                for i in 0..3 {
-                    c[i] = c[i] * (1.0 - cov) + col[i] * cov;
+            // Premultiplied colour and alpha, composed back to front.
+            let (mut c, mut a) = ([0.0f32; 3], 0.0f32);
+            for (n, (off, col)) in layers.iter().enumerate() {
+                let (x0, y0) = (s * off, s * off);
+                let (x1, y1) = (x0 + side, y0 + side);
+                if n > 0 {
+                    let cut = rrect(fx, fy, x0 - gap, y0 - gap, x1 + gap, y1 + gap, radius + gap);
+                    a *= 1.0 - cut;
+                    for v in &mut c {
+                        *v *= 1.0 - cut;
+                    }
                 }
+                let cov = rrect(fx, fy, x0, y0, x1, y1, radius);
+                // A little lighter at the top of each window.
+                let shade = 1.08 - 0.16 * ((fy - y0) / side).clamp(0.0, 1.0);
+                for (v, k) in c.iter_mut().zip(col) {
+                    *v = *v * (1.0 - cov) + (k * shade).min(1.0) * cov;
+                }
+                a = a * (1.0 - cov) + cov;
             }
-            let a = tile;
             let i = ((y * size + x) * 4) as usize;
+            let un = |v: f32| if a > 0.0 { (v / a * 255.0).round().clamp(0.0, 255.0) as u8 } else { 0 };
             // BGRA, straight alpha (icons are not premultiplied).
-            px[i] = (c[2] * 255.0) as u8;
-            px[i + 1] = (c[1] * 255.0) as u8;
-            px[i + 2] = (c[0] * 255.0) as u8;
-            px[i + 3] = (a * 255.0) as u8;
+            px[i] = un(c[2]);
+            px[i + 1] = un(c[1]);
+            px[i + 2] = un(c[0]);
+            px[i + 3] = (a * 255.0).round() as u8;
         }
     }
     px

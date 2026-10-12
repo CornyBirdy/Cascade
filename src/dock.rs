@@ -26,16 +26,20 @@ use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::shell;
 use crate::spring::Spring;
+use crate::systray::Systray;
 use crate::weather::Weather;
 
 /// Room above the bar for tooltips (transparent, click-through).
 const TIP_ROOM: f32 = 40.0;
 const GAP: f32 = 4.0;
 const SEARCH_W: f32 = 112.0;
-const WEATHER_W: f32 = 118.0;
+const WEATHER_W: f32 = 106.0;
 const CLOCK_W: f32 = 78.0;
 const TRAY_W: f32 = 28.0;
+const TRAY_ICON_W: f32 = 28.0;
 const STATUS_ICON: f32 = 24.0;
+/// Space between floating islands.
+const ISLAND_GAP: f32 = 8.0;
 pub const ACCENT: Color = Color(0.38, 0.67, 1.0, 1.0);
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
@@ -68,7 +72,31 @@ impl DockApp {
 #[derive(Default)]
 struct Icon {
     pixels: Option<Vec<u8>>,
-    bitmap: Option<(u32, ID2D1Bitmap)>,
+    generation: u32,
+    /// Bitmaps already shrunk to the pixel sizes in use: (px, bitmap).
+    bitmaps: Vec<(u32, ID2D1Bitmap)>,
+}
+
+impl Icon {
+    /// The icon at exactly `px` pixels square (made on first use).
+    fn at(&mut self, gfx: &Gfx, px: u32) -> Option<ID2D1Bitmap> {
+        let px = px.clamp(8, ICON_SIZE);
+        if self.generation != gfx.generation {
+            self.bitmaps.clear();
+            self.generation = gfx.generation;
+        }
+        if let Some((_, b)) = self.bitmaps.iter().find(|(s, _)| *s == px) {
+            return Some(b.clone());
+        }
+        let n = ICON_SIZE as usize;
+        let small = crate::gfx::shrink(self.pixels.as_ref()?, n, n, px as usize, px as usize);
+        let b = gfx.bitmap(px, px, &small).ok()?;
+        if self.bitmaps.len() >= 5 {
+            self.bitmaps.remove(0);
+        }
+        self.bitmaps.push((px, b.clone()));
+        Some(b)
+    }
 }
 
 /// Things on the taskbar you can point at.
@@ -79,6 +107,8 @@ pub enum Hot {
     Weather,
     App(usize),
     Tray,
+    /// A notification-area icon (index into the systray's icons).
+    TrayIcon(usize),
     Status,
     Clock,
 }
@@ -116,7 +146,9 @@ struct Geo {
     search: Option<Span>,
     weather: Option<Span>,
     apps: Vec<Span>,
-    tray: Span,
+    /// The ^ button, when some icons are hidden under it.
+    tray: Option<Span>,
+    tray_icons: Vec<(usize, Span)>,
     status: Span,
     clock: Span,
     /// Rounded panels (x0, x1) that get a blur behind them.
@@ -152,6 +184,7 @@ pub struct Dock {
     left: bool,
     bar_h: f32,
     margin: f32,
+    padding: f32,
     radius: f32,
     icon: f32,
     magnify: f32,
@@ -161,6 +194,7 @@ pub struct Dock {
     show_status: bool,
     show_clock: bool,
     show_weather: bool,
+    show_tray: bool,
 
     k: f32,
     monitor: RECT,
@@ -315,6 +349,7 @@ impl Dock {
             left: false,
             bar_h: 48.0,
             margin: 8.0,
+            padding: 4.0,
             radius: 8.0,
             icon: 24.0,
             magnify: 0.0,
@@ -324,6 +359,7 @@ impl Dock {
             show_status: true,
             show_clock: true,
             show_weather: true,
+            show_tray: true,
             k: 1.0,
             monitor: RECT::default(),
             bottom: 0,
@@ -386,17 +422,11 @@ impl Dock {
         }
     }
 
-    /// The icon for any app id or file, loading it in the background if needed.
-    pub fn icon(&mut self, id: &str, gfx: &Gfx) -> Option<ID2D1Bitmap> {
+    /// The icon for any app id or file at `px` pixels, loading it in the
+    /// background if needed.
+    pub fn icon(&mut self, id: &str, gfx: &Gfx, px: u32) -> Option<ID2D1Bitmap> {
         self.request_icon(id);
-        let icon = self.icons.get_mut(&id.to_ascii_lowercase())?;
-        let stale = icon.bitmap.as_ref().is_none_or(|(g, _)| *g != gfx.generation);
-        if stale {
-            if let Some(px) = &icon.pixels {
-                icon.bitmap = gfx.bitmap(ICON_SIZE, ICON_SIZE, px).ok().map(|b| (gfx.generation, b));
-            }
-        }
-        icon.bitmap.as_ref().map(|(_, b)| b.clone())
+        self.icons.get_mut(&id.to_ascii_lowercase())?.at(gfx, px)
     }
 
     fn request_icon(&mut self, id: &str) {
@@ -412,7 +442,7 @@ impl Dock {
         self.names.insert(key.clone(), r.name);
         let icon = self.icons.entry(key).or_default();
         icon.pixels = (!r.pixels.is_empty()).then_some(r.pixels);
-        icon.bitmap = None;
+        icon.bitmaps.clear();
         self.dirty = true;
     }
 
@@ -443,9 +473,10 @@ impl Dock {
         self.left = cfg.taskbar_align == "left";
         self.bar_h = cfg.taskbar_height;
         self.margin = cfg.taskbar_margin;
+        self.padding = cfg.taskbar_padding.min((self.bar_h - 20.0) / 2.0).max(0.0);
         // A full-width bar flush with the screen edges has square corners.
         self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
-        self.icon = cfg.dock_icon_size.min(self.bar_h - 12.0);
+        self.icon = cfg.dock_icon_size.min(self.bar_h - 2.0 * self.padding - 4.0);
         self.magnify = cfg.dock_magnify;
         self.acrylic = cfg.acrylic;
         self.opacity = cfg.taskbar_opacity;
@@ -453,6 +484,7 @@ impl Dock {
         self.show_status = cfg.show_status;
         self.show_clock = cfg.show_clock;
         self.show_weather = cfg.weather;
+        self.show_tray = cfg.tray_icons;
         self.monitor = monitor;
         self.k = k;
         let tint = ((self.opacity * 255.0) as u32) << 24 | 0x00_1C1C1E;
@@ -643,17 +675,20 @@ impl Dock {
 
     // ----------------------------------------------------------- geometry --
 
+    /// Size of a square button: the bar height less the padding.
     fn button(&self) -> f32 {
-        (self.bar_h - 8.0).max(24.0)
+        (self.bar_h - 2.0 * self.padding).max(20.0)
     }
 
     fn status_icons(&self, status: &Status) -> usize {
         2 + status.battery.is_some() as usize
     }
 
-    /// Lays everything out for a window `ww` layout units wide.
-    fn layout(&self, ww: f32, wh: f32, status: &Status, weather: bool) -> Geo {
+    /// Lays everything out for a window `ww` layout units wide. The same
+    /// padding is used between every island edge and what's inside it.
+    fn layout(&self, ww: f32, wh: f32, status: &Status, weather: bool, tray: &[usize], overflow: bool) -> Geo {
         let b = self.button();
+        let pad = self.padding;
         let m = self.margin;
         let y1 = wh - m;
         let y0 = y1 - self.bar_h;
@@ -663,9 +698,13 @@ impl Dock {
         let slots: Vec<f32> = self.apps.iter().map(|a| (b + GAP) * a.presence.value.clamp(0.0, 1.0)).collect();
         let search_w = if self.show_search { SEARCH_W + GAP } else { 0.0 };
         let group_w = b + GAP + search_w + slots.iter().sum::<f32>() - GAP;
-        let weather_w = if weather { WEATHER_W } else { 0.0 };
-        let gx = if self.left { x0 + 8.0 + if self.full { weather_w } else { 0.0 } } else { (ww - group_w) / 2.0 };
-        let gx = if self.left && !self.full && weather { x0 + weather_w + 16.0 } else { gx };
+        let weather_island = x0 + pad * 2.0 + WEATHER_W;
+        let gx = match (self.left, weather, self.full) {
+            (false, ..) => (ww - group_w) / 2.0,
+            (true, false, _) => x0 + pad,
+            (true, true, true) => weather_island + pad,
+            (true, true, false) => weather_island + ISLAND_GAP + pad,
+        };
 
         let start = Span { x: gx, w: b };
         let mut x = gx + b + GAP;
@@ -680,31 +719,54 @@ impl Dock {
             x += w;
         }
 
-        // Right: hidden icons, status, clock.
-        let mut rx = x1 - 6.0;
+        // Right, from the edge in: clock, status, tray icons, ^.
+        let mut rx = x1 - pad;
         let clock = if self.show_clock { Span { x: rx - CLOCK_W, w: CLOCK_W } } else { Span { x: rx, w: 0.0 } };
         rx = clock.x;
         let status_w = if self.show_status { STATUS_ICON * self.status_icons(status) as f32 + 12.0 } else { 0.0 };
         let status_span = Span { x: rx - status_w, w: status_w };
         rx = status_span.x;
-        let tray = Span { x: rx - TRAY_W, w: TRAY_W };
-        let right_x = tray.x - 6.0;
+        let mut tray_icons = Vec::new();
+        for &i in tray.iter().rev() {
+            rx -= TRAY_ICON_W;
+            tray_icons.push((i, Span { x: rx, w: TRAY_ICON_W }));
+        }
+        tray_icons.reverse();
+        let tray_span = overflow.then(|| {
+            rx -= TRAY_W;
+            Span { x: rx, w: TRAY_W }
+        });
+        let right_x = rx - pad;
 
         // Left: weather.
-        let weather_span = weather.then_some(Span { x: x0 + 6.0, w: WEATHER_W - 12.0 });
+        let weather_span = weather.then_some(Span { x: x0 + pad, w: WEATHER_W });
 
         let islands = if self.full {
             vec![(x0, x1)]
         } else {
             let mut v = Vec::new();
-            if let Some(w) = weather_span {
-                v.push((w.x - 6.0, w.x + w.w + 6.0));
+            if weather {
+                v.push((x0, weather_island));
             }
-            v.push((gx - 6.0, gx + group_w + 6.0));
-            v.push((right_x, x1));
+            v.push((gx - pad, gx + group_w + pad));
+            if right_x < x1 - pad - 1.0 {
+                v.push((right_x, x1));
+            }
             v
         };
-        Geo { y0, y1, start, search, weather: weather_span, apps, tray, status: status_span, clock, islands }
+        Geo {
+            y0,
+            y1,
+            start,
+            search,
+            weather: weather_span,
+            apps,
+            tray: tray_span,
+            tray_icons,
+            status: status_span,
+            clock,
+            islands,
+        }
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Hot> {
@@ -724,8 +786,11 @@ impl Dock {
         if let Some(i) = g.apps.iter().position(|s| s.w > 4.0 && s.contains(x)) {
             return Some(Hot::App(i));
         }
-        if g.tray.contains(x) {
+        if g.tray.is_some_and(|s| s.contains(x)) {
             return Some(Hot::Tray);
+        }
+        if let Some((i, _)) = g.tray_icons.iter().find(|(_, s)| s.contains(x)) {
+            return Some(Hot::TrayIcon(*i));
         }
         if g.status.w > 0.0 && g.status.contains(x) {
             return Some(Hot::Status);
@@ -906,24 +971,25 @@ impl Dock {
         moving
     }
 
-    pub fn render(&mut self, gfx: &mut Gfx, status: &Status, weather: Option<&Weather>) -> Result<()> {
+    pub fn render(&mut self, gfx: &mut Gfx, status: &Status, weather: Option<&Weather>, tray: &mut Systray) -> Result<()> {
         self.dirty = false;
         if !self.shown || !self.window_visible {
             return Ok(());
         }
-        // Upload icon bitmaps that arrived (or were lost with a new target).
-        for a in &self.apps {
-            if let Some(icon) = self.icons.get_mut(&a.id.to_ascii_lowercase()) {
-                let stale = icon.bitmap.as_ref().is_none_or(|(g, _)| *g != gfx.generation);
-                if stale {
-                    if let Some(px) = &icon.pixels {
-                        icon.bitmap = gfx.bitmap(ICON_SIZE, ICON_SIZE, px).ok().map(|b| (gfx.generation, b));
-                    }
-                }
-            }
-        }
-
         let k = self.k;
+        // App icons at exactly the size they're drawn, so they stay sharp.
+        let icon_px = (self.icon * k).round() as u32;
+        let app_icons: Vec<Option<ID2D1Bitmap>> = (0..self.apps.len())
+            .map(|i| {
+                let key = self.apps[i].id.to_ascii_lowercase();
+                self.icons.get_mut(&key).and_then(|ic| ic.at(gfx, icon_px))
+            })
+            .collect();
+        let (inline, overflow) =
+            if self.show_tray { (tray.inline(), !tray.overflow().is_empty()) } else { (Vec::new(), false) };
+        let tray_px = (16.0 * k).round() as u32;
+        let tray_icons: Vec<Option<ID2D1Bitmap>> = inline.iter().map(|&i| tray.bitmap(i, gfx, tray_px)).collect();
+
         let mon_w = self.monitor.right - self.monitor.left;
         let pw = mon_w;
         let wh = TIP_ROOM + self.bar_h + self.margin;
@@ -934,7 +1000,7 @@ impl Dock {
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         let show_weather = self.show_weather && weather.is_some();
-        self.geo = self.layout(ww, wh, status, show_weather);
+        self.geo = self.layout(ww, wh, status, show_weather, &inline, overflow);
         let g = &self.geo;
 
         // Blur behind each island, just under this window.
@@ -1032,8 +1098,10 @@ impl Dock {
                 }
                 let size = self.icon * (1.0 + self.magnify * a.mag.value) * presence;
                 let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0;
-                match self.icons.get(&a.id.to_ascii_lowercase()).and_then(|ic| ic.bitmap.as_ref()) {
-                    Some((_, bmp)) => p.image(bmp, cx - size / 2.0, iy, size, size, presence),
+                match app_icons.get(i).cloned().flatten() {
+                    // At rest: pixel for pixel, so it's sharp.
+                    Some(bmp) if (size - self.icon).abs() < 0.01 => p.icon(&bmp, cx, iy + size / 2.0, presence),
+                    Some(bmp) => p.image(&bmp, cx - size / 2.0, iy, size, size, presence),
                     None => p.rrect(cx - size * 0.4, iy + size * 0.1, size * 0.8, size * 0.8, size * 0.2, Color::white(0.15 * presence)),
                 }
                 if running {
@@ -1045,13 +1113,32 @@ impl Dock {
                 }
             }
 
-            // Hidden icons, status, clock.
-            if let Some(c) = hover_bg(Hot::Tray) {
-                p.rrect(g.tray.x, by, g.tray.w, b, 5.0, c);
+            // Hidden icons (^), tray icons, status, clock.
+            if let Some(t) = g.tray {
+                if let Some(c) = hover_bg(Hot::Tray) {
+                    p.rrect(t.x, by, t.w, b, 5.0, c);
+                }
+                let (tx, ty) = (t.centre(), g.y0 + bh / 2.0);
+                p.line(tx - 4.5, ty + 2.0, tx, ty - 2.5, Color::white(0.85), 1.4);
+                p.line(tx, ty - 2.5, tx + 4.5, ty + 2.0, Color::white(0.85), 1.4);
             }
-            let (tx, ty) = (g.tray.centre(), g.y0 + bh / 2.0);
-            p.line(tx - 4.5, ty + 2.0, tx, ty - 2.5, Color::white(0.85), 1.4);
-            p.line(tx, ty - 2.5, tx + 4.5, ty + 2.0, Color::white(0.85), 1.4);
+            for (&(i, t), icon) in g.tray_icons.iter().zip(&tray_icons) {
+                if let Some(c) = hover_bg(Hot::TrayIcon(i)) {
+                    p.rrect(t.x, by, t.w, b, 5.0, c);
+                }
+                match icon {
+                    Some(bmp) => p.icon(bmp, t.centre(), g.y0 + bh / 2.0, 1.0),
+                    None => p.rrect(t.centre() - 7.0, g.y0 + bh / 2.0 - 7.0, 14.0, 14.0, 3.0, Color::white(0.15)),
+                }
+                if self.hovered == Some(Hot::TrayIcon(i)) {
+                    if let Some(icon) = tray.icons.get(i) {
+                        let first = icon.tip.lines().next().unwrap_or("").trim().to_string();
+                        if !first.is_empty() {
+                            tip = Some((t.centre(), first));
+                        }
+                    }
+                }
+            }
 
             if g.status.w > 0.0 {
                 if let Some(c) = hover_bg(Hot::Status) {
@@ -1094,7 +1181,7 @@ impl Dock {
                 p.text(&date, &f.small, g.clock.x, cy, g.clock.w - 8.0, 16.0, Align::Right, Color::white(0.95));
             }
 
-            // Tooltip above the hovered app.
+            // Tooltip above the hovered app or tray icon.
             if let Some((cx, name)) = tip {
                 let tw = gfx.measure(&name, &f.body).min(ww - 20.0);
                 let (lw, lh) = (tw + 20.0, 28.0);
@@ -1117,6 +1204,23 @@ impl Dock {
     /// Screen x of app `i`'s centre (for anchoring the preview).
     pub fn app_screen_x(&self, i: usize) -> i32 {
         let c = self.geo.apps.get(i).map(|s| s.centre()).unwrap_or(0.0);
+        self.screen.left + (c * self.k) as i32
+    }
+
+    /// The bar in screen pixels (for the hidden tray window).
+    pub fn bar_rect(&self) -> RECT {
+        let g = &self.geo;
+        RECT {
+            left: self.screen.left + (self.margin * self.k) as i32,
+            top: self.screen.top + (g.y0 * self.k) as i32,
+            right: self.screen.right - (self.margin * self.k) as i32,
+            bottom: self.screen.top + (g.y1 * self.k) as i32,
+        }
+    }
+
+    /// Screen x of the ^ button's centre.
+    pub fn tray_button_x(&self) -> i32 {
+        let c = self.geo.tray.map(|t| t.centre()).unwrap_or(0.0);
         self.screen.left + (c * self.k) as i32
     }
 

@@ -44,6 +44,8 @@ use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
+use crate::systray::{self, Flyout, Systray};
+use crate::helper;
 use crate::spring::Spring;
 use crate::update;
 use crate::weather::{self, Weather};
@@ -65,7 +67,6 @@ const TIMER_DOCK_HIDE: usize = 11;
 const TIMER_PREVIEW_SHOW: usize = 12;
 const TIMER_PREVIEW_HIDE: usize = 13;
 const TIMER_CLOCK: usize = 14;
-const TIMER_TRAY_PEEK: usize = 15;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -203,10 +204,11 @@ struct App {
     launcher: Launcher,
     launcher_menu: bool,
     settings: Option<Settings>,
-    /// The Windows hidden-icons flyout is opening or open: when it started,
-    /// whether the taskbar under it is invisible, and whether Enter is still
-    /// to be pressed.
-    tray_peek: Option<(Instant, bool, bool)>,
+    /// Tray icons from apps, and the flyout for the hidden ones.
+    systray: Systray,
+    flyout: Flyout,
+    /// Last rect given to the hidden tray window.
+    tray_rect: RECT,
 
     message: String,
     message_color: Color,
@@ -252,8 +254,19 @@ pub fn run() -> Result<()> {
         // Blur panels: up to three taskbar islands, plus the launcher.
         let dock_backdrops = (0..3).filter_map(|_| Backdrop::create(instance).ok()).collect();
         let launcher_backdrop = Backdrop::create(instance)?;
+        let flyout_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
+        let flyout = (flyout_hwnd, Backdrop::create(instance)?);
 
-        let app = App::new(hwnd, dock_hwnd, trigger, preview_hwnd, (launcher_hwnd, launcher_backdrop), dock_backdrops, instance)?;
+        let app = App::new(
+            hwnd,
+            dock_hwnd,
+            trigger,
+            preview_hwnd,
+            (launcher_hwnd, launcher_backdrop),
+            dock_backdrops,
+            flyout,
+            instance,
+        )?;
         APP.with(|c| *c.borrow_mut() = Some(app));
         with_app(|a| a.start());
 
@@ -398,6 +411,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::TRAY_ICON => {
+            let e = Box::from_raw(lp.0 as *mut systray::Event);
+            with_app(move |a| {
+                if a.systray.apply(*e) {
+                    a.dock.dirty = true;
+                    a.flyout.dirty = true;
+                }
+            });
+            return LRESULT(0);
+        }
         msg::WEATHER => {
             let w = Box::from_raw(lp.0 as *mut Weather);
             with_app(move |a| {
@@ -503,6 +526,7 @@ impl App {
         preview_hwnd: HWND,
         (launcher_hwnd, launcher_backdrop): (HWND, Backdrop),
         dock_backdrops: Vec<Backdrop>,
+        (flyout_hwnd, flyout_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -575,7 +599,9 @@ impl App {
             launcher: Launcher::new(launcher_hwnd, launcher_backdrop),
             launcher_menu: false,
             settings: None,
-            tray_peek: None,
+            systray: Systray::default(),
+            flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
+            tray_rect: RECT::default(),
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -598,6 +624,13 @@ impl App {
         if std::env::args().any(|a| a == "--settings") {
             self.open_settings();
         }
+        if self.cfg.admin_helper {
+            if std::env::args().any(|a| a == "--updated") {
+                helper::restart();
+            } else {
+                helper::start();
+            }
+        }
     }
 
     fn shutdown(&mut self) {
@@ -618,8 +651,8 @@ impl App {
             shell::set_flyout_hidden(false);
             self.flyout_hidden = false;
         }
-        if let Some((_, invisible, _)) = self.tray_peek.take() {
-            shell::end_tray_overflow(invisible);
+        if let Some(h) = self.systray.hwnd.take() {
+            systray::stop(h);
         }
         if self.taskbar_hidden {
             shell::restore_taskbar();
@@ -700,6 +733,20 @@ impl App {
         self.dock.configure(&self.cfg, self.monitor, self.dpi);
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
         self.launcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        let want_tray = self.cfg.dock && self.cfg.tray_icons;
+        match (want_tray, self.systray.hwnd) {
+            (true, None) => {
+                self.systray.hwnd = systray::start(self.instance);
+                self.tray_rect = RECT::default();
+            }
+            (false, Some(h)) => {
+                systray::stop(h);
+                self.systray = Systray::default();
+                self.flyout.hide();
+            }
+            _ => {}
+        }
         if self.cfg.dock {
             self.dock.scan();
         } else {
@@ -836,6 +883,9 @@ impl App {
         }
         if hwnd == self.launcher.hwnd {
             return self.handle_launcher(m, wp, lp);
+        }
+        if hwnd == self.flyout.hwnd {
+            return self.handle_flyout(m, wp, lp);
         }
         if m == msg::APPBAR {
             match wp.0 as u32 {
@@ -1238,7 +1288,7 @@ impl App {
     }
 
     fn on_win_event(&mut self, event: u32, hwnd: HWND) {
-        if self.taskbar_hidden && self.tray_peek.is_none() && event == EVENT_OBJECT_SHOW && shell::is_taskbar(hwnd) {
+        if self.taskbar_hidden && event == EVENT_OBJECT_SHOW && shell::is_taskbar(hwnd) {
             shell::reassert_taskbar_hidden();
             return;
         }
@@ -1258,6 +1308,11 @@ impl App {
         if !self.cfg.dock {
             return;
         }
+        if event == EVENT_SYSTEM_FOREGROUND {
+            if let Some(h) = self.systray.hwnd {
+                systray::put_first(h);
+            }
+        }
         let rescan = match event {
             EVENT_SYSTEM_FOREGROUND => {
                 self.dock.foreground = hwnd;
@@ -1274,7 +1329,19 @@ impl App {
         }
     }
 
-    fn right_click_target(&self, hwnd: HWND) -> RightClick {
+    fn right_click_target(&mut self, hwnd: HWND) -> RightClick {
+        if hwnd == self.flyout.hwnd {
+            if let Some(i) = self.flyout.hovered() {
+                self.systray.click(i, true);
+            }
+            return RightClick::Nothing;
+        }
+        if hwnd == self.dock.hwnd {
+            if let Some(dock::Hot::TrayIcon(i)) = self.dock.hovered {
+                self.systray.click(i, true);
+                return RightClick::Nothing;
+            }
+        }
         if hwnd == self.launcher.hwnd {
             let mut p = POINT::default();
             unsafe {
@@ -1496,6 +1563,18 @@ impl App {
     fn apply_change(&mut self, change: Change) {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Set("admin_helper", v) => {
+                let on = v == "true";
+                if on != self.cfg.admin_helper {
+                    Config::set_bool("admin_helper", on);
+                    self.cfg.admin_helper = on;
+                    if on {
+                        helper::install();
+                    } else {
+                        helper::uninstall();
+                    }
+                }
+            }
             Change::Set(key, v) => {
                 if self.cfg.get(key) != v {
                     Config::set(key, &v);
@@ -1520,7 +1599,7 @@ impl App {
             WM_ERASEBKGND => return Some(LRESULT(1)),
             WM_MOUSEMOVE => {
                 let (x, y) = lparam_xy(lp);
-                s.on_move(x, y);
+                s.on_move(x, y, &get);
                 None
             }
             WM_MOUSELEAVE => {
@@ -1630,6 +1709,9 @@ impl App {
                     let _ = KillTimer(Some(dock), wp.0);
                     match wp.0 {
                         TIMER_SCAN => {
+                            if self.systray.prune() {
+                                self.dock.dirty = true;
+                            }
                             self.dock.scan();
                             self.refresh_preview();
                         }
@@ -1646,7 +1728,6 @@ impl App {
                             self.dock.dirty = true;
                             self.arm_clock();
                         }
-                        TIMER_TRAY_PEEK => self.check_tray_peek(),
                         _ => {}
                     }
                 }
@@ -1674,7 +1755,8 @@ impl App {
                 };
                 shell::open(&format!("https://www.bing.com/search?q={}", q.replace(' ', "+")));
             }
-            DockHot::Tray => self.open_tray_overflow(),
+            DockHot::Tray => self.toggle_flyout(),
+            DockHot::TrayIcon(i) => self.systray.click(i, false),
             DockHot::Status => shell::open("ms-actioncenter:controlcenter/&showFooter=true"),
             DockHot::Clock => shell::open("ms-actioncenter:"),
         }
@@ -1693,46 +1775,45 @@ impl App {
         }
     }
 
-    /// The Windows "hidden icons" flyout. With the real taskbar hidden it is
-    /// shown fully transparent for as long as the flyout stays open.
-    fn open_tray_overflow(&mut self) {
-        if let Some((_, invisible, _)) = self.tray_peek.take() {
-            shell::end_tray_overflow(invisible);
+    /// The hidden tray icons, above the ^ button.
+    fn toggle_flyout(&mut self) {
+        if self.flyout.open {
+            self.flyout.hide();
             return;
         }
-        let invisible = self.taskbar_hidden;
-        shell::focus_tray(invisible);
-        self.tray_peek = Some((Instant::now(), invisible, true));
-        unsafe {
-            SetTimer(Some(self.dock.hwnd), TIMER_TRAY_PEEK, 120, None);
+        let items = self.systray.overflow();
+        if items.is_empty() {
+            return;
         }
+        self.preview.hide();
+        let bottom = self.dock.panel_top() - (8.0 * self.dpi) as i32;
+        self.flyout.show(items, self.dock.tray_button_x(), bottom, self.dpi);
     }
 
-    /// Runs only while the flyout is up (twice a second), to put the
-    /// taskbar away again once it closes.
-    fn check_tray_peek(&mut self) {
-        let Some((since, invisible, enter)) = self.tray_peek else { return };
-        let age = since.elapsed();
-        let focused = shell::shell_focused();
-        if enter {
-            // Only press Enter once the tray really has the focus, so it can
-            // never land in the app that was in front.
-            if focused {
-                shell::press_enter();
-                self.tray_peek = Some((since, invisible, false));
-            } else if age > Duration::from_millis(1000) {
-                self.tray_peek = None;
-                shell::end_tray_overflow(invisible);
-                return;
+    fn handle_flyout(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match m {
+            WM_ACTIVATE => {
+                // Clicking anywhere else (or an app opening its menu) closes it.
+                if wp.0 & 0xFFFF == 0 {
+                    self.flyout.hide();
+                }
+                return None;
             }
-        } else if !focused || age > Duration::from_secs(120) {
-            self.tray_peek = None;
-            shell::end_tray_overflow(invisible);
-            return;
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                self.flyout.on_move(x, y);
+            }
+            WM_MOUSELEAVE => self.flyout.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                self.flyout.on_move(x, y);
+                if let Some(i) = self.flyout.hovered() {
+                    self.systray.click(i, false);
+                }
+            }
+            _ => return None,
         }
-        unsafe {
-            SetTimer(Some(self.dock.hwnd), TIMER_TRAY_PEEK, if enter { 60 } else { 500 }, None);
-        }
+        Some(LRESULT(0))
     }
 
     /// Opens (after a short hover) or retargets the preview for the hovered app.
@@ -1840,7 +1921,7 @@ impl App {
     }
 
     fn wants_frame(&self) -> bool {
-        self.notch_wants() || self.dock.wants_frame() || self.launcher.wants_frame()
+        self.notch_wants() || self.dock.wants_frame() || self.launcher.wants_frame() || self.flyout.wants_frame()
     }
 
     /// Steps the springs, draws, and returns how long to wait for the next frame.
@@ -1874,7 +1955,18 @@ impl App {
                 battery: battery(),
             };
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
-            let _ = self.dock.render(&mut self.gfx, &status, weather);
+            let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray);
+            if let Some(h) = self.systray.hwnd {
+                let r = self.dock.bar_rect();
+                if r != self.tray_rect {
+                    self.tray_rect = r;
+                    systray::set_rect(h, r);
+                }
+            }
+        }
+        if self.flyout.wants_frame() {
+            fast |= self.flyout.step(dt);
+            let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
         }
         if self.launcher.wants_frame() {
             fast |= self.launcher.step(dt);
