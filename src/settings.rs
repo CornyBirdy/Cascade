@@ -35,6 +35,7 @@ enum Unit {
     Min,
     Times,
     Percent,
+    Count,
 }
 
 enum Ctl {
@@ -108,18 +109,17 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("full", "Full width"), ("floating", "Floating")]),
             ),
             row("taskbar_align", "Alignment", "Where Start and your apps sit.", Choice(&[("center", "Centre"), ("left", "Left")])),
-            row("taskbar_height", "Height", "Height of the bar.", slider(32.0, 80.0, 1.0, Unit::Px)),
-            row(
-                "taskbar_padding",
-                "Icon padding",
-                "Space around each icon, and how big its highlight is.",
-                slider(0.0, 16.0, 1.0, Unit::Px),
-            ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
+            row(
+                "taskbar_inset",
+                "Padding",
+                "Gap from the bar's edge to its icons, the same on all four sides. Sets the height.",
+                slider(0.0, 24.0, 1.0, Unit::Px),
+            ),
             row(
                 "taskbar_margin",
                 "Gap from the screen edge",
-                "Match it to (height - icon size) / 2 for an even look. 0 = flush.",
+                "Set it equal to Padding for an even look. 0 = flush with the screen.",
                 slider(0.0, 32.0, 1.0, Unit::Px),
             ),
             row(
@@ -155,6 +155,19 @@ fn rows(section: usize) -> Vec<Row> {
                 "So the Win key works over Task Manager. Asks for permission once.",
                 Toggle,
             ),
+            row(
+                "start_position",
+                "Position",
+                "Where it opens. Auto follows the taskbar's alignment.",
+                Choice(&[("auto", "Auto"), ("center", "Centre"), ("left", "Left")]),
+            ),
+            row("start_height", "Height", "How tall the menu is.", slider(500.0, 800.0, 10.0, Unit::Px)),
+            row("start_columns", "Pinned columns", "Apps per row in Pinned.", slider(3.0, 6.0, 1.0, Unit::Count)),
+            row("start_pinned_rows", "Pinned rows", "Rows of pinned apps.", slider(1.0, 4.0, 1.0, Unit::Count)),
+            row("start_show_sidebar", "Sidebar", "Account, folders, settings and power.", Toggle),
+            row("start_show_recent", "Recent files", "Under the pinned apps.", Toggle),
+            row("start_show_all_apps", "All apps list", "Every app A to Z on the right.", Toggle),
+            row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
         ],
         4 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
@@ -189,6 +202,7 @@ fn fmt(v: f32, unit: Unit) -> String {
         Unit::Min => format!("{v:.0} min"),
         Unit::Times => format!("{v:.2}\u{d7}"),
         Unit::Percent => format!("{:.0}%", v * 100.0),
+        Unit::Count => format!("{v:.0}"),
     }
 }
 

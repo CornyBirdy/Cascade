@@ -747,7 +747,7 @@ impl App {
         }
         self.dock.configure(&self.cfg, self.monitor, self.dpi);
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
-        self.launcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {

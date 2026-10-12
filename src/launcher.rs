@@ -19,23 +19,18 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
+use crate::config::Config;
 use crate::dock::{Dock, ACCENT};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::msg;
 use crate::spring::Spring;
 
-const W: f32 = 800.0;
-const H: f32 = 620.0;
-/// Sidebar width.
+/// Sidebar width (when shown).
 const SIDE: f32 = 184.0;
-/// Middle column (pinned + recent).
-const MX: f32 = SIDE + 20.0;
-const COLS: usize = 4;
 const CELL_W: f32 = 90.0;
 const CELL_H: f32 = 84.0;
-const PINNED_ROWS: usize = 3;
-/// Right column (all apps).
-const RX: f32 = MX + COLS as f32 * CELL_W + 16.0;
+/// All-apps column width.
+const RIGHT_W: f32 = 220.0;
 const PAD: f32 = 16.0;
 const TOP: f32 = 76.0;
 const LIST_ROW: f32 = 34.0;
@@ -222,8 +217,59 @@ enum Glyph {
     Power,
 }
 
+/// Where the menu's parts sit, worked out from the settings.
+#[derive(Clone, Copy)]
+struct Geo {
+    w: f32,
+    h: f32,
+    /// Sidebar width (0 when hidden).
+    side: f32,
+    /// Left edge of the middle column.
+    mx: f32,
+    cols: usize,
+    prows: usize,
+    /// Left edge of the all-apps column.
+    rx: f32,
+    show_side: bool,
+    show_recent: bool,
+    show_all: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Position {
+    Auto,
+    Center,
+    Left,
+}
+
+impl Geo {
+    fn new(cfg: &Config) -> Self {
+        let show_side = cfg.start_show_sidebar;
+        let side = if show_side { SIDE } else { 0.0 };
+        let mx = side + 20.0;
+        let cols = cfg.start_columns as usize;
+        let rx = mx + cols as f32 * CELL_W + 16.0;
+        let show_all = cfg.start_show_all_apps;
+        let w = if show_all { rx + RIGHT_W + PAD } else { mx + cols as f32 * CELL_W + PAD + 4.0 };
+        Geo {
+            w,
+            h: cfg.start_height,
+            side,
+            mx,
+            cols,
+            prows: cfg.start_pinned_rows as usize,
+            rx,
+            show_side,
+            show_recent: cfg.start_show_recent,
+            show_all,
+        }
+    }
+}
+
 pub struct Launcher {
     pub hwnd: HWND,
+    geo: Geo,
+    position: Position,
     layer: Layer,
     backdrop: Backdrop,
     acrylic: bool,
@@ -275,6 +321,8 @@ impl Launcher {
     pub fn new(hwnd: HWND, backdrop: Backdrop) -> Self {
         Self {
             hwnd,
+            geo: Geo::new(&Config::default()),
+            position: Position::Auto,
             layer: Layer::default(),
             backdrop,
             acrylic: true,
@@ -300,12 +348,19 @@ impl Launcher {
         }
     }
 
-    /// Look: acrylic on/off, tint opacity (0..1) and corner radius.
-    pub fn configure(&mut self, acrylic: bool, opacity: f32, radius: f32) {
-        self.acrylic = acrylic;
-        self.radius = radius;
-        let tint = ((opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
-        self.backdrop.style(acrylic, tint, radius);
+    /// Look and layout, from the settings.
+    pub fn configure(&mut self, cfg: &Config) {
+        self.acrylic = cfg.acrylic;
+        self.radius = cfg.corner_radius();
+        self.geo = Geo::new(cfg);
+        self.position = match cfg.start_position.as_str() {
+            "center" => Position::Center,
+            "left" => Position::Left,
+            _ => Position::Auto,
+        };
+        let tint = ((cfg.start_opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
+        self.backdrop.style(cfg.acrylic, tint, self.radius);
+        self.scroll = 0.0;
         self.dirty = true;
     }
 
@@ -510,11 +565,8 @@ impl Launcher {
 
     pub fn on_wheel(&mut self, delta: i16) {
         let (top, bottom) = self.list_area();
-        let rows = if self.searching() {
-            self.results.len() as f32 * RESULT_ROW
-        } else {
-            self.rows.len() as f32 * LIST_ROW
-        };
+        let rows =
+            if self.searching() { self.results.len() as f32 * RESULT_ROW } else { self.rows.len() as f32 * LIST_ROW };
         let max = (rows - (bottom - top)).max(0.0);
         self.scroll = (self.scroll - delta as f32 / 120.0 * LIST_ROW * 3.0).clamp(0.0, max);
         self.dirty = true;
@@ -524,7 +576,7 @@ impl Launcher {
 
     /// Top and bottom of the scrolling list, in layout units.
     fn list_area(&self) -> (f32, f32) {
-        (TOP + 30.0, H - PAD)
+        (TOP + 30.0, self.geo.h - PAD)
     }
 
     pub fn wants_frame(&self) -> bool {
@@ -537,8 +589,16 @@ impl Launcher {
 
     /// Draws the launcher above `bottom` (screen px) on `monitor`: centred,
     /// or with its left edge at `anchor` when the taskbar is left-aligned.
-    pub fn render(&mut self, gfx: &mut Gfx, dock: &mut Dock, monitor: RECT, bottom: i32, anchor: Option<i32>) -> Result<()> {
+    pub fn render(
+        &mut self,
+        gfx: &mut Gfx,
+        dock: &mut Dock,
+        monitor: RECT,
+        bottom: i32,
+        anchor: Option<i32>,
+    ) -> Result<()> {
         self.dirty = false;
+        let g = self.geo;
         if !self.window_visible {
             return Ok(());
         }
@@ -552,12 +612,15 @@ impl Launcher {
             return Ok(());
         }
         let k = self.k;
-        let (pw, ph) = ((W * k).ceil() as i32, (H * k).ceil() as i32);
+        let (pw, ph) = ((g.w * k).ceil() as i32, (g.h * k).ceil() as i32);
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 28.0 * k) as i32;
-        let x = match anchor {
-            Some(ax) => ax.clamp(monitor.left, monitor.right - pw),
-            None => monitor.left + (monitor.right - monitor.left - pw) / 2,
+        let centred = monitor.left + (monitor.right - monitor.left - pw) / 2;
+        let x = match (self.position, anchor) {
+            (Position::Center, _) | (Position::Auto, None) => centred,
+            (Position::Left, _) => monitor.left + (12.0 * k) as i32,
+            (Position::Auto, Some(ax)) => ax.clamp(monitor.left, monitor.right - pw),
         };
+        let x = x.clamp(monitor.left, (monitor.right - pw).max(monitor.left));
         let y = (bottom - ph - (12.0 * k) as i32).max(monitor.top);
         let pos = POINT { x, y: y + slide };
         if self.open {
@@ -579,8 +642,10 @@ impl Launcher {
         let count = ((list_bottom - top) / row_h) as usize + 2;
         let visible: Vec<(usize, Row)> = if searching {
             self.results.iter().enumerate().skip(first).take(count).map(|(r, &i)| (r, Row::App(i))).collect()
-        } else {
+        } else if g.show_all {
             self.rows.iter().copied().enumerate().skip(first).take(count).collect()
+        } else {
+            Vec::new()
         };
         // Icons are fetched at exactly the pixel size they're drawn at.
         let px = |s: f32| (s * k).round() as u32;
@@ -596,8 +661,16 @@ impl Launcher {
             (Vec::new(), Vec::new())
         } else {
             (
-                self.pinned.iter().take(COLS * PINNED_ROWS).map(|(t, _)| dock.icon(self.icon_id(t), gfx, px(32.0))).collect(),
-                self.recent.iter().map(|r| dock.icon(&r.path, gfx, px(28.0))).collect(),
+                self.pinned
+                    .iter()
+                    .take(g.cols * g.prows)
+                    .map(|(t, _)| dock.icon(self.icon_id(t), gfx, px(32.0)))
+                    .collect(),
+                if g.show_recent {
+                    self.recent.iter().map(|r| dock.icon(&r.path, gfx, px(28.0))).collect()
+                } else {
+                    Vec::new()
+                },
             )
         };
 
@@ -610,41 +683,64 @@ impl Launcher {
             // Over the blur only a faint wash (it also keeps the pixels
             // clickable); while animating or without acrylic, a solid panel.
             let fill = if settled { Color::white(0.015) } else { Color(0.13, 0.13, 0.14, 0.97) };
-            p.rrect(0.0, 0.0, W, H, r, fill);
-            p.clip(0.0, 0.0, SIDE, H);
-            p.rrect(0.0, 0.0, SIDE + r * 2.0, H, r, Color(0.0, 0.0, 0.0, 0.16));
-            p.unclip();
-            p.stroke_rrect(0.5, 0.5, W - 1.0, H - 1.0, r, Color::white(0.10), 1.0);
-
-            // Sidebar: profile, places, Cascade settings and power.
-            let user = std::env::var("USERNAME").unwrap_or_default();
-            let (px, py) = (10.0, 14.0);
-            if self.hovered == Some(Target::Profile) {
-                p.rrect(px, py, SIDE - 20.0, 44.0, 6.0, Color::white(0.07));
+            p.rrect(0.0, 0.0, g.w, g.h, r, fill);
+            if g.show_side {
+                p.clip(0.0, 0.0, g.side, g.h);
+                p.rrect(0.0, 0.0, g.side + r * 2.0, g.h, r, Color(0.0, 0.0, 0.0, 0.16));
+                p.unclip();
             }
-            p.circle(px + 22.0, py + 22.0, 15.0, ACCENT);
-            let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-            p.text(&initial, &f.label, px + 7.0, py + 7.0, 30.0, 30.0, Align::Center, Color::white(1.0));
-            p.text(&user, &f.title, px + 44.0, py, SIDE - 64.0, 44.0, Align::Left, Color::white(0.95));
-            self.hits.push((Target::Profile, px, py, SIDE - 20.0, 44.0));
+            p.stroke_rrect(0.5, 0.5, g.w - 1.0, g.h - 1.0, r, Color::white(0.10), 1.0);
 
-            let side_item = |hits: &mut Vec<_>, t: Target, label: &str, glyph: Glyph, y: f32| {
-                if self.hovered == Some(t) {
-                    p.rrect(10.0, y, SIDE - 20.0, SIDE_ROW - 4.0, 5.0, Color::white(0.07));
+            if g.show_side {
+                // Sidebar: profile, places, Cascade settings and power.
+                let user = std::env::var("USERNAME").unwrap_or_default();
+                let (px, py) = (10.0, 14.0);
+                if self.hovered == Some(Target::Profile) {
+                    p.rrect(px, py, g.side - 20.0, 44.0, 6.0, Color::white(0.07));
                 }
-                draw_glyph(&p, glyph, 32.0, y + (SIDE_ROW - 4.0) / 2.0, Color::white(0.88));
-                p.text(label, &f.body, 54.0, y, SIDE - 64.0, SIDE_ROW - 4.0, Align::Left, Color::white(0.9));
-                hits.push((t, 10.0, y, SIDE - 20.0, SIDE_ROW - 4.0));
-            };
-            for (i, (label, _, glyph)) in PLACES.iter().enumerate() {
-                side_item(&mut self.hits, Target::Place(i), label, *glyph, TOP + i as f32 * SIDE_ROW);
+                p.circle(px + 22.0, py + 22.0, 15.0, ACCENT);
+                let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                p.text(&initial, &f.label, px + 7.0, py + 7.0, 30.0, 30.0, Align::Center, Color::white(1.0));
+                p.text(&user, &f.title, px + 44.0, py, g.side - 64.0, 44.0, Align::Left, Color::white(0.95));
+                self.hits.push((Target::Profile, px, py, g.side - 20.0, 44.0));
+
+                let side_item = |hits: &mut Vec<_>, t: Target, label: &str, glyph: Glyph, y: f32| {
+                    if self.hovered == Some(t) {
+                        p.rrect(10.0, y, g.side - 20.0, SIDE_ROW - 4.0, 5.0, Color::white(0.07));
+                    }
+                    draw_glyph(&p, glyph, 32.0, y + (SIDE_ROW - 4.0) / 2.0, Color::white(0.88));
+                    p.text(label, &f.body, 54.0, y, g.side - 64.0, SIDE_ROW - 4.0, Align::Left, Color::white(0.9));
+                    hits.push((t, 10.0, y, g.side - 20.0, SIDE_ROW - 4.0));
+                };
+                for (i, (label, _, glyph)) in PLACES.iter().enumerate() {
+                    side_item(&mut self.hits, Target::Place(i), label, *glyph, TOP + i as f32 * SIDE_ROW);
+                }
+                p.line(
+                    18.0,
+                    g.h - PAD - SIDE_ROW * 2.0 - 6.0,
+                    g.side - 18.0,
+                    g.h - PAD - SIDE_ROW * 2.0 - 6.0,
+                    Color::white(0.08),
+                    1.0,
+                );
+                side_item(&mut self.hits, Target::Settings, "Cascade", Glyph::Gear, g.h - PAD - SIDE_ROW * 2.0);
+                side_item(&mut self.hits, Target::Power, "Power", Glyph::Power, g.h - PAD - SIDE_ROW);
+            } else {
+                // No sidebar: just Cascade settings and power, bottom left.
+                for (t, glyph, cx) in
+                    [(Target::Settings, Glyph::Gear, g.mx + 14.0), (Target::Power, Glyph::Power, g.mx + 54.0)]
+                {
+                    let cy = g.h - PAD - 16.0;
+                    if self.hovered == Some(t) {
+                        p.circle(cx, cy, 16.0, Color::white(0.10));
+                    }
+                    draw_glyph(&p, glyph, cx, cy, Color::white(0.88));
+                    self.hits.push((t, cx - 16.0, cy - 16.0, 32.0, 32.0));
+                }
             }
-            p.line(18.0, H - PAD - SIDE_ROW * 2.0 - 6.0, SIDE - 18.0, H - PAD - SIDE_ROW * 2.0 - 6.0, Color::white(0.08), 1.0);
-            side_item(&mut self.hits, Target::Settings, "Cascade", Glyph::Gear, H - PAD - SIDE_ROW * 2.0);
-            side_item(&mut self.hits, Target::Power, "Power", Glyph::Power, H - PAD - SIDE_ROW);
 
             // Search box across the two right-hand columns.
-            let (sx, sw, sh) = (MX, W - PAD - MX, 38.0);
+            let (sx, sw, sh) = (g.mx, g.w - PAD - g.mx, 38.0);
             p.rrect(sx, 18.0, sw, sh, sh / 2.0, Color::white(0.07));
             p.stroke_rrect(sx + 0.5, 18.5, sw - 1.0, sh - 1.0, sh / 2.0, Color::white(0.08), 1.0);
             p.stroke_circle(sx + 22.0, 36.0, 5.5, Color::white(0.65), 1.5);
@@ -659,8 +755,8 @@ impl Launcher {
             }
 
             if searching {
-                p.text("Best matches", &f.label, MX + 4.0, TOP, 300.0, 22.0, Align::Left, Color::white(0.9));
-                p.clip(MX - 6.0, top, W - PAD - MX + 6.0, list_bottom - top);
+                p.text("Best matches", &f.label, g.mx + 4.0, TOP, 300.0, 22.0, Align::Left, Color::white(0.9));
+                p.clip(g.mx - 6.0, top, g.w - PAD - g.mx + 6.0, list_bottom - top);
                 for (&(row, item), icon) in visible.iter().zip(&row_icons) {
                     let Row::App(i) = item else { continue };
                     let y = top + row as f32 * RESULT_ROW - self.scroll;
@@ -668,30 +764,48 @@ impl Launcher {
                     let selected = row == self.selected;
                     if self.hovered == Some(t) || selected {
                         let a = if selected { 0.10 } else { 0.06 };
-                        p.rrect(MX - 6.0, y + 2.0, W - PAD - MX + 6.0, RESULT_ROW - 4.0, 6.0, Color::white(a));
+                        p.rrect(g.mx - 6.0, y + 2.0, g.w - PAD - g.mx + 6.0, RESULT_ROW - 4.0, 6.0, Color::white(a));
                     }
                     if selected {
-                        p.rrect(MX - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, ACCENT);
+                        p.rrect(g.mx - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, ACCENT);
                     }
-                    draw_icon(&p, icon.as_ref(), MX + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0);
+                    draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0);
                     let name = &self.apps[i].name;
-                    p.text(name, &f.body, MX + 50.0, y, W - MX - 90.0, RESULT_ROW, Align::Left, Color::white(0.95));
+                    p.text(
+                        name,
+                        &f.body,
+                        g.mx + 50.0,
+                        y,
+                        g.w - g.mx - 90.0,
+                        RESULT_ROW,
+                        Align::Left,
+                        Color::white(0.95),
+                    );
                     let (vy0, vy1) = (y.max(top), (y + RESULT_ROW).min(list_bottom));
                     if vy1 > vy0 {
-                        self.hits.push((t, MX - 6.0, vy0, W - PAD - MX + 6.0, vy1 - vy0));
+                        self.hits.push((t, g.mx - 6.0, vy0, g.w - PAD - g.mx + 6.0, vy1 - vy0));
                     }
                 }
                 if self.results.is_empty() {
-                    p.text("No apps found", &f.body, MX, top + 10.0, W - MX - PAD, 30.0, Align::Left, Color::white(0.5));
+                    p.text(
+                        "No apps found",
+                        &f.body,
+                        g.mx,
+                        top + 10.0,
+                        g.w - g.mx - PAD,
+                        30.0,
+                        Align::Left,
+                        Color::white(0.5),
+                    );
                 }
                 p.unclip();
             } else {
                 // Pinned.
-                p.text("Pinned", &f.label, MX + 4.0, TOP, 200.0, 22.0, Align::Left, Color::white(0.9));
+                p.text("Pinned", &f.label, g.mx + 4.0, TOP, 200.0, 22.0, Align::Left, Color::white(0.9));
                 let grid_y = TOP + 28.0;
                 for (i, ((_, name), icon)) in self.pinned.iter().zip(&pinned_icons).enumerate() {
-                    let (col, row) = ((i % COLS) as f32, (i / COLS) as f32);
-                    let (x, y) = (MX + col * CELL_W, grid_y + row * CELL_H);
+                    let (col, row) = ((i % g.cols) as f32, (i / g.cols) as f32);
+                    let (x, y) = (g.mx + col * CELL_W, grid_y + row * CELL_H);
                     let t = Target::Pinned(i);
                     if self.hovered == Some(t) {
                         p.rrect(x + 2.0, y, CELL_W - 4.0, CELL_H - 4.0, 6.0, Color::white(0.07));
@@ -702,62 +816,95 @@ impl Launcher {
                 }
                 if self.pinned.is_empty() {
                     let hint = "Right-click an app to pin it";
-                    p.text(hint, &f.small, MX + 4.0, grid_y, 300.0, 20.0, Align::Left, Color::white(0.5));
+                    p.text(hint, &f.small, g.mx + 4.0, grid_y, 300.0, 20.0, Align::Left, Color::white(0.5));
                 }
 
                 // Recent files.
-                let rows = self.pinned.len().div_ceil(COLS).clamp(1, PINNED_ROWS) as f32;
+                let rows = self.pinned.len().div_ceil(g.cols).clamp(1, g.prows) as f32;
                 let ry = grid_y + rows * CELL_H + 10.0;
-                p.text("Recent", &f.label, MX + 4.0, ry, 200.0, 22.0, Align::Left, Color::white(0.9));
-                let fits = ((H - PAD - ry - 28.0) / RECENT_ROW).max(0.0) as usize;
-                for (i, (file, icon)) in self.recent.iter().zip(&recent_icons).take(fits).enumerate() {
-                    let y = ry + 28.0 + i as f32 * RECENT_ROW;
-                    let t = Target::Recent(i);
-                    let w = COLS as f32 * CELL_W;
-                    if self.hovered == Some(t) {
-                        p.rrect(MX, y, w, RECENT_ROW - 4.0, 6.0, Color::white(0.07));
+                if g.show_recent {
+                    p.text("Recent", &f.label, g.mx + 4.0, ry, 200.0, 22.0, Align::Left, Color::white(0.9));
+                    // Keep clear of the bottom-left buttons when there's no sidebar.
+                    let reserved = if g.show_side { 0.0 } else { 40.0 };
+                    let fits = ((g.h - PAD - ry - 28.0 - reserved) / RECENT_ROW).max(0.0) as usize;
+                    for (i, (file, icon)) in self.recent.iter().zip(&recent_icons).take(fits).enumerate() {
+                        let y = ry + 28.0 + i as f32 * RECENT_ROW;
+                        let t = Target::Recent(i);
+                        let w = g.cols as f32 * CELL_W;
+                        if self.hovered == Some(t) {
+                            p.rrect(g.mx, y, w, RECENT_ROW - 4.0, 6.0, Color::white(0.07));
+                        }
+                        draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + 7.0, 28.0);
+                        p.text(
+                            &file.name,
+                            &f.body,
+                            g.mx + 46.0,
+                            y + 3.0,
+                            w - 56.0,
+                            20.0,
+                            Align::Left,
+                            Color::white(0.92),
+                        );
+                        p.text(
+                            &file.ago,
+                            &f.small,
+                            g.mx + 46.0,
+                            y + 21.0,
+                            w - 56.0,
+                            16.0,
+                            Align::Left,
+                            Color::white(0.5),
+                        );
+                        self.hits.push((t, g.mx, y, w, RECENT_ROW - 4.0));
                     }
-                    draw_icon(&p, icon.as_ref(), MX + 8.0, y + 7.0, 28.0);
-                    p.text(&file.name, &f.body, MX + 46.0, y + 3.0, w - 56.0, 20.0, Align::Left, Color::white(0.92));
-                    p.text(&file.ago, &f.small, MX + 46.0, y + 21.0, w - 56.0, 16.0, Align::Left, Color::white(0.5));
-                    self.hits.push((t, MX, y, w, RECENT_ROW - 4.0));
-                }
-                if self.recent.is_empty() {
-                    let hint = "Files you open show up here";
-                    p.text(hint, &f.small, MX + 4.0, ry + 28.0, 300.0, 20.0, Align::Left, Color::white(0.5));
+                    if self.recent.is_empty() {
+                        let hint = "Files you open show up here";
+                        p.text(hint, &f.small, g.mx + 4.0, ry + 28.0, 300.0, 20.0, Align::Left, Color::white(0.5));
+                    }
                 }
 
-                // All apps, A to Z.
-                let rw = W - PAD - RX;
-                p.line(RX - 8.0, TOP, RX - 8.0, H - PAD, Color::white(0.06), 1.0);
-                p.text("All apps", &f.label, RX + 4.0, TOP, rw, 22.0, Align::Left, Color::white(0.9));
-                p.clip(RX - 4.0, top, rw + 4.0, list_bottom - top);
-                for (&(row, item), icon) in visible.iter().zip(&row_icons) {
-                    let y = top + row as f32 * LIST_ROW - self.scroll;
-                    match item {
-                        Row::Letter(l) => {
-                            let s = l.to_string();
-                            p.text(&s, &f.label, RX + 8.0, y + 6.0, rw, LIST_ROW - 6.0, Align::Left, ACCENT);
-                        }
-                        Row::App(i) => {
-                            let t = Target::App(i);
-                            if self.hovered == Some(t) {
-                                p.rrect(RX - 4.0, y + 1.0, rw + 4.0, LIST_ROW - 2.0, 5.0, Color::white(0.07));
+                if g.show_all {
+                    // All apps, A to Z.
+                    let rw = g.w - PAD - g.rx;
+                    p.line(g.rx - 8.0, TOP, g.rx - 8.0, g.h - PAD, Color::white(0.06), 1.0);
+                    p.text("All apps", &f.label, g.rx + 4.0, TOP, rw, 22.0, Align::Left, Color::white(0.9));
+                    p.clip(g.rx - 4.0, top, rw + 4.0, list_bottom - top);
+                    for (&(row, item), icon) in visible.iter().zip(&row_icons) {
+                        let y = top + row as f32 * LIST_ROW - self.scroll;
+                        match item {
+                            Row::Letter(l) => {
+                                let s = l.to_string();
+                                p.text(&s, &f.label, g.rx + 8.0, y + 6.0, rw, LIST_ROW - 6.0, Align::Left, ACCENT);
                             }
-                            draw_icon(&p, icon.as_ref(), RX + 6.0, y + (LIST_ROW - 22.0) / 2.0, 22.0);
-                            let name = &self.apps[i].name;
-                            p.text(name, &f.body, RX + 36.0, y, rw - 40.0, LIST_ROW, Align::Left, Color::white(0.92));
-                            let (vy0, vy1) = (y.max(top), (y + LIST_ROW).min(list_bottom));
-                            if vy1 > vy0 {
-                                self.hits.push((t, RX - 4.0, vy0, rw + 4.0, vy1 - vy0));
+                            Row::App(i) => {
+                                let t = Target::App(i);
+                                if self.hovered == Some(t) {
+                                    p.rrect(g.rx - 4.0, y + 1.0, rw + 4.0, LIST_ROW - 2.0, 5.0, Color::white(0.07));
+                                }
+                                draw_icon(&p, icon.as_ref(), g.rx + 6.0, y + (LIST_ROW - 22.0) / 2.0, 22.0);
+                                let name = &self.apps[i].name;
+                                p.text(
+                                    name,
+                                    &f.body,
+                                    g.rx + 36.0,
+                                    y,
+                                    rw - 40.0,
+                                    LIST_ROW,
+                                    Align::Left,
+                                    Color::white(0.92),
+                                );
+                                let (vy0, vy1) = (y.max(top), (y + LIST_ROW).min(list_bottom));
+                                if vy1 > vy0 {
+                                    self.hits.push((t, g.rx - 4.0, vy0, rw + 4.0, vy1 - vy0));
+                                }
                             }
                         }
                     }
+                    if self.apps.is_empty() {
+                        p.text("Loading\u{2026}", &f.body, g.rx + 8.0, top, rw, 30.0, Align::Left, Color::white(0.5));
+                    }
+                    p.unclip();
                 }
-                if self.apps.is_empty() {
-                    p.text("Loading\u{2026}", &f.body, RX + 8.0, top, rw, 30.0, Align::Left, Color::white(0.5));
-                }
-                p.unclip();
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;

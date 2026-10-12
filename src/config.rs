@@ -37,12 +37,11 @@ hide_taskbar = true
 taskbar_style = full
 # center or left
 taskbar_align = center
-taskbar_height = 48
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
 taskbar_margin = 12
-# Space around each icon (its hover highlight). The gap from the bar's edge
-# to the icons is the same on all four sides: (height - icon size) / 2.
-taskbar_padding = 8
+# Gap from the taskbar's edge to its icons, the same on all four sides. The
+# taskbar's height is the icon size plus twice this.
+taskbar_inset = 12
 # round, small or square
 taskbar_corners = round
 # Blur what's behind the taskbar and Start menu (acrylic).
@@ -63,6 +62,17 @@ dock_magnify = 0
 launcher = true
 # Open the launcher with a lone Win key press (Win+E etc. still work).
 launcher_win_key = true
+# Where the Start menu opens: auto (follows the taskbar), center or left.
+start_position = auto
+start_height = 620
+# Columns and rows of pinned apps.
+start_columns = 4
+start_pinned_rows = 3
+start_show_sidebar = true
+start_show_recent = true
+start_show_all_apps = true
+# Tint over the blur behind the Start menu (0 = clear glass, 1 = solid).
+start_opacity = 0.55
 # A small helper with admin rights, so the Win key works over apps run as
 # administrator (Task Manager). Turn on in Settings: asks for permission once.
 admin_helper = false
@@ -111,9 +121,8 @@ pub struct Config {
     pub dock_magnify: f32,
     pub taskbar_style: String,
     pub taskbar_align: String,
-    pub taskbar_height: f32,
     pub taskbar_margin: f32,
-    pub taskbar_padding: f32,
+    pub taskbar_inset: f32,
     pub taskbar_corners: String,
     pub acrylic: bool,
     pub taskbar_opacity: f32,
@@ -124,6 +133,14 @@ pub struct Config {
     pub launcher: bool,
     pub launcher_win_key: bool,
     pub admin_helper: bool,
+    pub start_position: String,
+    pub start_height: f32,
+    pub start_columns: u32,
+    pub start_pinned_rows: u32,
+    pub start_show_sidebar: bool,
+    pub start_show_recent: bool,
+    pub start_show_all_apps: bool,
+    pub start_opacity: f32,
     pub focus_minutes: u32,
     pub break_minutes: u32,
     pub weather: bool,
@@ -157,9 +174,8 @@ impl Default for Config {
             dock_magnify: 0.0,
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
-            taskbar_height: 48.0,
             taskbar_margin: 12.0,
-            taskbar_padding: 8.0,
+            taskbar_inset: 12.0,
             taskbar_corners: "round".into(),
             acrylic: true,
             taskbar_opacity: 0.55,
@@ -168,6 +184,14 @@ impl Default for Config {
             show_clock: true,
             tray_icons: true,
             admin_helper: false,
+            start_position: "auto".into(),
+            start_height: 620.0,
+            start_columns: 4,
+            start_pinned_rows: 3,
+            start_show_sidebar: true,
+            start_show_recent: true,
+            start_show_all_apps: true,
+            start_opacity: 0.55,
             launcher: true,
             launcher_win_key: true,
             focus_minutes: 25,
@@ -266,11 +290,18 @@ impl Config {
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
-                "taskbar_height" => set_f(&mut c.taskbar_height, 32.0, 80.0),
                 "taskbar_margin" => set_f(&mut c.taskbar_margin, 0.0, 32.0),
-                "taskbar_padding" => set_f(&mut c.taskbar_padding, 0.0, 16.0),
+                "taskbar_inset" => set_f(&mut c.taskbar_inset, 0.0, 24.0),
                 "tray_icons" => set_b(&mut c.tray_icons),
                 "admin_helper" => set_b(&mut c.admin_helper),
+                "start_position" if matches!(v, "auto" | "center" | "left") => c.start_position = v.into(),
+                "start_height" => set_f(&mut c.start_height, 500.0, 800.0),
+                "start_columns" => set_u(&mut c.start_columns, 3.0, 6.0),
+                "start_pinned_rows" => set_u(&mut c.start_pinned_rows, 1.0, 4.0),
+                "start_show_sidebar" => set_b(&mut c.start_show_sidebar),
+                "start_show_recent" => set_b(&mut c.start_show_recent),
+                "start_show_all_apps" => set_b(&mut c.start_show_all_apps),
+                "start_opacity" => set_f(&mut c.start_opacity, 0.0, 1.0),
                 "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
                 "acrylic" => set_b(&mut c.acrylic),
                 "taskbar_opacity" => set_f(&mut c.taskbar_opacity, 0.0, 1.0),
@@ -342,11 +373,18 @@ impl Config {
             "dock_magnify" => self.dock_magnify.to_string(),
             "taskbar_style" => self.taskbar_style.clone(),
             "taskbar_align" => self.taskbar_align.clone(),
-            "taskbar_height" => self.taskbar_height.to_string(),
             "taskbar_margin" => self.taskbar_margin.to_string(),
-            "taskbar_padding" => self.taskbar_padding.to_string(),
+            "taskbar_inset" => self.taskbar_inset.to_string(),
             "tray_icons" => b(self.tray_icons),
             "admin_helper" => b(self.admin_helper),
+            "start_position" => self.start_position.clone(),
+            "start_height" => self.start_height.to_string(),
+            "start_columns" => self.start_columns.to_string(),
+            "start_pinned_rows" => self.start_pinned_rows.to_string(),
+            "start_show_sidebar" => b(self.start_show_sidebar),
+            "start_show_recent" => b(self.start_show_recent),
+            "start_show_all_apps" => b(self.start_show_all_apps),
+            "start_opacity" => self.start_opacity.to_string(),
             "taskbar_corners" => self.taskbar_corners.clone(),
             "acrylic" => b(self.acrylic),
             "taskbar_opacity" => self.taskbar_opacity.to_string(),

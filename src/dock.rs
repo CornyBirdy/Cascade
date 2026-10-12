@@ -476,12 +476,13 @@ impl Dock {
         self.hide_taskbar = cfg.hide_taskbar;
         self.full = cfg.taskbar_style != "floating";
         self.left = cfg.taskbar_align == "left";
-        self.bar_h = cfg.taskbar_height;
         self.margin = cfg.taskbar_margin;
-        self.padding = cfg.taskbar_padding.clamp(0.0, 16.0);
+        // The bar is as tall as its icons plus the same gap above and below.
+        self.padding = cfg.taskbar_inset.clamp(0.0, 24.0);
+        self.icon = cfg.dock_icon_size.clamp(16.0, 48.0);
+        self.bar_h = (self.icon + 2.0 * self.padding).max(28.0);
         // A full-width bar flush with the screen edges has square corners.
         self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
-        self.icon = cfg.dock_icon_size.min(self.bar_h - 8.0).max(12.0);
         self.magnify = cfg.dock_magnify;
         self.acrylic = cfg.acrylic;
         self.opacity = cfg.taskbar_opacity;
@@ -680,9 +681,14 @@ impl Dock {
 
     // ----------------------------------------------------------- geometry --
 
-    /// Size of a square button: the icon plus the padding around it.
+    /// Space between an icon and the edge of its hover highlight.
+    fn highlight(&self) -> f32 {
+        self.padding.min(8.0)
+    }
+
+    /// Size of a square button: the icon plus its highlight margin.
     fn button(&self) -> f32 {
-        (self.icon + 2.0 * self.padding).min(self.bar_h - 4.0)
+        (self.icon + 2.0 * self.highlight()).min(self.bar_h - 2.0)
     }
 
     /// Space between a bar's end and the first or last button. Chosen so the

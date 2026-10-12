@@ -23,7 +23,7 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 - **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin or close. **Drag** pinned apps to reorder them.
 - **Tray icons:** apps' notification-area icons show by the clock, the same ones you chose to show in Windows' taskbar settings. The rest are under the **^** button. Click and right-click them as usual. Cascade gets them the way alternative taskbars like RetroBar do: it keeps its own hidden tray window and passes everything on to Explorer, without touching Explorer itself.
 - **Clicks on the right:** the status icons open quick settings, and the clock opens notifications.
-- **Look:** full width or floating islands, centred or left-aligned, height, padding, icon size, gap from the screen edge, corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
+- **Look:** full width or floating islands, centred or left-aligned, icon size, padding (the gap from the bar's edge to its icons on all four sides, which sets the bar's height), gap from the screen edge, corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
 - **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
 - **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
@@ -40,7 +40,7 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 - **Right:** every installed app A to Z, Store apps included.
 - **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
 
-Turn off the Win-key takeover or the whole Start menu in Settings.
+**Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, whether to show the sidebar, recent files and the all-apps list, and the glass tint. Turn off the Win-key takeover or the whole Start menu there too.
 
 ## Settings
 
