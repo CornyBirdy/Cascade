@@ -1,48 +1,91 @@
-//! Generates the app icon (no image files in the repo) and embeds it as
+//! Generates the app icon (the glass-C mark; no image files in the repo) and embeds it as
 //! resource 1, so Explorer, the Start menu and the tray all show it.
 
 use std::path::PathBuf;
 
-/// Coverage (0..1) of a rounded rect at pixel centre (x, y), anti-aliased.
-fn rrect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
+/// Signed distance (negative inside) to a rounded rect.
+fn rrect_sd(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
     let cx = x.clamp(x0 + r, x1 - r);
     let cy = y.clamp(y0 + r, y1 - r);
-    let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - r;
-    (0.5 - d).clamp(0.0, 1.0)
+    ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - r
 }
 
-/// Three rounded windows, cascaded like Windows' "Cascade windows", each
-/// cut out from the one behind it, deep blue at the back to light at the front.
+/// Distance to the segment (ax, ay)-(bx, by).
+fn seg(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let t = (((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    ((x - ax - t * dx).powi(2) + (y - ay - t * dy).powi(2)).sqrt()
+}
+
+/// Distance to the centre line of the C (a 120-unit design grid): a top bar,
+/// a left-hand arc and a short bottom bar.
+fn c_line(u: f32, v: f32) -> f32 {
+    let top = seg(u, v, 56.0, 22.0, 78.0, 22.0);
+    let bottom = seg(u, v, 56.0, 98.0, 60.0, 98.0);
+    let arc = if u < 56.0 { ((u - 56.0).hypot(v - 60.0) - 38.0).abs() } else { f32::MAX };
+    top.min(bottom).min(arc)
+}
+
+/// Composites `col` at `alpha` over a premultiplied (colour, alpha) pixel.
+fn over(c: &mut [f32; 3], a: &mut f32, col: [f32; 3], alpha: f32) {
+    for (v, k) in c.iter_mut().zip(col) {
+        *v = *v * (1.0 - alpha) + k * alpha;
+    }
+    *a = *a * (1.0 - alpha) + alpha;
+}
+
+/// The Cascade mark on a transparent background: a glass letter C (a
+/// translucent white rim around a soft orange / pink / violet gradient), a
+/// detached glass pill like a taskbar below it, and an orange pebble on top.
 fn render(size: u32) -> Vec<u8> {
     let s = size as f32;
-    let side = s * 0.56;
-    let radius = s * 0.13;
-    let gap = (s * 0.055).max(1.0);
-    let layers = [(0.0, [0.11, 0.27, 0.80]), (0.22, [0.20, 0.50, 1.00]), (0.44, [0.56, 0.84, 1.00])];
+    // The design grid is 120 units; the mark fills x 11..113, y 11..105.
+    let span = 112.0;
+    let k = span / s;
+    let px_u = k; // grid units per pixel
+    let hex = |h: u32| [(h >> 16 & 255) as f32 / 255.0, (h >> 8 & 255) as f32 / 255.0, (h & 255) as f32 / 255.0];
+    // Blurred colour blobs behind the glass: (x, y, radius, colour).
+    let orbs = [
+        (5.8, 5.8, 50.0, hex(0xFF6A3D)),
+        (120.4, 20.4, 54.0, hex(0xFF4FA3)),
+        (60.0, 126.7, 62.5, hex(0x7A3CFF)),
+        (130.8, 143.3, 37.5, hex(0xFFB020)),
+    ];
+    let blur = 9.0;
     let mut px = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Premultiplied colour and alpha, composed back to front.
+            let u = 6.0 + (x as f32 + 0.5) * k;
+            let v = 2.0 + (y as f32 + 0.5) * k;
+            // Coverage from a signed distance, anti-aliased over one pixel.
+            let cov = |sd: f32| (0.5 - sd / px_u).clamp(0.0, 1.0);
+            let cl = c_line(u, v);
+            let outer = (cl - 7.0).min(rrect_sd(u, v, 74.0, 91.0, 113.0, 105.0, 7.0));
+            let inner = (cl - 6.0).min(rrect_sd(u, v, 75.0, 92.0, 112.0, 104.0, 6.0));
             let (mut c, mut a) = ([0.0f32; 3], 0.0f32);
-            for (n, (off, col)) in layers.iter().enumerate() {
-                let (x0, y0) = (s * off, s * off);
-                let (x1, y1) = (x0 + side, y0 + side);
-                if n > 0 {
-                    let cut = rrect(fx, fy, x0 - gap, y0 - gap, x1 + gap, y1 + gap, radius + gap);
-                    a *= 1.0 - cut;
-                    for v in &mut c {
-                        *v *= 1.0 - cut;
+            // Glass rim, then the tinted body inside it.
+            over(&mut c, &mut a, [1.0; 3], 0.6 * cov(outer));
+            let ci = cov(inner);
+            if ci > 0.0 {
+                let mut body = hex(0x0E0B14);
+                for (ox, oy, r, col) in orbs {
+                    let d = (u - ox).hypot(v - oy) - r;
+                    let t = 1.0 / (1.0 + (d / (blur * 0.55)).exp());
+                    for (b, k) in body.iter_mut().zip(col) {
+                        *b = *b * (1.0 - t) + k * t;
                     }
                 }
-                let cov = rrect(fx, fy, x0, y0, x1, y1, radius);
-                // A little lighter at the top of each window.
-                let shade = 1.08 - 0.16 * ((fy - y0) / side).clamp(0.0, 1.0);
-                for (v, k) in c.iter_mut().zip(col) {
-                    *v = *v * (1.0 - cov) + (k * shade).min(1.0) * cov;
+                for b in &mut body {
+                    *b = *b * 0.8 + 0.2;
                 }
-                a = a * (1.0 - cov) + cov;
+                // The body is opaque glass: it replaces the rim underneath.
+                for (v, b) in c.iter_mut().zip(body) {
+                    *v = *v * (1.0 - ci) + b * ci;
+                }
+                a = a * (1.0 - ci) + ci;
             }
+            // The orange pebble.
+            over(&mut c, &mut a, hex(0xFF9A1F), cov((u - 101.2).hypot(v - 21.8) - 10.6));
             let i = ((y * size + x) * 4) as usize;
             let un = |v: f32| if a > 0.0 { (v / a * 255.0).round().clamp(0.0, 255.0) as u8 } else { 0 };
             // BGRA, straight alpha (icons are not premultiplied).
