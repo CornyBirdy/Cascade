@@ -33,8 +33,7 @@ pub fn summary() -> String {
         if GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user).is_err() {
             return memory;
         }
-        let mut now = FILETIME::default();
-        GetSystemTimeAsFileTime(&mut now);
+        let now = GetSystemTimeAsFileTime();
         // FILETIME ticks are 100 ns.
         let used = (filetime(kernel) + filetime(user)) as f64 / 1e7;
         let up = filetime(now).saturating_sub(filetime(created)) as f64 / 1e7;
