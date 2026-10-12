@@ -25,7 +25,8 @@ const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
 const CHOICE_W: f32 = 84.0;
 
-pub const SECTIONS: [&str; 7] = ["General", "Notch", "Taskbar", "Start menu", "Focus & weather", "Updates", "About"];
+pub const SECTIONS: [&str; 8] =
+    ["General", "Notch", "Taskbar", "Start menu", "Widgets", "Focus & weather", "Updates", "About"];
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -36,6 +37,7 @@ enum Unit {
     Times,
     Percent,
     Count,
+    Seconds,
 }
 
 enum Ctl {
@@ -176,6 +178,27 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
         ],
         4 => vec![
+            row("widgets_button", "Widgets button", "A button at the right of the taskbar that opens the panel.", Toggle),
+            row("chip_music", "Music", "What's playing, with a play / pause button.", Toggle),
+            row("chip_cpu", "CPU", "Processor load on the taskbar.", Toggle),
+            row("chip_ram", "Memory", "Memory in use on the taskbar.", Toggle),
+            row("chip_gpu", "GPU", "Graphics load on the taskbar.", Toggle),
+            row("chip_net", "Network", "Download and upload speed on the taskbar.", Toggle),
+            row(
+                "widgets_panel",
+                "Panel cards",
+                "In order: media, system, weather, calendar. Remove one to hide it.",
+                Text { secret: false },
+            ),
+            row("widgets_columns", "Panel columns", "Cards side by side.", Choice(&[("1", "One"), ("2", "Two")])),
+            row(
+                "stats_seconds",
+                "Stats refresh",
+                "Seconds between readings (only while one is on screen).",
+                slider(1.0, 10.0, 1.0, Unit::Seconds),
+            ),
+        ],
+        5 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
             row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
@@ -187,7 +210,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("fahrenheit", "Use Fahrenheit", "Otherwise Celsius.", Toggle),
         ],
-        5 => vec![
+        6 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
@@ -209,6 +232,7 @@ fn fmt(v: f32, unit: Unit) -> String {
         Unit::Times => format!("{v:.2}\u{d7}"),
         Unit::Percent => format!("{:.0}%", v * 100.0),
         Unit::Count => format!("{v:.0}"),
+        Unit::Seconds => format!("{v:.0} s"),
     }
 }
 

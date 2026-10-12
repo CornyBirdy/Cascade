@@ -24,6 +24,8 @@ use crate::backdrop::Backdrop;
 use crate::config::{self, Config};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
+use crate::media::MediaInfo;
+use crate::sysmon::{self, Stats};
 use crate::shell;
 use crate::spring::Spring;
 use crate::systray::Systray;
@@ -40,6 +42,10 @@ const TRAY_ICON_W: f32 = 28.0;
 const STATUS_ICON: f32 = 24.0;
 /// Space between floating islands.
 const ISLAND_GAP: f32 = 8.0;
+const CHIP_STAT_W: f32 = 48.0;
+const CHIP_NET_W: f32 = 84.0;
+const CHIP_MUSIC_W: f32 = 196.0;
+const WIDGETS_BTN_W: f32 = 28.0;
 pub const ACCENT: Color = Color(0.38, 0.67, 1.0, 1.0);
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
@@ -99,12 +105,35 @@ impl Icon {
     }
 }
 
+/// Small live widgets on the taskbar.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Chip {
+    Music,
+    Cpu,
+    Ram,
+    Gpu,
+    Net,
+}
+
+/// What the taskbar widgets show.
+pub struct WidgetData<'a> {
+    pub stats: &'a Stats,
+    pub media: Option<&'a MediaInfo>,
+    pub art: Option<ID2D1Bitmap>,
+}
+
 /// Things on the taskbar you can point at.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hot {
     Start,
     Search,
     Weather,
+    /// The button that opens the widgets panel.
+    Widgets,
+    /// A small widget (opens the panel).
+    Chip(Chip),
+    /// The play/pause button on the music widget.
+    MusicToggle,
     App(usize),
     Tray,
     /// A notification-area icon (index into the systray's icons).
@@ -149,6 +178,8 @@ struct Geo {
     /// The ^ button, when some icons are hidden under it.
     tray: Option<Span>,
     tray_icons: Vec<(usize, Span)>,
+    widgets_btn: Option<Span>,
+    chips: Vec<(Chip, Span)>,
     status: Span,
     clock: Span,
     /// Rounded panels (x0, x1) that get a blur behind them.
@@ -196,6 +227,8 @@ pub struct Dock {
     show_clock: bool,
     show_weather: bool,
     show_tray: bool,
+    show_widgets_btn: bool,
+    chips_cfg: Vec<Chip>,
 
     k: f32,
     monitor: RECT,
@@ -370,6 +403,8 @@ impl Dock {
             show_clock: true,
             show_weather: true,
             show_tray: true,
+            show_widgets_btn: true,
+            chips_cfg: Vec::new(),
             k: 1.0,
             monitor: RECT::default(),
             bottom: 0,
@@ -498,6 +533,17 @@ impl Dock {
         self.show_clock = cfg.show_clock;
         self.show_weather = cfg.weather;
         self.show_tray = cfg.tray_icons;
+        self.show_widgets_btn = cfg.widgets_button;
+        self.chips_cfg = [
+            (cfg.chip_music, Chip::Music),
+            (cfg.chip_cpu, Chip::Cpu),
+            (cfg.chip_ram, Chip::Ram),
+            (cfg.chip_gpu, Chip::Gpu),
+            (cfg.chip_net, Chip::Net),
+        ]
+        .into_iter()
+        .filter_map(|(on, c)| on.then_some(c))
+        .collect();
         self.monitor = monitor;
         self.k = k;
         let tint = ((self.opacity * 255.0) as u32) << 24 | 0x00_1C1C1E;
@@ -716,7 +762,16 @@ impl Dock {
 
     /// Lays everything out for a window `ww` layout units wide. The same
     /// padding is used between every island edge and what's inside it.
-    fn layout(&self, ww: f32, wh: f32, status: &Status, weather: bool, tray: &[usize], overflow: bool) -> Geo {
+    fn layout(
+        &self,
+        ww: f32,
+        wh: f32,
+        status: &Status,
+        weather: bool,
+        tray: &[usize],
+        overflow: bool,
+        has_media: bool,
+    ) -> Geo {
         let b = self.button();
         let pad = self.edge();
         let m = self.margin;
@@ -766,6 +821,23 @@ impl Dock {
             rx -= TRAY_W;
             Span { x: rx, w: TRAY_W }
         });
+        // Widgets: the button, then the chips, left of the tray.
+        let mut chips = Vec::new();
+        for &c in self.chips_cfg.iter().rev() {
+            let w = match c {
+                Chip::Music if has_media => CHIP_MUSIC_W,
+                Chip::Music => continue,
+                Chip::Net => CHIP_NET_W,
+                _ => CHIP_STAT_W,
+            };
+            rx -= w;
+            chips.push((c, Span { x: rx, w }));
+        }
+        chips.reverse();
+        let widgets_btn = self.show_widgets_btn.then(|| {
+            rx -= WIDGETS_BTN_W;
+            Span { x: rx, w: WIDGETS_BTN_W }
+        });
         let right_x = rx - pad;
 
         // Left: weather.
@@ -793,6 +865,8 @@ impl Dock {
             apps,
             tray: tray_span,
             tray_icons,
+            widgets_btn,
+            chips,
             status: status_span,
             clock,
             islands,
@@ -815,6 +889,13 @@ impl Dock {
         }
         if let Some(i) = g.apps.iter().position(|s| s.w > 4.0 && s.contains(x)) {
             return Some(Hot::App(i));
+        }
+        if g.widgets_btn.is_some_and(|s| s.contains(x)) {
+            return Some(Hot::Widgets);
+        }
+        if let Some((c, s)) = g.chips.iter().find(|(_, s)| s.contains(x)) {
+            // The play/pause button is the music widget's right edge.
+            return Some(if *c == Chip::Music && x >= s.x + s.w - 30.0 { Hot::MusicToggle } else { Hot::Chip(*c) });
         }
         if g.tray.is_some_and(|s| s.contains(x)) {
             return Some(Hot::Tray);
@@ -1004,7 +1085,14 @@ impl Dock {
         moving
     }
 
-    pub fn render(&mut self, gfx: &mut Gfx, status: &Status, weather: Option<&Weather>, tray: &mut Systray) -> Result<()> {
+    pub fn render(
+        &mut self,
+        gfx: &mut Gfx,
+        status: &Status,
+        weather: Option<&Weather>,
+        tray: &mut Systray,
+        wd: &WidgetData,
+    ) -> Result<()> {
         self.dirty = false;
         if !self.shown || !self.window_visible {
             return Ok(());
@@ -1033,7 +1121,7 @@ impl Dock {
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         let show_weather = self.show_weather && weather.is_some();
-        self.geo = self.layout(ww, wh, status, show_weather, &inline, overflow);
+        self.geo = self.layout(ww, wh, status, show_weather, &inline, overflow, wd.media.is_some());
         let g = &self.geo;
 
         // Blur behind each island, just under this window.
@@ -1168,6 +1256,69 @@ impl Dock {
                         let first = icon.tip.lines().next().unwrap_or("").trim().to_string();
                         if !first.is_empty() {
                             tip = Some((t.centre(), first));
+                        }
+                    }
+                }
+            }
+
+            // Widgets button and the small widgets.
+            let mid_y = g.y0 + bh / 2.0;
+            if let Some(s) = g.widgets_btn {
+                if let Some(c) = hover_bg(Hot::Widgets) {
+                    p.rrect(s.x, by, s.w, b, 5.0, c);
+                }
+                let c = Color::white(0.85);
+                for (dx, dy) in [(-4.5, -4.5), (0.5, -4.5), (-4.5, 0.5), (0.5, 0.5)] {
+                    p.rrect(s.centre() + dx, mid_y + dy, 4.0, 4.0, 1.2, c);
+                }
+            }
+            for &(chip, s) in &g.chips {
+                if let Some(c) = hover_bg(Hot::Chip(chip)).or_else(|| (chip == Chip::Music).then(|| hover_bg(Hot::MusicToggle)).flatten()) {
+                    p.rrect(s.x, by, s.w, b, 5.0, c);
+                }
+                let st = wd.stats;
+                let grey = Color::white(0.55);
+                let white = Color::white(0.95);
+                let two = |top: &str, bottom: &str, top_c: Color, bottom_c: Color, font_b: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat| {
+                    p.text(top, &f.small, s.x, mid_y - 16.0, s.w, 16.0, Align::Center, top_c);
+                    p.text(bottom, font_b, s.x, mid_y, s.w, 16.0, Align::Center, bottom_c);
+                };
+                match chip {
+                    Chip::Cpu => two("CPU", &format!("{:.0}%", st.cpu), grey, white, &f.label),
+                    Chip::Ram => two("RAM", &format!("{:.0}%", st.ram), grey, white, &f.label),
+                    Chip::Gpu => match st.gpu {
+                        Some(g) => two("GPU", &format!("{g:.0}%"), grey, white, &f.label),
+                        None => two("GPU", "\u{2014}", grey, grey, &f.label),
+                    },
+                    Chip::Net => {
+                        two(
+                            &format!("\u{2193} {}", sysmon::speed(st.down)),
+                            &format!("\u{2191} {}", sysmon::speed(st.up)),
+                            white,
+                            white,
+                            &f.small,
+                        );
+                    }
+                    Chip::Music => {
+                        let Some(m) = wd.media else { continue };
+                        let art = 28.0;
+                        match &wd.art {
+                            Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
+                            None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
+                        }
+                        let tw = s.w - art - 8.0 - 34.0;
+                        p.text(&m.title, &f.small, s.x + art + 12.0, mid_y - 16.0, tw, 16.0, Align::Left, white);
+                        p.text(&m.artist, &f.small, s.x + art + 12.0, mid_y, tw, 16.0, Align::Left, grey);
+                        // Play / pause.
+                        let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
+                        if self.hovered == Some(Hot::MusicToggle) {
+                            p.circle(bx, mid_y, 12.0, Color::white(0.10));
+                        }
+                        if m.playing {
+                            p.rrect(bx - 4.5, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+                            p.rrect(bx + 1.3, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+                        } else {
+                            p.polygon(&[(bx - 3.5, mid_y - 6.0), (bx - 3.5, mid_y + 6.0), (bx + 5.5, mid_y)], c);
                         }
                     }
                 }

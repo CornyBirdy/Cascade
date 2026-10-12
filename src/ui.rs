@@ -45,6 +45,8 @@ use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::systray::{self, Flyout, Systray};
+use crate::sysmon::Sampler;
+use crate::widgets::{self, Widgets};
 use crate::helper;
 use crate::spring::Spring;
 use crate::update;
@@ -62,6 +64,7 @@ const TIMER_TICK: usize = 4;
 const TIMER_FLYOUT: usize = 5;
 const TIMER_POMODORO: usize = 6;
 const TIMER_KEYFIX: usize = 7;
+const TIMER_STATS: usize = 8;
 // Dock timers (on the dock window).
 const TIMER_SCAN: usize = 10;
 const TIMER_DOCK_HIDE: usize = 11;
@@ -210,6 +213,11 @@ struct App {
     flyout: Flyout,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
+    /// System stats, sampled only while a stats widget is on screen.
+    sysmon: Sampler,
+    stats_on: bool,
+    widgets: Widgets,
+    widgets_seen: bool,
     /// Whether the taskbar is being held in view for an open pop-up.
     dock_held: bool,
     /// When a click outside last closed the Start menu or tray flyout, so the
@@ -262,6 +270,8 @@ pub fn run() -> Result<()> {
         let launcher_backdrop = Backdrop::create(instance)?;
         let flyout_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         let flyout = (flyout_hwnd, Backdrop::create(instance)?);
+        let widgets_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
+        let widgets = (widgets_hwnd, Backdrop::create(instance)?);
 
         let app = App::new(
             hwnd,
@@ -271,6 +281,7 @@ pub fn run() -> Result<()> {
             (launcher_hwnd, launcher_backdrop),
             dock_backdrops,
             flyout,
+            widgets,
             instance,
         )?;
         APP.with(|c| *c.borrow_mut() = Some(app));
@@ -543,6 +554,7 @@ impl App {
         (launcher_hwnd, launcher_backdrop): (HWND, Backdrop),
         dock_backdrops: Vec<Backdrop>,
         (flyout_hwnd, flyout_backdrop): (HWND, Backdrop),
+        (widgets_hwnd, widgets_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -619,6 +631,10 @@ impl App {
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             tray_rect: RECT::default(),
             outside_close: None,
+            sysmon: Sampler::new(),
+            stats_on: false,
+            widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
+            widgets_seen: false,
             dock_held: false,
             message: String::new(),
             message_color: ACCENT,
@@ -752,6 +768,8 @@ impl App {
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.arm_stats();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
             (true, None) => {
@@ -905,6 +923,9 @@ impl App {
         if hwnd == self.flyout.hwnd {
             return self.handle_flyout(m, wp, lp);
         }
+        if hwnd == self.widgets.hwnd {
+            return self.handle_widgets(m, wp, lp);
+        }
         if m == msg::APPBAR {
             match wp.0 as u32 {
                 ABN_FULLSCREENAPP => {
@@ -914,6 +935,7 @@ impl App {
                     if self.fullscreen {
                         self.preview.hide();
                     }
+                    self.arm_stats();
                 }
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => self.dock.reposition(),
                 _ => {}
@@ -1267,7 +1289,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if id != TIMER_TICK && id != TIMER_POMODORO {
+            if id != TIMER_TICK && id != TIMER_POMODORO && id != TIMER_STATS {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -1290,6 +1312,7 @@ impl App {
             TIMER_TICK => self.dirty = true,
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
+            TIMER_STATS => self.sample_stats(),
             TIMER_POMODORO => {
                 if self.pomo.tick() {
                     unsafe {
@@ -1350,6 +1373,9 @@ impl App {
     }
 
     fn right_click_target(&mut self, hwnd: HWND) -> RightClick {
+        if hwnd == self.widgets.hwnd {
+            return RightClick::Nothing;
+        }
         if hwnd == self.flyout.hwnd {
             if let Some(i) = self.flyout.hovered() {
                 self.systray.click(i, true);
@@ -1495,6 +1521,10 @@ impl App {
         }
         if self.flyout.open {
             self.flyout.hide();
+            closed = true;
+        }
+        if self.widgets.open {
+            self.widgets.hide();
             closed = true;
         }
         if closed {
@@ -1803,6 +1833,8 @@ impl App {
             }
             DockHot::Tray => self.toggle_flyout(),
             DockHot::TrayIcon(i) => self.systray.click(i, false),
+            DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
+            DockHot::MusicToggle => self.toggle_play(),
             DockHot::Status => shell::open("ms-actioncenter:controlcenter/&showFooter=true"),
             DockHot::Clock => shell::open("ms-actioncenter:"),
         }
@@ -1818,6 +1850,104 @@ impl App {
             } else {
                 let _ = KillTimer(Some(self.dock.hwnd), TIMER_CLOCK);
             }
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        // Flip right away; the real state follows from the player.
+        if let Some(m) = &mut self.media {
+            m.position = m.position_now();
+            m.stamp = Instant::now();
+            m.playing = !m.playing;
+        }
+        let _ = self.media_tx.send(MediaCmd::PlayPause);
+        self.dock.dirty = true;
+        self.widgets.dirty = true;
+    }
+
+    fn toggle_widgets(&mut self) {
+        if self.just_closed() {
+            return;
+        }
+        if self.widgets.open {
+            self.widgets.hide();
+            return;
+        }
+        self.preview.hide();
+        self.dock_held = true;
+        self.dock.set_held(true);
+        let right = self.dock.bar_rect().right;
+        let bottom = self.dock.panel_top() - (8.0 * self.dpi) as i32;
+        self.widgets.show(&self.cfg.widgets_panel, self.cfg.widgets_columns, right, bottom, self.dpi);
+        self.arm_stats();
+    }
+
+    fn handle_widgets(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match m {
+            WM_ACTIVATE => {
+                if wp.0 & 0xFFFF == 0 {
+                    self.widgets.hide();
+                }
+                return None;
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                self.widgets.on_move(x, y);
+            }
+            WM_MOUSELEAVE => self.widgets.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                self.widgets.on_move(x, y);
+                match self.widgets.on_click(x, y) {
+                    Some(widgets::Action::Previous) => {
+                        let _ = self.media_tx.send(MediaCmd::Previous);
+                    }
+                    Some(widgets::Action::Next) => {
+                        let _ = self.media_tx.send(MediaCmd::Next);
+                    }
+                    Some(widgets::Action::PlayPause) => self.toggle_play(),
+                    Some(widgets::Action::Customise) => {
+                        self.widgets.hide();
+                        self.open_settings();
+                    }
+                    None => {}
+                }
+            }
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+
+    /// Starts or stops the stats timer: it runs only while a stats widget
+    /// is on screen (taskbar chips or the open panel).
+    fn arm_stats(&mut self) {
+        let chips = self.cfg.chip_cpu || self.cfg.chip_ram || self.cfg.chip_gpu || self.cfg.chip_net;
+        let want = (self.cfg.dock && self.dock.shown && chips) || self.widgets.open;
+        unsafe {
+            if want {
+                let ms = if self.widgets.open { 1000 } else { self.cfg.stats_seconds.max(1) * 1000 };
+                if !self.stats_on {
+                    self.stats_on = true;
+                    self.sample_stats(); // the first reading is only a baseline
+                }
+                SetTimer(Some(self.hwnd), TIMER_STATS, ms, None);
+            } else if self.stats_on {
+                self.stats_on = false;
+                let _ = KillTimer(Some(self.hwnd), TIMER_STATS);
+                self.sysmon.reset();
+            }
+        }
+    }
+
+    fn sample_stats(&mut self) {
+        let before = self.sysmon.stats.signature();
+        // GPU and disk load cost a bit more: only when they are shown.
+        self.sysmon.sample(self.cfg.chip_gpu || self.widgets.open);
+        if self.sysmon.stats.signature() != before {
+            self.dock.dirty = true;
+        }
+        if self.widgets.open {
+            self.widgets.dirty = true;
         }
     }
 
@@ -1970,7 +2100,11 @@ impl App {
     }
 
     fn wants_frame(&self) -> bool {
-        self.notch_wants() || self.dock.wants_frame() || self.launcher.wants_frame() || self.flyout.wants_frame()
+        self.notch_wants()
+            || self.dock.wants_frame()
+            || self.launcher.wants_frame()
+            || self.flyout.wants_frame()
+            || self.widgets.wants_frame()
     }
 
     /// Steps the springs, draws, and returns how long to wait for the next frame.
@@ -2004,7 +2138,10 @@ impl App {
                 battery: battery(),
             };
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
-            let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray);
+            self.sync_art();
+            let art = self.art.as_ref().map(|(_, b, _)| b.clone());
+            let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art };
+            let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);
             if let Some(h) = self.systray.hwnd {
                 let r = self.dock.bar_rect();
                 if r != self.tray_rect {
@@ -2017,9 +2154,26 @@ impl App {
             fast |= self.flyout.step(dt);
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
         }
+        if self.widgets.wants_frame() {
+            fast |= self.widgets.step(dt);
+            self.sync_art();
+            let art = self.art.as_ref().map(|(_, b, _)| b.clone());
+            let ctx = widgets::Ctx {
+                sampler: &self.sysmon,
+                media: self.media.as_ref(),
+                art,
+                weather: self.weather.as_ref(),
+            };
+            let _ = self.widgets.render(&mut self.gfx, &ctx);
+        }
+        // Stats are read faster while the panel is open.
+        if self.widgets.open != self.widgets_seen {
+            self.widgets_seen = self.widgets.open;
+            self.arm_stats();
+        }
         // Keep an auto-hidden taskbar up while the menu or flyout is open,
         // and let it go again shortly after they close.
-        let hold = self.launcher.open || self.flyout.open;
+        let hold = self.launcher.open || self.flyout.open || self.widgets.open;
         if hold != self.dock_held {
             self.dock_held = hold;
             if self.dock.set_held(hold) {

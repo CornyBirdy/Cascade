@@ -29,6 +29,13 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 
 Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
+## Widgets
+
+- **On the taskbar**, left of the tray icons: what's playing (with a play / pause button), CPU, memory, GPU and network speed. Each is optional.
+- **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for what's playing (art, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
+- **Customising it** (Settings → Widgets): which taskbar widgets show, the panel's cards and their order (a list like `media,system,weather,calendar`; leave one out to hide it), one or two columns, and how often stats are read.
+- **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
+
 ## Start menu
 
 Cascade's own Start menu. Windows doesn't let other apps restyle its real one, so Cascade replaces it.
@@ -97,6 +104,8 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/backdrop.rs` | Acrylic blur behind the taskbar and Start menu |
 | `src/systray.rs` | Tray icons from apps, and the hidden-icons flyout |
 | `src/helper.rs` | Optional admin helper for the Win key over admin apps |
+| `src/sysmon.rs` | CPU, memory, network, GPU and disk readings for the stats widgets |
+| `src/widgets.rs` | The widgets panel |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |

@@ -23,10 +23,12 @@ mod radios;
 mod settings;
 mod shell;
 mod spring;
+mod sysmon;
 mod systray;
 mod ui;
 mod update;
 mod weather;
+mod widgets;
 
 /// Messages worker threads post to the main (notch) window.
 pub mod msg {

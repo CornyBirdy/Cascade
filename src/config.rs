@@ -59,6 +59,22 @@ dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
 
+# ---- Widgets ----
+# A button at the right of the taskbar that opens the widgets panel.
+widgets_button = true
+# Small widgets on the taskbar, left of the tray icons. Click one to open the panel.
+chip_music = true
+chip_cpu = true
+chip_ram = true
+chip_gpu = false
+chip_net = false
+# The panel's cards, in order (remove one to hide it): media, system, weather, calendar.
+widgets_panel = media,system,weather,calendar
+# 1 or 2 columns of cards.
+widgets_columns = 1
+# Seconds between system stats readings (only taken while one is on screen).
+stats_seconds = 2
+
 # ---- Launcher ----
 # Start button on the dock that opens Cascade's app launcher.
 launcher = true
@@ -133,6 +149,15 @@ pub struct Config {
     pub show_status: bool,
     pub show_clock: bool,
     pub tray_icons: bool,
+    pub widgets_button: bool,
+    pub chip_music: bool,
+    pub chip_cpu: bool,
+    pub chip_ram: bool,
+    pub chip_gpu: bool,
+    pub chip_net: bool,
+    pub widgets_panel: String,
+    pub widgets_columns: u32,
+    pub stats_seconds: u32,
     pub launcher: bool,
     pub launcher_win_key: bool,
     pub admin_helper: bool,
@@ -196,6 +221,15 @@ impl Default for Config {
             start_show_recent: true,
             start_show_all_apps: true,
             start_opacity: 0.55,
+            widgets_button: true,
+            chip_music: true,
+            chip_cpu: true,
+            chip_ram: true,
+            chip_gpu: false,
+            chip_net: false,
+            widgets_panel: "media,system,weather,calendar".into(),
+            widgets_columns: 1,
+            stats_seconds: 2,
             launcher: true,
             launcher_win_key: true,
             focus_minutes: 25,
@@ -313,6 +347,15 @@ impl Config {
                 "show_search" => set_b(&mut c.show_search),
                 "show_status" => set_b(&mut c.show_status),
                 "show_clock" => set_b(&mut c.show_clock),
+                "widgets_button" => set_b(&mut c.widgets_button),
+                "chip_music" => set_b(&mut c.chip_music),
+                "chip_cpu" => set_b(&mut c.chip_cpu),
+                "chip_ram" => set_b(&mut c.chip_ram),
+                "chip_gpu" => set_b(&mut c.chip_gpu),
+                "chip_net" => set_b(&mut c.chip_net),
+                "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
+                "widgets_columns" => set_u(&mut c.widgets_columns, 1.0, 2.0),
+                "stats_seconds" => set_u(&mut c.stats_seconds, 1.0, 10.0),
                 "launcher" => set_b(&mut c.launcher),
                 "launcher_win_key" => set_b(&mut c.launcher_win_key),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
@@ -397,6 +440,15 @@ impl Config {
             "show_search" => b(self.show_search),
             "show_status" => b(self.show_status),
             "show_clock" => b(self.show_clock),
+            "widgets_button" => b(self.widgets_button),
+            "chip_music" => b(self.chip_music),
+            "chip_cpu" => b(self.chip_cpu),
+            "chip_ram" => b(self.chip_ram),
+            "chip_gpu" => b(self.chip_gpu),
+            "chip_net" => b(self.chip_net),
+            "widgets_panel" => self.widgets_panel.clone(),
+            "widgets_columns" => self.widgets_columns.to_string(),
+            "stats_seconds" => self.stats_seconds.to_string(),
             "launcher" => b(self.launcher),
             "launcher_win_key" => b(self.launcher_win_key),
             "focus_minutes" => self.focus_minutes.to_string(),
