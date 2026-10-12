@@ -333,6 +333,8 @@ pub struct Launcher {
     acrylic: bool,
     radius: f32,
     pub open: bool,
+    /// When the menu last closed (see `Launcher::closed_within`).
+    closed_at: Option<std::time::Instant>,
     window_visible: bool,
     reveal: Spring,
     apps: Vec<AppEntry>,
@@ -400,6 +402,7 @@ impl Launcher {
             acrylic: true,
             radius: 8.0,
             open: false,
+            closed_at: None,
             window_visible: false,
             reveal: Spring::new(0.0, 520.0, 40.0),
             apps: Vec::new(),
@@ -515,11 +518,17 @@ impl Launcher {
         self.dirty = true;
     }
 
+    /// Whether the menu closed less than `ms` milliseconds ago.
+    pub fn closed_within(&self, ms: u64) -> bool {
+        self.closed_at.is_some_and(|t| t.elapsed().as_millis() < ms as u128)
+    }
+
     pub fn hide(&mut self) {
         crate::mousehook::set_rect(0, None);
         self.close_popups();
         if self.open {
             self.open = false;
+            self.closed_at = Some(std::time::Instant::now());
             self.reveal.set(0.0);
             self.backdrop.hide();
             self.dirty = true;

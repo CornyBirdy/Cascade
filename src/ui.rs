@@ -1400,6 +1400,20 @@ impl App {
         // passing our hook (an elevated app such as Task Manager was in
         // front), or its Start button was clicked. Show ours instead; taking
         // the foreground closes theirs.
+        // Pressing Win to close our menu can let that press through to Windows
+        // as well (it opens theirs over ours): shut theirs rather than bring
+        // ours back, so the menu closes.
+        if event == EVENT_SYSTEM_FOREGROUND
+            && self.cfg.launcher
+            && self.cfg.launcher_win_key
+            && (self.launcher.open || self.launcher.closed_within(800))
+            && shell::is_start_menu(hwnd)
+        {
+            config::log("start: the Windows Start menu opened as Cascade's closed; closing it");
+            self.launcher.hide();
+            shell::close_start_menu();
+            return;
+        }
         if event == EVENT_SYSTEM_FOREGROUND
             && self.cfg.launcher
             && self.cfg.launcher_win_key

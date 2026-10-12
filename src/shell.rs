@@ -377,6 +377,11 @@ pub fn is_start_menu(hwnd: HWND) -> bool {
     crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\startmenuexperiencehost.exe"))
 }
 
+/// Closes the real Windows Start menu if it is in front (Esc).
+pub fn close_start_menu() {
+    send_keys(&[(VK_ESCAPE, false), (VK_ESCAPE, true)]);
+}
+
 /// Opens the real Windows Start menu (Ctrl+Esc).
 pub fn open_start_menu() {
     send_keys(&[(VK_CONTROL, false), (VK_ESCAPE, false), (VK_ESCAPE, true), (VK_CONTROL, true)]);
