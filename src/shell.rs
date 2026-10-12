@@ -1,10 +1,11 @@
 //! Windows shell integration: single instance, tray icon, fullscreen
 //! detection, start-with-Windows, the native flyout and the context menu.
 
-use windows::core::{w, HSTRING, PCWSTR};
+use windows::core::{w, Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::*;
@@ -54,6 +55,18 @@ pub fn fullscreen_now() -> bool {
 }
 
 // ------------------------------------------------------------------ tray --
+
+/// The exe's own icon (resource 1, embedded by build.rs) at `size` px
+/// (scaled for the screen's DPI).
+pub fn app_icon(size: i32) -> Option<HICON> {
+    unsafe {
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as i32;
+        let px = size * dpi / 96;
+        let module = GetModuleHandleW(None).ok()?;
+        let h = LoadImageW(Some(module.into()), PCWSTR(1 as *const u16), IMAGE_ICON, px, px, LR_DEFAULTCOLOR).ok()?;
+        Some(HICON(h.0))
+    }
+}
 
 fn make_icon() -> HICON {
     // A small notch silhouette, drawn per pixel with soft edges.
@@ -113,7 +126,7 @@ impl Tray {
             uID: 1,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: msg::TRAY,
-            hIcon: make_icon(),
+            hIcon: app_icon(16).unwrap_or_else(make_icon),
             ..Default::default()
         };
         for (d, s) in data.szTip.iter_mut().zip("Cascade".encode_utf16()) {
@@ -365,6 +378,8 @@ pub enum MenuCmd {
     OpenConfig,
     Reload,
     Update,
+    Settings,
+    Launcher,
     Quit,
 }
 
@@ -402,7 +417,7 @@ fn track(hwnd: HWND, menu: HMENU) -> usize {
 }
 
 pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 11] = [
+    const IDS: [MenuCmd; 13] = [
         MenuCmd::None,
         MenuCmd::Notch,
         MenuCmd::Dock,
@@ -414,10 +429,15 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         MenuCmd::Reload,
         MenuCmd::Quit,
         MenuCmd::Update,
+        MenuCmd::Settings,
+        MenuCmd::Launcher,
     ];
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Cascade"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 11, w!("Settings\u{2026}"));
+        let _ = AppendMenuW(menu, MF_STRING, 12, w!("Open launcher"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, check(state.notch), 1, w!("Show notch"));
         let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show dock"));
@@ -464,6 +484,106 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
             2 => AppCmd::TogglePin,
             3 => AppCmd::CloseAll,
             _ => AppCmd::None,
+        }
+    }
+}
+
+/// Right-click menu for an app in the launcher. Returns true to toggle pin.
+pub fn show_pin_menu(hwnd: HWND, pinned: bool) -> bool {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return false };
+        let _ = AppendMenuW(menu, MF_STRING, 1, if pinned { w!("Unpin from dock") } else { w!("Pin to dock") });
+        track(hwnd, menu) == 1
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Power {
+    None,
+    Lock,
+    Sleep,
+    SignOut,
+    Restart,
+    ShutDown,
+}
+
+pub fn show_power_menu(hwnd: HWND) -> Power {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return Power::None };
+        let _ = AppendMenuW(menu, MF_STRING, 1, w!("Lock"));
+        let _ = AppendMenuW(menu, MF_STRING, 2, w!("Sleep"));
+        let _ = AppendMenuW(menu, MF_STRING, 3, w!("Sign out"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 4, w!("Restart"));
+        let _ = AppendMenuW(menu, MF_STRING, 5, w!("Shut down"));
+        match track(hwnd, menu) {
+            1 => Power::Lock,
+            2 => Power::Sleep,
+            3 => Power::SignOut,
+            4 => Power::Restart,
+            5 => Power::ShutDown,
+            _ => Power::None,
+        }
+    }
+}
+
+pub fn power(action: Power) {
+    unsafe {
+        match action {
+            Power::Lock => {
+                let _ = windows::Win32::System::Shutdown::LockWorkStation();
+            }
+            Power::Sleep => {
+                let _ = windows::Win32::System::Power::SetSuspendState(false, false, false);
+            }
+            Power::SignOut => run("shutdown.exe", "/l"),
+            Power::Restart => run("shutdown.exe", "/r /t 0"),
+            Power::ShutDown => run("shutdown.exe", "/s /t 0"),
+            Power::None => {}
+        }
+    }
+}
+
+/// Runs a program with arguments, without a console window.
+pub fn run(file: &str, args: &str) {
+    unsafe {
+        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(file), &HSTRING::from(args), None, SW_HIDE);
+    }
+}
+
+// -------------------------------------------------------------- shortcuts --
+
+fn create_link(path: &std::path::Path, target: &std::path::Path, args: &str, desc: &str) -> windows::core::Result<()> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(&HSTRING::from(target.as_os_str()))?;
+        link.SetArguments(&HSTRING::from(args))?;
+        link.SetDescription(&HSTRING::from(desc))?;
+        link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)?;
+        let file: IPersistFile = link.cast()?;
+        file.Save(&HSTRING::from(path.as_os_str()), true)
+    }
+}
+
+/// Puts "Cascade" and "Cascade Settings" in the Start menu (refreshed every
+/// start, so they follow the exe if it moves).
+pub fn ensure_shortcuts() {
+    std::thread::spawn(|| unsafe {
+        let _ =
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        let (Some(appdata), Ok(exe)) = (std::env::var_os("APPDATA"), std::env::current_exe()) else { return };
+        let dir = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs");
+        let _ = create_link(&dir.join("Cascade.lnk"), &exe, "", "Cascade notch, dock and launcher");
+        let _ = create_link(&dir.join("Cascade Settings.lnk"), &exe, "--settings", "Cascade settings");
+    });
+}
+
+/// Asks an already-running Cascade to open its settings.
+pub fn signal_running_instance() {
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        if let Ok(h) = FindWindowW(w!("CascadeWindow"), w!("Cascade")) {
+            let _ = PostMessageW(Some(h), msg::OPEN_SETTINGS, WPARAM(0), LPARAM(0));
         }
     }
 }

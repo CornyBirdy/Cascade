@@ -11,10 +11,13 @@ mod dock;
 mod gfx;
 mod http;
 mod icons;
+mod keyhook;
+mod launcher;
 mod media;
 mod pomodoro;
 mod preview;
 mod radios;
+mod settings;
 mod shell;
 mod spring;
 mod ui;
@@ -39,6 +42,10 @@ pub mod msg {
     pub const ICON: u32 = WM_APP + 10;
     pub const WEATHER: u32 = WM_APP + 11;
     pub const UPDATE: u32 = WM_APP + 12;
+    pub const OPEN_LAUNCHER: u32 = WM_APP + 13;
+    pub const OPEN_SETTINGS: u32 = WM_APP + 14;
+    pub const APPS: u32 = WM_APP + 15;
+    pub const POWER_MENU: u32 = WM_APP + 16;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -66,6 +73,9 @@ fn main() {
     while !shell::claim_single_instance() {
         tries -= 1;
         if tries == 0 {
+            // Already running (e.g. "Cascade Settings" from the Start menu):
+            // ask that copy to show its settings.
+            shell::signal_running_instance();
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));

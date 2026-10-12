@@ -29,6 +29,9 @@ const MARGIN: f32 = 8.0;
 /// Room above the panel for magnified icons and the name label.
 const LABEL_ROOM: f32 = 40.0;
 
+/// Pseudo-app for the launcher button at the left end of the dock.
+pub const START_ID: &str = "cascade:start";
+
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
 
@@ -235,7 +238,73 @@ impl Dock {
         h == self.hwnd || h == self.trigger
     }
 
+    /// Adds or removes the launcher button at the left end.
+    pub fn set_start_button(&mut self, on: bool) {
+        let has = self.apps.first().is_some_and(|a| a.id == START_ID);
+        if on && !has {
+            let mut app = DockApp::new(START_ID.to_string(), true);
+            app.presence.snap(1.0);
+            self.apps.insert(0, app);
+        } else if !on && has {
+            self.apps.remove(0);
+        }
+        self.hovered = None;
+        self.dirty = true;
+    }
+
+    pub fn is_start(&self, i: usize) -> bool {
+        self.apps.get(i).is_some_and(|a| a.id == START_ID)
+    }
+
+    /// Pinned apps as (target, name), for the launcher.
+    pub fn pinned_apps(&self) -> Vec<(String, String)> {
+        (0..self.apps.len())
+            .filter(|&i| self.apps[i].pinned && !self.is_start(i))
+            .map(|i| (self.apps[i].id.clone(), self.name(i)))
+            .collect()
+    }
+
+    pub fn is_pinned(&self, id: &str) -> bool {
+        self.apps.iter().any(|a| a.pinned && a.id.eq_ignore_ascii_case(id))
+    }
+
+    /// Pins or unpins an app by id (used by the launcher).
+    pub fn set_pinned(&mut self, id: &str, pin: bool) {
+        match self.apps.iter().position(|a| a.id.eq_ignore_ascii_case(id)) {
+            Some(i) => {
+                if self.apps[i].pinned != pin {
+                    self.toggle_pin(i);
+                }
+            }
+            None if pin => {
+                let mut app = DockApp::new(id.to_string(), true);
+                app.presence.set(1.0);
+                self.request_icon(id);
+                self.apps.push(app);
+                self.save_pinned();
+                self.dirty = true;
+            }
+            None => {}
+        }
+    }
+
+    /// The icon for any app id, loading it in the background if needed.
+    pub fn icon(&mut self, id: &str, gfx: &Gfx) -> Option<ID2D1Bitmap> {
+        self.request_icon(id);
+        let icon = self.icons.get_mut(&id.to_ascii_lowercase())?;
+        let stale = icon.bitmap.as_ref().is_none_or(|(g, _)| *g != gfx.generation);
+        if stale {
+            if let Some(px) = &icon.pixels {
+                icon.bitmap = gfx.bitmap(ICON_SIZE, ICON_SIZE, px).ok().map(|b| (gfx.generation, b));
+            }
+        }
+        icon.bitmap.as_ref().map(|(_, b)| b.clone())
+    }
+
     fn request_icon(&mut self, id: &str) {
+        if id == START_ID {
+            return;
+        }
         let key = id.to_ascii_lowercase();
         if let std::collections::hash_map::Entry::Vacant(e) = self.icons.entry(key) {
             e.insert(Icon::default());
@@ -254,6 +323,9 @@ impl Dock {
 
     pub fn name(&self, i: usize) -> String {
         let id = &self.apps[i].id;
+        if id == START_ID {
+            return "Start".to_string();
+        }
         self.names
             .get(&id.to_ascii_lowercase())
             .cloned()
@@ -261,7 +333,8 @@ impl Dock {
     }
 
     fn save_pinned(&self) {
-        let list: Vec<&str> = self.apps.iter().filter(|a| a.pinned).map(|a| a.id.as_str()).collect();
+        let list: Vec<&str> =
+            self.apps.iter().filter(|a| a.pinned && a.id != START_ID).map(|a| a.id.as_str()).collect();
         let _ = std::fs::create_dir_all(config::dir());
         let _ = std::fs::write(pinned_path(), list.join("\r\n") + "\r\n");
     }
@@ -508,13 +581,17 @@ impl Dock {
         let rel = x as f32 / self.k - self.win_w / 2.0;
         self.hover_rel = Some(rel);
         if let Some((i, start)) = self.pressed {
-            if self.dragging.is_none() && (x - start).abs() > (6.0 * self.k) as i32 && self.apps[i].pinned {
+            if self.dragging.is_none()
+                && (x - start).abs() > (6.0 * self.k) as i32
+                && self.apps[i].pinned
+                && !self.is_start(i)
+            {
                 self.dragging = Some(i);
             }
         }
         if let Some(from) = self.dragging {
             if let Some(to) = self.index_at(rel) {
-                if to != from && self.apps[to].pinned {
+                if to != from && self.apps[to].pinned && !self.is_start(to) {
                     let app = self.apps.remove(from);
                     self.apps.insert(to, app);
                     self.dragging = Some(to);
@@ -709,6 +786,26 @@ impl Dock {
                 let y = base_y - size - a.bounce.value.max(0.0) * s * 0.35;
                 let alpha = presence;
                 match self.icons.get(&a.id.to_ascii_lowercase()).and_then(|ic| ic.bitmap.as_ref()) {
+                    _ if a.id == START_ID => {
+                        // Launcher button: a soft tile with four squares.
+                        let hovered = self.hovered == Some(i);
+                        p.rrect(
+                            x + size * 0.06,
+                            y + size * 0.06,
+                            size * 0.88,
+                            size * 0.88,
+                            size * 0.24,
+                            Color(0.27, 0.55, 1.0, if hovered { 0.95 } else { 0.8 } * alpha),
+                        );
+                        let q = size * 0.17;
+                        let g = size * 0.05;
+                        let (cx0, cy0) = (x + size / 2.0, y + size / 2.0);
+                        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+                            let qx = if left { cx0 - q - g / 2.0 } else { cx0 + g / 2.0 };
+                            let qy = if top { cy0 - q - g / 2.0 } else { cy0 + g / 2.0 };
+                            p.rrect(qx, qy, q, q, q * 0.25, Color::white(0.95 * alpha));
+                        }
+                    }
                     Some((_, bmp)) => p.image(bmp, x, y, size, size, alpha),
                     None => p.rrect(
                         x + size * 0.1,

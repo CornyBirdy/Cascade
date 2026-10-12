@@ -34,11 +34,14 @@ use crate::config::{self, Config};
 use crate::dock::{self, Dock};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{self, IconResult};
+use crate::keyhook;
+use crate::launcher::{self, AppEntry, Launcher};
 use crate::media::{self, Art, MediaCmd, MediaInfo};
 use crate::msg;
 use crate::pomodoro::Pomodoro;
 use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
+use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::spring::Spring;
 use crate::update;
@@ -193,6 +196,10 @@ struct App {
     preview: Preview,
     hooks: Vec<HWINEVENTHOOK>,
     taskbar_hidden: bool,
+    instance: HINSTANCE,
+    launcher: Launcher,
+    launcher_menu: bool,
+    settings: Option<Settings>,
 
     message: String,
     message_color: Color,
@@ -217,14 +224,25 @@ pub fn run() -> Result<()> {
             ..Default::default()
         };
         RegisterClassExW(&wc);
+        let settings_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: instance,
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: LoadIconW(Some(instance), PCWSTR(1 as *const u16)).unwrap_or_default(),
+            lpszClassName: w!("CascadeSettings"),
+            ..Default::default()
+        };
+        RegisterClassExW(&settings_class);
         let layered = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         let hwnd = create_window(class, instance, layered)?;
         let dock_hwnd = create_window(class, instance, layered)?;
         let trigger = create_window(class, instance, layered)?;
         let preview_hwnd = create_window(class, instance, WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
+        let launcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         msg::set_target(hwnd);
 
-        let app = App::new(hwnd, dock_hwnd, trigger, preview_hwnd)?;
+        let app = App::new(hwnd, dock_hwnd, trigger, preview_hwnd, launcher_hwnd, instance)?;
         APP.with(|c| *c.borrow_mut() = Some(app));
         with_app(|a| a.start());
 
@@ -273,6 +291,8 @@ unsafe extern "system" fn win_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, ob
 enum RightClick {
     General,
     App { id: String, name: String, pinned: bool, windows: usize },
+    LauncherApp { target: String, pinned: bool },
+    Nothing,
 }
 
 fn right_click(hwnd: HWND) {
@@ -295,12 +315,53 @@ fn right_click(hwnd: HWND) {
             let cmd = shell::show_app_menu(hwnd, &name, pinned, windows);
             with_app(|a| a.on_app_cmd(&id, cmd));
         }
+        RightClick::LauncherApp { target, pinned } => {
+            with_app(|a| a.launcher_menu = true);
+            let toggle = shell::show_pin_menu(hwnd, pinned);
+            with_app(|a| {
+                a.launcher_menu = false;
+                if toggle {
+                    a.dock.set_pinned(&target, !pinned);
+                }
+                if a.launcher.open {
+                    launcher::force_foreground(a.launcher.hwnd);
+                }
+            });
+        }
+        RightClick::Nothing => {}
     }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
-        WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEACTIVATE => {
+            // Only the notch, dock and previews refuse focus.
+            if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 {
+                return LRESULT(MA_NOACTIVATE as isize);
+            }
+        }
+        msg::OPEN_LAUNCHER => {
+            with_app(|a| a.toggle_launcher());
+            return LRESULT(0);
+        }
+        msg::OPEN_SETTINGS => {
+            with_app(|a| a.open_settings());
+            return LRESULT(0);
+        }
+        msg::POWER_MENU => {
+            let action = shell::show_power_menu(hwnd);
+            with_app(|a| {
+                a.launcher_menu = false;
+                a.launcher.hide();
+            });
+            shell::power(action);
+            return LRESULT(0);
+        }
+        msg::APPS => {
+            let list = Box::from_raw(lp.0 as *mut Vec<AppEntry>);
+            with_app(move |a| a.launcher.set_apps(*list));
+            return LRESULT(0);
+        }
         WM_RBUTTONUP => {
             right_click(hwnd);
             return LRESULT(0);
@@ -320,7 +381,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::ICON => {
             let icon = Box::from_raw(lp.0 as *mut IconResult);
-            with_app(move |a| a.dock.on_icon(*icon));
+            with_app(move |a| {
+                a.dock.on_icon(*icon);
+                a.launcher.dirty = true;
+            });
             return LRESULT(0);
         }
         msg::WEATHER => {
@@ -340,6 +404,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             if with_app(|a| a.hwnd == hwnd).unwrap_or(false) {
                 with_app(|a| a.shutdown());
                 PostQuitMessage(0);
+            } else {
+                with_app(|a| {
+                    if a.settings.as_ref().is_some_and(|s| s.hwnd == hwnd) {
+                        a.settings = None;
+                    }
+                });
             }
             return LRESULT(0);
         }
@@ -354,6 +424,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
     match with_app(|a| a.handle(hwnd, m, wp, lp)).flatten() {
         Some(r) => r,
         None => DefWindowProcW(hwnd, m, wp, lp),
+    }
+}
+
+/// What the settings window shows for `key`.
+fn setting_value(cfg: &Config, key: &str) -> String {
+    if key == "autostart" {
+        shell::autostart_enabled().to_string()
+    } else {
+        cfg.get(key)
     }
 }
 
@@ -405,7 +484,14 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 impl App {
-    fn new(hwnd: HWND, dock_hwnd: HWND, trigger: HWND, preview_hwnd: HWND) -> Result<Self> {
+    fn new(
+        hwnd: HWND,
+        dock_hwnd: HWND,
+        trigger: HWND,
+        preview_hwnd: HWND,
+        launcher_hwnd: HWND,
+        instance: HINSTANCE,
+    ) -> Result<Self> {
         let cfg = Config::load();
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
@@ -472,6 +558,10 @@ impl App {
             preview: Preview::new(preview_hwnd),
             hooks: Vec::new(),
             taskbar_hidden: false,
+            instance,
+            launcher: Launcher::new(launcher_hwnd),
+            launcher_menu: false,
+            settings: None,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -481,6 +571,8 @@ impl App {
     }
 
     fn start(&mut self) {
+        shell::ensure_shortcuts();
+        launcher::spawn_scan();
         if self.cfg.update_check {
             update::spawn_checker(self.cfg.github_token.clone());
         }
@@ -489,9 +581,14 @@ impl App {
         self.apply_flyout();
         self.apply_dock();
         self.retarget();
+        if std::env::args().any(|a| a == "--settings") {
+            self.open_settings();
+        }
     }
 
     fn shutdown(&mut self) {
+        keyhook::set(false);
+        self.settings = None;
         self.visualizer.set(false);
         weather::stop();
         for h in self.hooks.drain(..) {
@@ -576,6 +673,11 @@ impl App {
                     let _ = UnhookWinEvent(h);
                 }
             }
+        }
+        self.dock.set_start_button(self.cfg.launcher);
+        keyhook::set(self.cfg.launcher && self.cfg.launcher_win_key);
+        if !self.cfg.launcher {
+            self.launcher.hide();
         }
         self.dock.configure(&self.cfg, self.monitor, self.dpi);
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
@@ -709,6 +811,12 @@ impl App {
     // ----------------------------------------------------------- events --
 
     fn handle(&mut self, hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        if self.settings.as_ref().is_some_and(|s| s.hwnd == hwnd) {
+            return self.handle_settings(m, wp, lp);
+        }
+        if hwnd == self.launcher.hwnd {
+            return self.handle_launcher(m, wp, lp);
+        }
         if m == msg::APPBAR {
             match wp.0 as u32 {
                 ABN_FULLSCREENAPP => {
@@ -1132,8 +1240,22 @@ impl App {
     }
 
     fn right_click_target(&self, hwnd: HWND) -> RightClick {
+        if hwnd == self.launcher.hwnd {
+            let mut p = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+                let _ = ScreenToClient(hwnd, &mut p);
+            }
+            return match self.launcher.target_at(p.x, p.y).and_then(|t| self.launcher.app_target(t)) {
+                Some(target) => RightClick::LauncherApp { pinned: self.dock.is_pinned(&target), target },
+                None => RightClick::Nothing,
+            };
+        }
+        if self.settings.as_ref().is_some_and(|s| s.hwnd == hwnd) {
+            return RightClick::Nothing;
+        }
         if hwnd == self.dock.hwnd {
-            if let Some(i) = self.dock.hovered {
+            if let Some(i) = self.dock.hovered.filter(|&i| !self.dock.is_start(i)) {
                 let a = &self.dock.apps[i];
                 return RightClick::App {
                     id: a.id.clone(),
@@ -1203,29 +1325,206 @@ impl App {
                     update::spawn_install(self.cfg.github_token.clone());
                 }
             }
-            MenuCmd::Reload => {
-                let old = self.cfg.clone();
-                self.cfg = Config::load();
-                if self.cfg.weather != old.weather
-                    || self.cfg.weather_location != old.weather_location
-                    || self.cfg.fahrenheit != old.fahrenheit
-                {
-                    if self.cfg.weather {
-                        weather::spawn(self.cfg.weather_location.clone(), self.cfg.fahrenheit);
-                    } else {
-                        weather::stop();
-                        self.weather = None;
-                    }
-                }
-                self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
-                self.update_display();
-                self.apply_taskbar();
-                self.apply_flyout();
-                self.apply_dock();
-                self.retarget();
-            }
+            MenuCmd::Settings => self.open_settings(),
+            MenuCmd::Launcher => self.toggle_launcher(),
+            MenuCmd::Reload => self.reload_config(),
             MenuCmd::None | MenuCmd::Quit => {}
         }
+        if let Some(s) = &self.settings {
+            s.invalidate();
+        }
+    }
+
+    /// Re-reads config.ini and applies everything that may have changed.
+    fn reload_config(&mut self) {
+        let old = self.cfg.clone();
+        self.cfg = Config::load();
+        if self.cfg.weather != old.weather
+            || self.cfg.weather_location != old.weather_location
+            || self.cfg.fahrenheit != old.fahrenheit
+        {
+            if self.cfg.weather {
+                weather::spawn(self.cfg.weather_location.clone(), self.cfg.fahrenheit);
+            } else {
+                weather::stop();
+                self.weather = None;
+            }
+        }
+        self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
+        self.update_display();
+        self.apply_taskbar();
+        self.apply_flyout();
+        self.apply_dock();
+        self.retarget();
+        if let Some(s) = &self.settings {
+            s.invalidate();
+        }
+    }
+
+    // --------------------------------------------------- launcher glue --
+
+    fn toggle_launcher(&mut self) {
+        if self.launcher.open {
+            self.launcher.hide();
+            return;
+        }
+        if !self.cfg.launcher {
+            return;
+        }
+        self.preview.hide();
+        self.launcher.show(self.dpi, self.dock.pinned_apps());
+    }
+
+    fn launcher_bottom(&self) -> i32 {
+        if self.dock.shown {
+            self.dock.panel_top()
+        } else {
+            shell::work_area().bottom
+        }
+    }
+
+    fn launcher_action(&mut self, action: launcher::Action) {
+        match action {
+            launcher::Action::Launch(target) => {
+                shell::open(&target);
+                self.launcher.hide();
+            }
+            launcher::Action::Close => self.launcher.hide(),
+            launcher::Action::Settings => {
+                self.launcher.hide();
+                self.open_settings();
+            }
+            launcher::Action::Power => unsafe {
+                // Menus run outside the app borrow, so post to ourselves.
+                self.launcher_menu = true;
+                let _ = PostMessageW(Some(self.launcher.hwnd), msg::POWER_MENU, WPARAM(0), LPARAM(0));
+            },
+        }
+    }
+
+    fn handle_launcher(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match m {
+            WM_ACTIVATE => {
+                if wp.0 & 0xFFFF == 0 && !self.launcher_menu {
+                    self.launcher.hide();
+                }
+                return None;
+            }
+            WM_CHAR => {
+                if let Some(c) = char::from_u32(wp.0 as u32) {
+                    self.launcher.on_char(c);
+                }
+            }
+            WM_KEYDOWN => {
+                if let Some(a) = self.launcher.on_key(wp.0 as u16) {
+                    self.launcher_action(a);
+                }
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                self.launcher.on_move(x, y);
+            }
+            WM_MOUSELEAVE => self.launcher.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(a) = self.launcher.on_click(x, y) {
+                    self.launcher_action(a);
+                }
+            }
+            WM_MOUSEWHEEL => self.launcher.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16),
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+
+    // --------------------------------------------------- settings glue --
+
+    fn open_settings(&mut self) {
+        if let Some(s) = &self.settings {
+            unsafe {
+                let _ = ShowWindow(s.hwnd, SW_RESTORE);
+            }
+            launcher::force_foreground(s.hwnd);
+            return;
+        }
+        if let Ok(mut s) = Settings::create(self.instance) {
+            let cfg = &self.cfg;
+            s.sync_edits(&|k: &str| setting_value(cfg, k));
+            self.settings = Some(s);
+        }
+    }
+
+    fn apply_change(&mut self, change: Change) {
+        match change {
+            Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Set(key, v) => {
+                if self.cfg.get(key) != v {
+                    Config::set(key, &v);
+                    self.reload_config();
+                }
+            }
+            Change::Action("update_now") => self.on_menu(MenuCmd::Update),
+            Change::Action("open_config") => shell::open_file(&config::path()),
+            Change::Action("open_folder") => shell::open_file(&config::dir()),
+            Change::Action(_) => {}
+        }
+        if let Some(s) = &self.settings {
+            s.invalidate();
+        }
+    }
+
+    fn handle_settings(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let cfg = &self.cfg;
+        let get = |k: &str| setting_value(cfg, k);
+        let s = self.settings.as_mut()?;
+        let change = match m {
+            WM_ERASEBKGND => return Some(LRESULT(1)),
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                s.on_move(x, y);
+                None
+            }
+            WM_MOUSELEAVE => {
+                s.on_leave();
+                None
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = lparam_xy(lp);
+                s.on_down(x, y, &get)
+            }
+            WM_LBUTTONUP => s.on_up(),
+            WM_MOUSEWHEEL => {
+                s.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16, &get);
+                None
+            }
+            WM_CTLCOLOREDIT => unsafe {
+                let hdc = HDC(wp.0 as *mut _);
+                SetTextColor(hdc, COLORREF(0x00F0F0F0));
+                SetBkColor(hdc, COLORREF(0x002B2B2B));
+                return Some(LRESULT(s.brush.0 as isize));
+            },
+            WM_COMMAND if (wp.0 >> 16) & 0xFFFF == 0x0200 => s.commit_edit(HWND(lp.0 as *mut _)),
+            WM_DPICHANGED => {
+                let suggested = unsafe { *(lp.0 as *const RECT) };
+                s.apply_dpi(Some(suggested));
+                s.sync_edits(&get);
+                s.invalidate();
+                return Some(LRESULT(0));
+            }
+            WM_CLOSE => {
+                // Save any text box that still has focus, then let it close.
+                let changes = s.commit_all();
+                for c in changes {
+                    self.apply_change(c);
+                }
+                return None;
+            }
+            _ => return None,
+        };
+        if let Some(c) = change {
+            self.apply_change(c);
+        }
+        Some(LRESULT(0))
     }
 
     fn on_app_cmd(&mut self, id: &str, cmd: AppCmd) {
@@ -1271,7 +1570,11 @@ impl App {
                 WM_LBUTTONUP => {
                     if let Some(i) = self.dock.on_up() {
                         self.preview.hide();
-                        self.dock.activate(i);
+                        if self.dock.is_start(i) {
+                            self.toggle_launcher();
+                        } else {
+                            self.dock.activate(i);
+                        }
                     }
                 }
                 WM_MBUTTONUP => {
@@ -1383,11 +1686,16 @@ impl App {
     }
 
     fn paint(&mut self, hwnd: HWND) -> bool {
-        if hwnd != self.preview.hwnd {
-            return false;
+        if hwnd == self.preview.hwnd {
+            let _ = self.preview.paint(&mut self.gfx);
+            return true;
         }
-        let _ = self.preview.paint(&mut self.gfx);
-        true
+        if let Some(s) = self.settings.as_ref().filter(|s| s.hwnd == hwnd) {
+            let cfg = &self.cfg;
+            let _ = s.paint(&mut self.gfx, &|k: &str| setting_value(cfg, k), update::current());
+            return true;
+        }
+        false
     }
 
     // ----------------------------------------------------------- frames --
@@ -1404,7 +1712,7 @@ impl App {
     }
 
     fn wants_frame(&self) -> bool {
-        self.notch_wants() || self.dock.wants_frame()
+        self.notch_wants() || self.dock.wants_frame() || self.launcher.wants_frame()
     }
 
     /// Steps the springs, draws, and returns how long to wait for the next frame.
@@ -1432,6 +1740,11 @@ impl App {
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
             let _ = self.dock.render(&mut self.gfx);
+        }
+        if self.launcher.wants_frame() {
+            fast |= self.launcher.step(dt);
+            let bottom = self.launcher_bottom();
+            let _ = self.launcher.render(&mut self.gfx, &mut self.dock, self.monitor, bottom);
         }
 
         // Full rate while shapes morph; level bars and fades are fine at 60.

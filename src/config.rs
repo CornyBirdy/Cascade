@@ -37,6 +37,12 @@ dock_icon_size = 46
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0.35
 
+# ---- Launcher ----
+# Start button on the dock that opens Cascade's app launcher.
+launcher = true
+# Open the launcher with a lone Win key press (Win+E etc. still work).
+launcher_win_key = true
+
 # ---- Focus timer ----
 focus_minutes = 25
 break_minutes = 5
@@ -79,6 +85,8 @@ pub struct Config {
     pub hide_taskbar: bool,
     pub dock_icon_size: f32,
     pub dock_magnify: f32,
+    pub launcher: bool,
+    pub launcher_win_key: bool,
     pub focus_minutes: u32,
     pub break_minutes: u32,
     pub weather: bool,
@@ -110,6 +118,8 @@ impl Default for Config {
             hide_taskbar: true,
             dock_icon_size: 46.0,
             dock_magnify: 0.35,
+            launcher: true,
+            launcher_win_key: true,
             focus_minutes: 25,
             break_minutes: 5,
             weather: true,
@@ -195,6 +205,8 @@ impl Config {
                 "hide_taskbar" => set_b(&mut c.hide_taskbar),
                 "dock_icon_size" => set_f(&mut c.dock_icon_size, 24.0, 96.0),
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
+                "launcher" => set_b(&mut c.launcher),
+                "launcher_win_key" => set_b(&mut c.launcher_win_key),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "weather" => set_b(&mut c.weather),
@@ -232,6 +244,42 @@ impl Config {
         }
         let _ = std::fs::create_dir_all(dir());
         let _ = std::fs::write(&path, out.join("\r\n") + "\r\n");
+    }
+
+    /// A setting's current value as text (what the settings window shows).
+    pub fn get(&self, key: &str) -> String {
+        let b = |v: bool| v.to_string();
+        match key {
+            "notch" => b(self.notch),
+            "hide_in_fullscreen" => b(self.hide_in_fullscreen),
+            "live_activity" => b(self.live_activity),
+            "visualizer" => b(self.visualizer),
+            "volume_osd" => b(self.volume_osd),
+            "brightness_osd" => b(self.brightness_osd),
+            "hide_windows_flyout" => b(self.hide_windows_flyout),
+            "scroll_volume" => b(self.scroll_volume),
+            "expand_delay_ms" => self.expand_delay_ms.to_string(),
+            "collapse_delay_ms" => self.collapse_delay_ms.to_string(),
+            "idle_width" => self.idle_width.to_string(),
+            "idle_height" => self.idle_height.to_string(),
+            "scale" => self.scale.to_string(),
+            "dock" => b(self.dock),
+            "dock_autohide" => b(self.dock_autohide),
+            "hide_taskbar" => b(self.hide_taskbar),
+            "dock_icon_size" => self.dock_icon_size.to_string(),
+            "dock_magnify" => self.dock_magnify.to_string(),
+            "launcher" => b(self.launcher),
+            "launcher_win_key" => b(self.launcher_win_key),
+            "focus_minutes" => self.focus_minutes.to_string(),
+            "break_minutes" => self.break_minutes.to_string(),
+            "weather" => b(self.weather),
+            "weather_location" => self.weather_location.clone(),
+            "fahrenheit" => b(self.fahrenheit),
+            "update_check" => b(self.update_check),
+            "github_token" => self.github_token.clone(),
+            "max_fps" => self.max_fps.to_string(),
+            _ => String::new(),
+        }
     }
 
     pub fn set_bool(key: &str, value: bool) {
