@@ -293,6 +293,11 @@ pub fn focus_window(h: HWND) {
             let _ = ShowWindow(h, SW_RESTORE);
         }
         let _ = SetForegroundWindow(h);
+        // Windows won't let us bring an admin app to the front (or restore
+        // it); the admin helper, if it's on, can.
+        if GetForegroundWindow() != h || IsIconic(h).as_bool() {
+            crate::helper::request_focus(h);
+        }
     }
 }
 
@@ -473,10 +478,10 @@ impl Dock {
         self.left = cfg.taskbar_align == "left";
         self.bar_h = cfg.taskbar_height;
         self.margin = cfg.taskbar_margin;
-        self.padding = cfg.taskbar_padding.min((self.bar_h - 20.0) / 2.0).max(0.0);
+        self.padding = cfg.taskbar_padding.clamp(0.0, 16.0);
         // A full-width bar flush with the screen edges has square corners.
         self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
-        self.icon = cfg.dock_icon_size.min(self.bar_h - 2.0 * self.padding - 4.0);
+        self.icon = cfg.dock_icon_size.min(self.bar_h - 8.0).max(12.0);
         self.magnify = cfg.dock_magnify;
         self.acrylic = cfg.acrylic;
         self.opacity = cfg.taskbar_opacity;
@@ -675,9 +680,16 @@ impl Dock {
 
     // ----------------------------------------------------------- geometry --
 
-    /// Size of a square button: the bar height less the padding.
+    /// Size of a square button: the icon plus the padding around it.
     fn button(&self) -> f32 {
-        (self.bar_h - 2.0 * self.padding).max(20.0)
+        (self.icon + 2.0 * self.padding).min(self.bar_h - 4.0)
+    }
+
+    /// Space between a bar's end and the first or last button. Chosen so the
+    /// gap from the bar's edge to the icons is the same at the ends as it is
+    /// above and below them.
+    fn edge(&self) -> f32 {
+        ((self.bar_h - self.icon) / 2.0 - (self.button() - self.icon) / 2.0).max(0.0)
     }
 
     fn status_icons(&self, status: &Status) -> usize {
@@ -688,7 +700,7 @@ impl Dock {
     /// padding is used between every island edge and what's inside it.
     fn layout(&self, ww: f32, wh: f32, status: &Status, weather: bool, tray: &[usize], overflow: bool) -> Geo {
         let b = self.button();
-        let pad = self.padding;
+        let pad = self.edge();
         let m = self.margin;
         let y1 = wh - m;
         let y0 = y1 - self.bar_h;
@@ -896,6 +908,9 @@ impl Dock {
             match app.windows.iter().position(|&w| w == fg) {
                 Some(_) if app.windows.len() == 1 && !IsIconic(fg).as_bool() => {
                     let _ = ShowWindow(fg, SW_MINIMIZE);
+                    if !IsIconic(fg).as_bool() {
+                        crate::helper::request_minimize(fg);
+                    }
                 }
                 Some(pos) => focus_window(app.windows[(pos + 1) % app.windows.len()]),
                 None => focus_window(app.windows[0]),

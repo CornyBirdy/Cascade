@@ -26,6 +26,7 @@ const CLASS: PCWSTR = w!("CascadeKeyHelper");
 /// Bring the window in wParam to the front.
 const FOCUS: u32 = WM_APP + 1;
 const QUIT: u32 = WM_APP + 2;
+const MINIMIZE: u32 = WM_APP + 3;
 
 /// The main Cascade window, if Cascade is running.
 pub fn main_window() -> Option<HWND> {
@@ -71,6 +72,15 @@ pub fn lone_win() {
     }
 }
 
+/// Asks the helper to minimise `hwnd` (an admin window Cascade can't touch).
+pub fn request_minimize(hwnd: HWND) {
+    if let Some(h) = helper_window() {
+        unsafe {
+            let _ = PostMessageW(Some(h), MINIMIZE, WPARAM(hwnd.0 as usize), LPARAM(0));
+        }
+    }
+}
+
 /// Asks the helper to bring `hwnd` to the front (from Cascade).
 pub fn request_focus(hwnd: HWND) {
     if let Some(h) = helper_window() {
@@ -84,6 +94,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
     match m {
         FOCUS => {
             let target = HWND(wp.0 as *mut _);
+            if IsIconic(target).as_bool() {
+                let _ = ShowWindow(target, SW_RESTORE);
+            }
             let fg = GetForegroundWindow();
             let fg_thread = GetWindowThreadProcessId(fg, None);
             let me = GetCurrentThreadId();
@@ -101,8 +114,8 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             PostQuitMessage(0);
             LRESULT(0)
         }
-        keyhook::MASK_MSG => {
-            keyhook::deferred_mask();
+        MINIMIZE => {
+            let _ = ShowWindow(HWND(wp.0 as *mut _), SW_MINIMIZE);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, m, wp, lp),
@@ -145,10 +158,10 @@ pub fn run() {
             return;
         };
         // Let Cascade (not elevated) post these two messages to us.
-        for m in [FOCUS, QUIT] {
+        for m in [FOCUS, QUIT, MINIMIZE] {
             let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
         }
-        keyhook::set_helper_mode(hwnd);
+        keyhook::set_helper_mode();
         keyhook::set(true);
         crate::config::log(&format!("helper: started (admin: {})", is_elevated()));
         let mut m = MSG::default();

@@ -39,9 +39,10 @@ taskbar_style = full
 taskbar_align = center
 taskbar_height = 48
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
-taskbar_margin = 8
-# Space between the taskbar's edges and the buttons inside, on every side.
-taskbar_padding = 4
+taskbar_margin = 12
+# Space around each icon (its hover highlight). The gap from the bar's edge
+# to the icons is the same on all four sides: (height - icon size) / 2.
+taskbar_padding = 8
 # round, small or square
 taskbar_corners = round
 # Blur what's behind the taskbar and Start menu (acrylic).
@@ -157,8 +158,8 @@ impl Default for Config {
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
             taskbar_height: 48.0,
-            taskbar_margin: 8.0,
-            taskbar_padding: 4.0,
+            taskbar_margin: 12.0,
+            taskbar_padding: 8.0,
             taskbar_corners: "round".into(),
             acrylic: true,
             taskbar_opacity: 0.55,

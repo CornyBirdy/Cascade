@@ -111,15 +111,15 @@ fn rows(section: usize) -> Vec<Row> {
             row("taskbar_height", "Height", "Height of the bar.", slider(32.0, 80.0, 1.0, Unit::Px)),
             row(
                 "taskbar_padding",
-                "Padding",
-                "Space around the buttons, the same on every side.",
+                "Icon padding",
+                "Space around each icon, and how big its highlight is.",
                 slider(0.0, 16.0, 1.0, Unit::Px),
             ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
                 "taskbar_margin",
-                "Gap from the edge",
-                "0 sits flush with the screen, like Windows.",
+                "Gap from the screen edge",
+                "Match it to (height - icon size) / 2 for an even look. 0 = flush.",
                 slider(0.0, 32.0, 1.0, Unit::Px),
             ),
             row(
