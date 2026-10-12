@@ -364,6 +364,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
                 return LRESULT(MA_NOACTIVATE as isize);
             }
         }
+        keyhook::MASK_MSG => {
+            keyhook::deferred_mask();
+            return LRESULT(0);
+        }
         msg::OPEN_LAUNCHER => {
             with_app(|a| a.toggle_launcher());
             return LRESULT(0);
@@ -1302,6 +1306,7 @@ impl App {
             && !self.launcher.open
             && shell::is_start_menu(hwnd)
         {
+            config::log("start: the Windows Start menu opened anyway; showing Cascade's");
             self.open_launcher();
             return;
         }

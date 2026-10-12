@@ -370,3 +370,22 @@ impl Config {
         Self::set(key, if value { "true" } else { "false" });
     }
 }
+
+/// Appends a line to `cascade.log` in the data folder. Only used for rare
+/// events (the admin helper being set up or started), to help diagnose them.
+pub fn log(line: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::create_dir_all(dir());
+    let path = dir().join("cascade.log");
+    // Keep it small: start over past 64 KB.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{secs}] {line}");
+    }
+}

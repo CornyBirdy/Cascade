@@ -11,8 +11,10 @@
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{
-    AttachThreadInput, CreateMutexW, GetCurrentThreadId, WaitForSingleObject, INFINITE,
+    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess, OpenProcessToken,
+    WaitForSingleObject, INFINITE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -36,6 +38,28 @@ fn helper_window() -> Option<HWND> {
 
 pub fn running() -> bool {
     helper_window().is_some()
+}
+
+/// Whether this process runs with admin rights.
+fn is_elevated() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut e = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut e as *mut _ as *mut std::ffi::c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && e.TokenIsElevated != 0
+    }
 }
 
 /// Called by the key hook (in the helper) on a lone Win press.
@@ -75,6 +99,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         QUIT => {
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+        keyhook::MASK_MSG => {
+            keyhook::deferred_mask();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, m, wp, lp),
@@ -120,8 +148,9 @@ pub fn run() {
         for m in [FOCUS, QUIT] {
             let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
         }
-        keyhook::set_helper_mode();
+        keyhook::set_helper_mode(hwnd);
         keyhook::set(true);
+        crate::config::log(&format!("helper: started (admin: {})", is_elevated()));
         let mut m = MSG::default();
         while GetMessageW(&mut m, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&m);
@@ -168,7 +197,8 @@ fn task_xml(exe: &str) -> String {
 }
 
 /// Runs schtasks.exe with `args`, elevated (one permission prompt) or not,
-/// and waits for it. Returns false if it couldn't run or was declined.
+/// and waits for it. Returns false if it couldn't run, was declined or
+/// failed; what happened goes to the log.
 fn schtasks(args: &str, elevated: bool) -> bool {
     unsafe {
         let file = HSTRING::from("schtasks.exe");
@@ -182,12 +212,19 @@ fn schtasks(args: &str, elevated: bool) -> bool {
             nShow: SW_HIDE.0,
             ..Default::default()
         };
-        if ShellExecuteExW(&mut info).is_err() || info.hProcess.is_invalid() {
+        if let Err(e) = ShellExecuteExW(&mut info) {
+            crate::config::log(&format!("helper: schtasks {args} could not run: {e}"));
+            return false;
+        }
+        if info.hProcess.is_invalid() {
             return false;
         }
         let _ = WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 1u32;
+        let _ = GetExitCodeProcess(info.hProcess, &mut code);
         let _ = CloseHandle(info.hProcess);
-        true
+        crate::config::log(&format!("helper: schtasks {args} -> exit code {code}"));
+        code == 0
     }
 }
 

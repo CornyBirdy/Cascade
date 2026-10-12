@@ -1,14 +1,20 @@
 //! Opens the Cascade launcher on a lone Win key press. Win+anything
 //! (Win+E, Win+R, Win+Shift+S...) is left completely alone.
 //!
-//! As soon as Win goes down, an unassigned "mask" key is tapped. To Windows
-//! that looks like a key combination, so releasing Win doesn't open its own
-//! Start menu. No real key event is ever swallowed or replayed, so the Win
-//! key can't get stuck down.
+//! While Win is held, an unassigned "mask" key is tapped. To Windows that
+//! looks like a key combination, so releasing Win doesn't open its own Start
+//! menu. No real key event is ever swallowed or replayed, so the Win key
+//! can't get stuck down.
+//!
+//! Timing matters: keys sent from inside the hook are handled by Windows
+//! straight away, before the key the hook is looking at. So the tap is
+//! posted to run just after the Win press has gone through; if Win is let go
+//! before that happens, the tap is sent from the release instead, where
+//! "before this key" is exactly what's needed.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -39,8 +45,30 @@ fn handled_here() -> bool {
     }
 }
 
-pub fn set_helper_mode() {
+/// Posted to the window that owns the hook to send the mask tap.
+pub const MASK_MSG: u32 = WM_APP + 40;
+static MASK_TARGET: AtomicIsize = AtomicIsize::new(0);
+static MASKED: AtomicBool = AtomicBool::new(false);
+
+/// In the admin helper, `hwnd` is its window (it gets `MASK_MSG`).
+pub fn set_helper_mode(hwnd: HWND) {
     IN_HELPER.store(true, Ordering::Relaxed);
+    MASK_TARGET.store(hwnd.0 as isize, Ordering::Relaxed);
+}
+
+fn send_mask() {
+    if !MASKED.swap(true, Ordering::Relaxed) {
+        let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
+/// Handles `MASK_MSG`: Win is (probably) still held, and Windows has seen
+/// it go down by now.
+pub fn deferred_mask() {
+    if WIN_DOWN.load(Ordering::Relaxed) && !COMBO.load(Ordering::Relaxed) {
+        send_mask();
+    }
 }
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
@@ -79,12 +107,20 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
                     WIN_DOWN.store(true, Ordering::Relaxed);
                     COMBO.store(false, Ordering::Relaxed);
-                    let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];
-                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                    MASKED.store(false, Ordering::Relaxed);
+                    // Not from here: it would reach Windows before this Win press.
+                    if IN_HELPER.load(Ordering::Relaxed) {
+                        let target = HWND(MASK_TARGET.load(Ordering::Relaxed) as *mut _);
+                        let _ = PostMessageW(Some(target), MASK_MSG, WPARAM(0), LPARAM(0));
+                    } else {
+                        msg::post(MASK_MSG, 0, 0);
+                    }
                 }
             } else if is_win && up {
                 let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                 if was_down && !COMBO.load(Ordering::Relaxed) {
+                    // A very quick tap: mask it now, ahead of this release.
+                    send_mask();
                     on_lone_win();
                 }
             } else if down && WIN_DOWN.load(Ordering::Relaxed) {

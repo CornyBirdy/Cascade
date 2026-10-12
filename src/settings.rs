@@ -648,6 +648,13 @@ impl Settings {
                     let text_w = cw - 330.0;
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
+                    } else if r.key == "admin_helper" && get(r.key) == "true" {
+                        // Live status, so it's clear whether it's working.
+                        if crate::helper::running() {
+                            "Running.".to_string()
+                        } else {
+                            "Not running. Details in cascade.log in the data folder.".to_string()
+                        }
                     } else {
                         r.desc.to_string()
                     };
