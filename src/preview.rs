@@ -160,7 +160,7 @@ impl Preview {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         for i in 0..self.items.len() {
             let ix = Self::item_x(i);
-            if lx >= ix && lx < ix + ITEM_W && ly >= 0.0 && ly < HEIGHT {
+            if (ix..ix + ITEM_W).contains(&lx) && (0.0..HEIGHT).contains(&ly) {
                 let close = lx >= ix + ITEM_W - 28.0 && ly < PAD + TITLE_H;
                 return (Some(i), close);
             }

@@ -237,8 +237,8 @@ impl Dock {
 
     fn request_icon(&mut self, id: &str) {
         let key = id.to_ascii_lowercase();
-        if !self.icons.contains_key(&key) {
-            self.icons.insert(key, Icon::default());
+        if let std::collections::hash_map::Entry::Vacant(e) = self.icons.entry(key) {
+            e.insert(Icon::default());
             let _ = self.icon_tx.send(id.to_string());
         }
     }
