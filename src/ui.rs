@@ -2783,7 +2783,9 @@ impl App {
                 if self.view == View::Live && alpha > 0.01 {
                     self.draw_lip_glow(&p, edge, base, a0, along, depth, alpha);
                 }
-            } else if alpha > 0.01 && bh > 4.0 && bw > 4.0 {
+            } else if (alpha > 0.01 || self.view == View::Expanded) && bh > 4.0 && bw > 4.0 {
+                // (The open notch's tab bar has a fade of its own, so it stays
+                // put while a tab switch fades the rest in.)
                 p.clip(bx, by, bw, bh);
                 p.translate(0.0, self.origin_y);
                 match self.view {

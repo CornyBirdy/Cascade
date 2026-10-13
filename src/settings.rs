@@ -1053,7 +1053,8 @@ impl Settings {
                 // ...and hides a shown one.
                 (hidden, lanes[hidden].len())
             };
-            lanes[j].insert(k.min(lanes[j].len()), d.item);
+            let lane = &mut lanes[j];
+            lane.insert(k.min(lane.len()), d.item);
             return Some(Change::Many(b.keys().iter().zip(&lanes).map(|(key, l)| (*key, l.join(","))).collect()));
         }
         let (i, v) = self.drag.take()?;
@@ -1371,7 +1372,7 @@ impl Settings {
                                     draw_tile(&p, f, item, b.label(item), tx, ty, bg, a);
                                     slot += 1;
                                 }
-                                if let Some((tj, tk)) = target.filter(|&(tj, _)| tj == j) {
+                                if let Some((_, tk)) = target.filter(|&(tj, _)| tj == j) {
                                     let (tx, ty) = tile_rect(lr, tk);
                                     p.rrect(tx, ty, TILE_W, TILE_H, 9.0, theme::accent().alpha(0.14));
                                     p.stroke_rrect(
