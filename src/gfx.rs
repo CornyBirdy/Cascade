@@ -474,15 +474,32 @@ impl Painter<'_> {
         }
     }
 
-    /// The notch silhouette: flat top, rounded bottom corners and concave
-    /// "ears" flaring into the top edge. `x` is the left edge of the body.
-    pub fn notch(&self, x: f32, w: f32, h: f32, r: f32, ear: f32, c: Color) {
-        let r = r.min(h * 0.5).min(w * 0.5).max(0.0);
-        let ear = ear.min(h * 0.5).max(0.0);
-        let (x0, x1) = (x, x + w);
-        let arc = |s: &ID2D1GeometrySink, px: f32, py: f32, rad: f32, dir: D2D1_SWEEP_DIRECTION| unsafe {
+    /// The notch silhouette against a screen edge: flat where it meets the
+    /// edge, rounded corners on its free side and concave "ears" flaring
+    /// into the edge. The edge runs along `base` (x for a side edge, y
+    /// otherwise); the body starts `a` along it, is `len` long and reaches
+    /// `depth` out from it.
+    pub fn notch(&self, edge: Edge, base: f32, a: f32, len: f32, depth: f32, r: f32, ear: f32, c: Color) {
+        let r = r.min(depth * 0.5).min(len * 0.5).max(0.0);
+        let ear = ear.min(depth * 0.5).max(0.0);
+        let (u0, u1) = (a, a + len);
+        // Drawn as if against the top edge, then mapped onto the real one. A
+        // mirrored mapping turns arcs the other way.
+        let at = |u: f32, v: f32| match edge {
+            Edge::Top => pt(u, base + v),
+            Edge::Bottom => pt(u, base - v),
+            Edge::Left => pt(base + v, u),
+            Edge::Right => pt(base - v, u),
+        };
+        let mirrored = matches!(edge, Edge::Bottom | Edge::Left);
+        let (cw, ccw) = if mirrored {
+            (D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_SWEEP_DIRECTION_CLOCKWISE)
+        } else {
+            (D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE)
+        };
+        let arc = |s: &ID2D1GeometrySink, u: f32, v: f32, rad: f32, dir: D2D1_SWEEP_DIRECTION| unsafe {
             s.AddArc(&D2D1_ARC_SEGMENT {
-                point: pt(px, py),
+                point: at(u, v),
                 size: D2D_SIZE_F { width: rad, height: rad },
                 rotationAngle: 0.0,
                 sweepDirection: dir,
@@ -490,18 +507,59 @@ impl Painter<'_> {
             });
         };
         if let Some(g) = self.path(|s| unsafe {
-            s.BeginFigure(pt(x0 - ear, 0.0), D2D1_FIGURE_BEGIN_FILLED);
-            s.AddLine(pt(x1 + ear, 0.0));
-            arc(s, x1, ear, ear, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE);
-            s.AddLine(pt(x1, h - r));
-            arc(s, x1 - r, h, r, D2D1_SWEEP_DIRECTION_CLOCKWISE);
-            s.AddLine(pt(x0 + r, h));
-            arc(s, x0, h - r, r, D2D1_SWEEP_DIRECTION_CLOCKWISE);
-            s.AddLine(pt(x0, ear));
-            arc(s, x0 - ear, 0.0, ear, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE);
+            s.BeginFigure(at(u0 - ear, 0.0), D2D1_FIGURE_BEGIN_FILLED);
+            s.AddLine(at(u1 + ear, 0.0));
+            arc(s, u1, ear, ear, ccw);
+            s.AddLine(at(u1, depth - r));
+            arc(s, u1 - r, depth, r, cw);
+            s.AddLine(at(u0 + r, depth));
+            arc(s, u0, depth - r, r, cw);
+            s.AddLine(at(u0, ear));
+            arc(s, u0 - ear, 0.0, ear, ccw);
             s.EndFigure(D2D1_FIGURE_END_CLOSED);
         }) {
             self.fill_geometry(&g, c);
+        }
+    }
+
+    /// Moves everything drawn after it by (x, y); `translate(0.0, 0.0)` undoes it.
+    pub fn translate(&self, x: f32, y: f32) {
+        unsafe { self.gfx.rt.SetTransform(&windows_numerics::Matrix3x2::translation(x, y)) };
+    }
+}
+
+/// A screen edge (where the notch sits).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Edge {
+    pub fn parse(v: &str) -> Self {
+        match v {
+            "bottom" => Edge::Bottom,
+            "left" => Edge::Left,
+            "right" => Edge::Right,
+            _ => Edge::Top,
+        }
+    }
+
+    /// The left or right edge, where "along" runs down the screen.
+    pub fn side(self) -> bool {
+        matches!(self, Edge::Left | Edge::Right)
+    }
+
+    /// A rect given against the top edge (`u` along it, `v` out from it,
+    /// `ul` by `vl`), placed against this edge running along `base`.
+    pub fn rect(self, base: f32, u: f32, v: f32, ul: f32, vl: f32) -> (f32, f32, f32, f32) {
+        match self {
+            Edge::Top => (u, base + v, ul, vl),
+            Edge::Bottom => (u, base - v - vl, ul, vl),
+            Edge::Left => (base + v, u, vl, ul),
+            Edge::Right => (base - v - vl, u, vl, ul),
         }
     }
 }

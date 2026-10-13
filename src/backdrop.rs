@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use windows::core::{s, w, Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
-use windows::Win32::Graphics::Gdi::{GetStockObject, HBRUSH, BLACK_BRUSH};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, GetStockObject, SetWindowRgn, HBRUSH, BLACK_BRUSH};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -80,6 +80,8 @@ pub struct Backdrop {
     pub hwnd: HWND,
     rect: RECT,
     shown: bool,
+    /// The rounded rect the window is cut to, if any (see `place_shaped`).
+    shape: Option<(RECT, i32)>,
 }
 
 impl Backdrop {
@@ -106,7 +108,7 @@ impl Backdrop {
             // No DWM shadow/border lines of its own.
             let border = COLORREF(0xFFFFFFFE); // DWMWA_COLOR_NONE
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as *const _, 4);
-            Ok(Self { hwnd, rect: RECT::default(), shown: false })
+            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None })
         }
     }
 
@@ -168,6 +170,25 @@ impl Backdrop {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
+    }
+
+    /// Like `place`, but cut to a rounded rect `shape` (window-relative px,
+    /// which may reach past the window) with corners of `radius` px. For a
+    /// panel against a screen edge shared with another screen, where the
+    /// blur can't run past the edge to hide its own corners there. `None`
+    /// leaves the window whole.
+    pub fn place_shaped(&mut self, r: RECT, shape: Option<(RECT, i32)>, content: HWND) {
+        if shape != self.shape {
+            self.shape = shape;
+            unsafe {
+                let rgn = shape.map(|(s, rad)| {
+                    CreateRoundRectRgn(s.left, s.top, s.right + 1, s.bottom + 1, rad * 2, rad * 2)
+                });
+                // The window owns the region from here on.
+                SetWindowRgn(self.hwnd, rgn, true);
+            }
+        }
+        self.place(r, content);
     }
 
     pub fn hide(&mut self) {

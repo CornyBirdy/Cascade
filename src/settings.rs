@@ -159,8 +159,20 @@ fn rows(section: usize) -> Vec<Row> {
                 "Lip: pulled down from a thin strip on hover.",
                 Choice(&[("lip", "Lip"), ("notch", "Notch")]),
             ),
-            row("lip_width", "Lip width", "Width of the resting lip.", slider(40.0, 400.0, 2.0, Unit::Px)),
-            row("lip_height", "Lip height", "Push the pointer up into it to open.", slider(2.0, 16.0, 1.0, Unit::Px)),
+            row(
+                "notch_edge",
+                "Edge",
+                "Which edge of the screen it sits on.",
+                Choice(&[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")]),
+            ),
+            row(
+                "notch_position",
+                "Position along the edge",
+                "0% = the left or top end, 50% = the middle.",
+                slider(0.0, 1.0, 0.01, Unit::Percent),
+            ),
+            row("lip_width", "Lip length", "How long the resting lip is.", slider(40.0, 400.0, 2.0, Unit::Px)),
+            row("lip_height", "Lip thickness", "Push the pointer into it to open.", slider(2.0, 16.0, 1.0, Unit::Px)),
             row(
                 "live_activity",
                 "Live activity",

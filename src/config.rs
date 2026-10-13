@@ -17,9 +17,15 @@ notch = true
 # lip = a thin glass strip at the top of the screen that pulls the notch down
 # when the pointer touches it; notch = the classic black notch, always there.
 notch_style = lip
-# Size of the lip in pixels at 100% scaling.
+# Size of the lip in pixels at 100% scaling (its length along the edge, and
+# how far it reaches out).
 lip_width = 160
 lip_height = 5
+# Which edge of the main screen it sits on (top, bottom, left or right), and
+# where along it: 0 = the left / top end, 0.5 = the middle, 1 = the right /
+# bottom end.
+notch_edge = top
+notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
 # Grow the notch with album art / timer while music or a focus timer runs.
@@ -175,6 +181,8 @@ pub struct Config {
     pub notch_style: String,
     pub lip_width: f32,
     pub lip_height: f32,
+    pub notch_edge: String,
+    pub notch_position: f32,
     pub hide_in_fullscreen: bool,
     pub live_activity: bool,
     pub visualizer: bool,
@@ -252,6 +260,8 @@ impl Default for Config {
             notch_style: "lip".into(),
             lip_width: 160.0,
             lip_height: 5.0,
+            notch_edge: "top".into(),
+            notch_position: 0.5,
             hide_in_fullscreen: true,
             live_activity: true,
             visualizer: true,
@@ -452,6 +462,8 @@ impl Config {
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
                 "lip_height" => set_f(&mut c.lip_height, 2.0, 16.0),
+                "notch_edge" if matches!(v, "top" | "bottom" | "left" | "right") => c.notch_edge = v.into(),
+                "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
@@ -566,6 +578,8 @@ impl Config {
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),
             "lip_height" => self.lip_height.to_string(),
+            "notch_edge" => self.notch_edge.clone(),
+            "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),

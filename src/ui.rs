@@ -33,7 +33,7 @@ use crate::brightness;
 use crate::config::{self, Config};
 use crate::backdrop::{self, Backdrop};
 use crate::dock::{self, Dock, Hot as DockHot};
-use crate::gfx::{Align, Color, Gfx, Layer, Painter};
+use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
 use crate::icons::{self, IconResult};
 use crate::keyhook;
 use crate::launcher::{self, AppEntry, Launcher};
@@ -159,6 +159,8 @@ struct App {
     taskbar_created: u32,
 
     monitor: RECT,
+    /// The main screen less taskbars (the notch sits against its edges).
+    area: RECT,
     /// Physical pixels per layout unit (DPI scale x config scale).
     k: f32,
     /// DPI scale alone (the dock ignores the notch's `scale`).
@@ -210,6 +212,7 @@ struct App {
 
     /// Content origin and width of the last frame, for hit-testing.
     origin: f32,
+    origin_y: f32,
     content_w: f32,
 
     dock: Dock,
@@ -618,6 +621,7 @@ impl App {
             tray: Some(Tray::new(hwnd)),
             taskbar_created,
             monitor: RECT::default(),
+            area: RECT::default(),
             k: 1.0,
             dpi: 1.0,
             refresh_hz: 60,
@@ -661,6 +665,7 @@ impl App {
             visualizer: Visualizer::default(),
             flyout_hidden: false,
             origin: 0.0,
+            origin_y: 0.0,
             content_w: 0.0,
             dock: Dock::new(dock_hwnd, trigger, icons::spawn(), dock_backdrops),
             preview: Preview::new(preview_hwnd),
@@ -757,6 +762,8 @@ impl App {
             let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
             let _ = GetMonitorInfoW(mon, &mut mi);
             self.monitor = mi.rcMonitor;
+            let work = mi.rcWork;
+            self.area = if work.right > work.left && work.bottom > work.top { work } else { mi.rcMonitor };
             let (mut dx, mut dy) = (96u32, 96u32);
             let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
             self.dpi = dx as f32 / 96.0;
@@ -895,6 +902,17 @@ impl App {
         }
     }
 
+    fn notch_edge(&self) -> Edge {
+        Edge::parse(&self.cfg.notch_edge)
+    }
+
+    /// Whether the resting notch is a slim strip that doesn't grow for music
+    /// or the focus timer (a line in it lights up instead): the lip, and the
+    /// classic notch on a side edge.
+    fn flat_rest(&self) -> bool {
+        self.cfg.lip() || self.notch_edge().side()
+    }
+
     /// Corner radius of the lip and the notch pulled down from it: the same
     /// as the panels' (and their blur's), whatever the notch's own scale.
     fn lip_radius(&self) -> f32 {
@@ -905,10 +923,16 @@ impl App {
     fn size_of(&self, view: View) -> (f32, f32, f32) {
         let (iw, ih) = (self.cfg.idle_width, self.cfg.idle_height);
         let lip = self.cfg.lip();
-        if lip && matches!(view, View::Idle | View::Live) {
+        if matches!(view, View::Idle | View::Live) && self.flat_rest() {
             // The lip is sized in pixels at 100%, apart from the notch's scale.
             let s = self.cfg.scale.max(0.1);
-            return (self.cfg.lip_width / s, self.cfg.lip_height / s, self.lip_radius());
+            let (along, depth, r) = if lip {
+                (self.cfg.lip_width / s, self.cfg.lip_height / s, self.lip_radius())
+            } else {
+                (iw, ih, ih * 0.36)
+            };
+            // Against a side edge the strip stands upright.
+            return if self.notch_edge().side() { (depth, along, r) } else { (along, depth, r) };
         }
         let (w, h, r) = match view {
             View::Idle => (iw, ih, ih * 0.36),
@@ -962,7 +986,7 @@ impl App {
 
         // The lip only glows while music plays; the bars come with the notch.
         let bars_visible = match view {
-            View::Live => !self.cfg.lip(),
+            View::Live => !self.flat_rest(),
             View::Expanded => self.mode == Mode::Media,
             _ => false,
         };
@@ -1098,6 +1122,10 @@ impl App {
             }
             WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETWORKAREA.0 => {
                 self.dock.refresh_bottom();
+                if hwnd == self.hwnd {
+                    // A taskbar came or went: the notch keeps clear of it.
+                    self.update_display();
+                }
                 return None;
             }
             _ => {}
@@ -2605,36 +2633,101 @@ impl App {
         let k = self.k;
         let bw = self.w.value.max(1.0);
         let bh = self.h.value.max(0.0);
-        let mon_w = self.monitor.right - self.monitor.left;
-        // The lip and the notch pulled down from it are a plain panel, flush
-        // with the top of the screen: no ears.
+        let edge = self.notch_edge();
+        let side = edge.side();
+        // The lip and the notch pulled out of it are a plain panel, flush with
+        // the edge: no ears.
         let lip = self.cfg.lip();
         let ear = if lip { 0.0 } else { EAR };
-        let mut pw = ((bw + 2.0 * ear) * k).ceil() as i32 + 2;
-        if (mon_w - pw) % 2 != 0 {
-            pw += 1; // keep the window exactly centred, so it never jitters
+        // The panel stays upright; along a side edge its height runs along it.
+        let (along, depth) = if side { (bh, bw) } else { (bw, bh) };
+        let mut pa = ((along + 2.0 * ear) * k).ceil() as i32 + 2;
+        if pa % 2 != 0 {
+            pa += 1; // an even size about a whole-pixel centre never jitters
         }
-        let ph = ((bh * k).ceil() as i32).max(1);
-        let pos = POINT { x: self.monitor.left + (mon_w - pw) / 2, y: self.monitor.top };
-        let cx = pw as f32 / k / 2.0;
-        let body_x = cx - bw / 2.0;
-        let (tw, _, _) = self.size_of(self.view);
-        self.origin = cx - tw / 2.0;
+        let pd = ((depth * k).ceil() as i32).max(1);
+        let area = self.area;
+        let (m0, m1) = if side { (area.top, area.bottom) } else { (area.left, area.right) };
+        let half = pa / 2;
+        let centre = (m0 as f32 + self.cfg.notch_position * (m1 - m0) as f32).round() as i32;
+        // Kept on the screen: near an end it grows away from the corner.
+        let centre = centre.clamp(m0 + half, (m1 - half).max(m0 + half));
+        let (pos, pw, ph) = match edge {
+            Edge::Top => (POINT { x: centre - half, y: area.top }, pa, pd),
+            Edge::Bottom => (POINT { x: centre - half, y: area.bottom - pd }, pa, pd),
+            Edge::Left => (POINT { x: area.left, y: centre - half }, pd, pa),
+            Edge::Right => (POINT { x: area.right - pd, y: centre - half }, pd, pa),
+        };
+        let (ww, wh) = (pw as f32 / k, ph as f32 / k);
+        let (tw, th, _) = self.size_of(self.view);
+        // The body against its edge, and where the content starts: laid out at
+        // its full size out from the edge, so the panel growing uncovers it.
+        let (bx, by, ox, oy) = match edge {
+            Edge::Top => (ww / 2.0 - bw / 2.0, 0.0, ww / 2.0 - tw / 2.0, 0.0),
+            Edge::Bottom => (ww / 2.0 - bw / 2.0, wh - bh, ww / 2.0 - tw / 2.0, wh - th),
+            Edge::Left => (0.0, wh / 2.0 - bh / 2.0, 0.0, wh / 2.0 - th / 2.0),
+            Edge::Right => (ww - bw, wh / 2.0 - bh / 2.0, ww - tw, wh / 2.0 - th / 2.0),
+        };
+        self.origin = ox;
+        self.origin_y = (oy * k).round() / k;
         self.content_w = tw;
+        // The edge's line in the window, and where the body starts along it.
+        let (base, a0) = match edge {
+            Edge::Top => (0.0, bx),
+            Edge::Bottom => (wh, bx),
+            Edge::Left => (0.0, by),
+            Edge::Right => (ww, by),
+        };
 
-        // The panel runs past the top of the screen by more than its corner
-        // radius, so only its bottom corners are round (the blur's too).
+        // The panel runs past the edge by more than its corner radius, so only
+        // its free corners are round (the blur's too).
         let r = self.r.value;
         let above = r + 2.0;
+        let (fx, fy, fw, fh) = match edge {
+            Edge::Top => (bx, by - above, bw, bh + above),
+            Edge::Bottom => (bx, by, bw, bh + above),
+            Edge::Left => (bx - above, by, bw + above, bh),
+            Edge::Right => (bx, by, bw + above, bh),
+        };
         // Glass only once the shape has settled (a moving blur window lags a
         // frame behind); a solid panel while it moves.
         let settled = self.w.settled() && self.h.settled() && self.r.settled();
         let blurred = lip && self.notch_blur && settled;
         if blurred {
-            let x0 = pos.x + (body_x * k).round() as i32;
-            let x1 = pos.x + ((body_x + bw) * k).round() as i32;
-            let top = pos.y - (above * k).ceil() as i32;
-            self.notch_backdrop.place(RECT { left: x0, top, right: x1, bottom: pos.y + ph }, self.hwnd);
+            let px = |v: f32| (v * k).round() as i32;
+            let body = RECT {
+                left: pos.x + px(bx),
+                top: pos.y + px(by),
+                right: pos.x + px(bx + bw),
+                bottom: pos.y + px(by + bh),
+            };
+            let full = RECT {
+                left: pos.x + px(fx),
+                top: pos.y + px(fy),
+                right: pos.x + px(fx + fw),
+                bottom: pos.y + px(fy + fh),
+            };
+            // Past the edge is normally off every screen. If it lands on one
+            // (another screen there, or a taskbar), the blur keeps to the body
+            // and is cut to the panel's shape instead.
+            let strip = match edge {
+                Edge::Top => RECT { bottom: body.top, ..full },
+                Edge::Bottom => RECT { top: body.bottom, ..full },
+                Edge::Left => RECT { right: body.left, ..full },
+                Edge::Right => RECT { left: body.right, ..full },
+            };
+            let covered = !unsafe { MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) }.is_invalid();
+            if covered {
+                let shape = RECT {
+                    left: full.left - body.left,
+                    top: full.top - body.top,
+                    right: full.right - body.left,
+                    bottom: full.bottom - body.top,
+                };
+                self.notch_backdrop.place_shaped(body, Some((shape, px(r))), self.hwnd);
+            } else {
+                self.notch_backdrop.place_shaped(full, None, self.hwnd);
+            }
         } else {
             self.notch_backdrop.hide();
         }
@@ -2643,17 +2736,18 @@ impl App {
         {
             let p = self.gfx.painter();
             if lip {
-                theme::panel(&p, body_x, -above, bw, bh + above, r, blurred, self.cfg.taskbar_opacity, 0.97, 1.0);
+                theme::panel(&p, fx, fy, fw, fh, r, blurred, self.cfg.taskbar_opacity, 0.97, 1.0);
             } else {
-                p.notch(body_x, bw, bh, r, EAR, BLACK);
+                p.notch(edge, base, a0, along, depth, r, EAR, BLACK);
             }
             let alpha = self.fade.value.clamp(0.0, 1.0);
-            if lip && matches!(self.view, View::Idle | View::Live) {
+            if matches!(self.view, View::Idle | View::Live) && self.flat_rest() {
                 if self.view == View::Live && alpha > 0.01 {
-                    self.draw_lip_glow(&p, body_x, bw, bh, alpha);
+                    self.draw_lip_glow(&p, edge, base, a0, along, depth, alpha);
                 }
-            } else if alpha > 0.01 && bh > 4.0 {
-                p.clip(body_x, 0.0, bw, bh);
+            } else if alpha > 0.01 && bh > 4.0 && bw > 4.0 {
+                p.clip(bx, by, bw, bh);
+                p.translate(0.0, self.origin_y);
                 match self.view {
                     View::Idle => {}
                     View::Live => self.draw_live(&p, alpha),
@@ -2661,11 +2755,11 @@ impl App {
                         self.draw_timer_peek(&p, alpha)
                     }
                     View::Peek => {
-                        let (_, th, _) = self.size_of(View::Peek);
                         self.draw_level_row(&p, self.origin + 16.0, th / 2.0, tw - 32.0, self.peek, alpha);
                     }
                     View::Expanded => self.draw_expanded(&p, alpha),
                 }
+                p.translate(0.0, 0.0);
                 p.unclip();
             }
         }
@@ -2711,7 +2805,7 @@ impl App {
 
     fn hit(&self, x: i32, y: i32) -> Option<Hot> {
         let lx = x as f32 / self.k - self.origin;
-        let ly = y as f32 / self.k;
+        let ly = y as f32 / self.k - self.origin_y;
         self.hotspots()
             .into_iter()
             .find(|(_, hx, hy, hw, hh)| lx >= *hx && lx < hx + hw && ly >= *hy && ly < hy + hh)
@@ -2766,21 +2860,28 @@ impl App {
         }
     }
 
-    /// The resting lip while music plays or the focus timer runs: a thin
-    /// line in the album art's colour, or the timer's progress.
-    fn draw_lip_glow(&self, p: &Painter, x: f32, w: f32, h: f32, alpha: f32) {
-        let inset = self.r.value.min(w / 4.0) + 3.0;
-        let lw = (w - 2.0 * inset).max(0.0);
-        let t = (h * 0.4).clamp(1.0, 2.5);
-        let y = (h - t - 1.0).max(0.0);
+    /// The resting strip while music plays or the focus timer runs: a thin
+    /// line along it, in the album art's colour or showing the timer's
+    /// progress. `base`, `a`, `len` and `depth` place the strip as in
+    /// `Painter::notch`.
+    fn draw_lip_glow(&self, p: &Painter, edge: Edge, base: f32, a: f32, len: f32, depth: f32, alpha: f32) {
+        let inset = self.r.value.min(len / 4.0) + 3.0;
+        let lw = (len - 2.0 * inset).max(0.0);
+        let t = (depth * 0.4).clamp(1.0, 2.5);
+        // Near the free side, away from the screen edge.
+        let v = (depth - t - 1.0).max(0.0);
+        let line = |l: f32, c: Color| {
+            let (x, y, w, h) = edge.rect(base, a + inset, v, l, t);
+            p.rrect(x, y, w, h, t / 2.0, c);
+        };
         if self.playing() {
-            p.rrect(x + inset, y, lw, t, t / 2.0, self.accent().alpha(0.9 * alpha));
+            line(lw, self.accent().alpha(0.9 * alpha));
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
-            p.rrect(x + inset, y, lw, t, t / 2.0, Color::white(0.14 * alpha));
+            line(lw, Color::white(0.14 * alpha));
             let done = lw * self.pomo.progress().clamp(0.0, 1.0);
             if done > 0.5 {
-                p.rrect(x + inset, y, done.max(t), t, t / 2.0, c.alpha(alpha));
+                line(done.max(t), c.alpha(alpha));
             }
         }
     }
