@@ -82,6 +82,8 @@ pub struct Backdrop {
     shown: bool,
     /// The rounded rect the window is cut to, if any (see `place_shaped`).
     shape: Option<(RECT, i32)>,
+    /// Where `track` was last asked to put the blur.
+    last: Option<RECT>,
 }
 
 impl Backdrop {
@@ -108,7 +110,7 @@ impl Backdrop {
             // No DWM shadow/border lines of its own.
             let border = COLORREF(0xFFFFFFFE); // DWMWA_COLOR_NONE
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as *const _, 4);
-            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None })
+            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None, last: None })
         }
     }
 
@@ -191,7 +193,48 @@ impl Backdrop {
         self.place(r, content);
     }
 
+    /// For a panel that moves or changes size from frame to frame: puts the
+    /// blur at `r` (cut to `shape`, as in `place_shaped`) once it holds
+    /// still, and while it moves pulls each side of the blur in by as far as
+    /// that side moved since the last frame. The blur and the panel are two
+    /// windows, so one can reach the screen a frame before the other; pulled
+    /// in, the blur stays inside the panel either way instead of showing
+    /// past its edge. Call it after the panel's frame is presented. Returns
+    /// true while the blur is pulled in: draw one more frame, so it ends up
+    /// exactly at `r`.
+    pub fn track(&mut self, r: RECT, shape: Option<(RECT, i32)>, content: HWND) -> bool {
+        let last = self.last.unwrap_or(r);
+        self.last = Some(r);
+        // A side that moved d pixels may move about d more by the next frame.
+        let d = |a: i32, b: i32| if a == b { 0 } else { (a - b).abs() + 1 };
+        let (dl, dt, dr, db) =
+            (d(r.left, last.left), d(r.top, last.top), d(r.right, last.right), d(r.bottom, last.bottom));
+        let inner = RECT { left: r.left + dl, top: r.top + dt, right: r.right - dr, bottom: r.bottom - db };
+        if inner.right - inner.left < 2 || inner.bottom - inner.top < 2 {
+            self.hide_blur();
+            return true;
+        }
+        // The cut-out shape is relative to the window, which moved with `inner`.
+        let shape = shape.map(|(s, rad)| {
+            (RECT { left: s.left - dl, top: s.top - dt, right: s.right - dl, bottom: s.bottom - dt }, rad)
+        });
+        self.place_shaped(inner, shape, content);
+        inner != r
+    }
+
+    /// Hides the blur while the panel at `r` is shown without it, keeping
+    /// track of where the panel is for when `track` brings the blur back.
+    pub fn hold(&mut self, r: RECT) {
+        self.last = Some(r);
+        self.hide_blur();
+    }
+
     pub fn hide(&mut self) {
+        self.last = None;
+        self.hide_blur();
+    }
+
+    fn hide_blur(&mut self) {
         if self.shown {
             self.shown = false;
             unsafe {

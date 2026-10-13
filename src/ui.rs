@@ -175,6 +175,10 @@ struct App {
     h: Spring,
     r: Spring,
     fade: Spring,
+    /// The open notch's tab bar: where its highlight sits (the tab's index)
+    /// and its fade, which unlike `fade` doesn't restart on a tab switch.
+    tab: Spring,
+    tabs_fade: Spring,
     level: Spring,
     bars: [Spring; BANDS],
     last_frame: Instant,
@@ -488,11 +492,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             return LRESULT(0);
         }
         msg::WEATHER => {
-            let w = Box::from_raw(lp.0 as *mut Weather);
+            // No payload: only the location lookup's status changed.
+            let w = if lp.0 != 0 { Some(Box::from_raw(lp.0 as *mut Weather)) } else { None };
             with_app(move |a| {
-                a.weather = Some(*w);
-                a.dirty = true;
-                a.dock.dirty = true;
+                if let Some(w) = w {
+                    a.weather = Some(*w);
+                    a.dirty = true;
+                    a.dock.dirty = true;
+                }
+                if let Some(s) = &a.settings {
+                    s.invalidate();
+                }
             });
             return LRESULT(0);
         }
@@ -633,6 +643,8 @@ impl App {
             h: size,
             r: Spring::new(0.0, 420.0, 34.0),
             fade: Spring::new(0.0, 260.0, 30.0),
+            tab: Spring::new(0.0, 520.0, 42.0),
+            tabs_fade: Spring::new(0.0, 260.0, 30.0),
             level: Spring::new(vol.0, 500.0, 40.0),
             bars: [Spring::new(0.0, 700.0, 30.0); BANDS],
             last_frame: Instant::now(),
@@ -940,11 +952,12 @@ impl App {
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek if self.peek == Some(PeekKind::Message) => (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek => (iw + 110.0, ih + 12.0, (ih + 12.0) * 0.4),
+            // Every tab is as wide, so the tab bar under them holds still.
             View::Expanded => match self.mode {
-                Mode::Media if self.media.is_some() => (420.0, 166.0, 30.0),
-                Mode::Media => (380.0, 120.0, 28.0),
-                Mode::Controls => (420.0, 172.0, 30.0),
-                Mode::Calendar => (420.0, 212.0, 30.0),
+                Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
+                Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
+                Mode::Controls => (420.0, 154.0 + TAB_BAR, 30.0),
+                Mode::Calendar => (420.0, 194.0 + TAB_BAR, 30.0),
             },
         };
         (w, h, if lip { self.lip_radius() } else { r })
@@ -971,6 +984,8 @@ impl App {
             self.view = view;
             self.fade.snap(0.0);
             self.fade.set(1.0);
+            self.tabs_fade.snap(0.0);
+            self.tabs_fade.set(1.0);
             unsafe {
                 if view == View::Expanded {
                     SetTimer(Some(self.hwnd), TIMER_TICK, 1000, None);
@@ -1003,6 +1018,7 @@ impl App {
     fn set_mode(&mut self, mode: Mode) {
         if mode != self.mode {
             self.mode = mode;
+            self.tab.set(MODES.iter().position(|&m| m == mode).unwrap_or(0) as f32);
             self.hovered = None;
             self.fade.snap(0.0);
             self.fade.set(1.0);
@@ -1157,6 +1173,12 @@ impl App {
             WM_MOUSEWHEEL => {
                 let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
                 self.on_wheel(delta);
+            }
+            // A sideways swipe on a touchpad (or tilting the wheel) flips tabs
+            // the way it moves.
+            WM_MOUSEHWHEEL if self.expanded => {
+                let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
+                self.on_wheel(delta.saturating_neg());
             }
             WM_TIMER => self.on_timer(wp.0),
             msg::VOLUME => {
@@ -1474,6 +1496,7 @@ impl App {
                 self.expanded = false;
                 self.hovered = None;
                 self.mode = Mode::Media;
+                self.tab.snap(0.0);
                 self.retarget();
             }
             TIMER_PEEK => {
@@ -1933,6 +1956,14 @@ impl App {
     fn apply_change(&mut self, change: Change) {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Many(values) => {
+                if values.iter().any(|(k, v)| self.cfg.get(k) != *v) {
+                    for (k, v) in &values {
+                        Config::set(k, v);
+                    }
+                    self.reload_config();
+                }
+            }
             Change::Set(key, v) if key.starts_with("place_") => {
                 let (left, right) = self.cfg.with_place(&key["place_".len()..], &v);
                 Config::set("taskbar_left", &left);
@@ -2000,7 +2031,10 @@ impl App {
                 }
                 change
             }
-            WM_LBUTTONUP => s.on_up(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                s.on_up(x, y, &get)
+            }
             WM_MOUSEWHEEL => {
                 s.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16, &get);
                 None
@@ -2500,6 +2534,8 @@ impl App {
                 || !self.h.settled()
                 || !self.r.settled()
                 || !self.fade.settled()
+                || !self.tab.settled()
+                || !self.tabs_fade.settled()
                 || !self.level.settled()
                 || self.bars.iter().any(|b| !b.settled()))
     }
@@ -2528,6 +2564,8 @@ impl App {
             fast |= self.h.step(dt);
             fast |= self.r.step(dt);
             self.fade.step(dt);
+            fast |= self.tab.step(dt);
+            self.tabs_fade.step(dt);
             self.level.step(dt);
             for b in &mut self.bars {
                 b.step(dt);
@@ -2689,11 +2727,10 @@ impl App {
             Edge::Left => (bx - above, by, bw + above, bh),
             Edge::Right => (bx, by, bw + above, bh),
         };
-        // Glass only once the shape has settled (a moving blur window lags a
-        // frame behind); a solid panel while it moves.
-        let settled = self.w.settled() && self.h.settled() && self.r.settled();
-        let blurred = lip && self.notch_blur && settled;
-        if blurred {
+        // Glass the whole time, also while the notch opens and closes (the
+        // blur follows the panel frame by frame; see `Backdrop::track`).
+        let blurred = lip && self.notch_blur;
+        let glass = blurred.then(|| {
             let px = |v: f32| (v * k).round() as i32;
             let body = RECT {
                 left: pos.x + px(bx),
@@ -2724,11 +2761,12 @@ impl App {
                     right: full.right - body.left,
                     bottom: full.bottom - body.top,
                 };
-                self.notch_backdrop.place_shaped(body, Some((shape, px(r))), self.hwnd);
+                (body, Some((shape, px(r))))
             } else {
-                self.notch_backdrop.place_shaped(full, None, self.hwnd);
+                (full, None)
             }
-        } else {
+        });
+        if glass.is_none() {
             self.notch_backdrop.hide();
         }
 
@@ -2763,7 +2801,14 @@ impl App {
                 p.unclip();
             }
         }
-        self.gfx.present(&self.layer, self.hwnd, pos, pw, ph, 255)
+        let shown = self.gfx.present(&self.layer, self.hwnd, pos, pw, ph, 255);
+        // After the frame is on its way, so the two windows move together.
+        if let Some((rect, shape)) = glass {
+            if self.notch_backdrop.track(rect, shape, self.hwnd) {
+                self.dirty = true;
+            }
+        }
+        shown
     }
 
     // ---------------------------------------------------------- hit-test --
@@ -2776,8 +2821,9 @@ impl App {
             return out;
         }
         let (tw, th, _) = self.size_of(View::Expanded);
+        let (tx, ty, seg) = tab_bar(tw, th);
         for i in 0..MODES.len() {
-            out.push((Hot::Tab(i), tw / 2.0 + (i as f32 - 1.0) * 16.0 - 8.0, th - 18.0, 16.0, 16.0));
+            out.push((Hot::Tab(i), tx + i as f32 * seg, ty, seg, TAB_H));
         }
         match self.mode {
             Mode::Media if self.media.is_some() => {
@@ -2934,24 +2980,47 @@ impl App {
         p.text(&pct, &self.gfx.fonts.num, x + w - 36.0, cy - 10.0, 36.0, 20.0, Align::Right, white);
     }
 
-    fn draw_tabs(&self, p: &Painter, alpha: f32) {
+    /// The tab bar along the bottom of the open notch: a track with a tab
+    /// (icon and name) per mode, and a highlight that slides to the open one.
+    fn draw_tabs(&self, p: &Painter) {
+        let alpha = self.tabs_fade.value.clamp(0.0, 1.0);
+        if alpha < 0.01 {
+            return;
+        }
         let (tw, th, _) = self.size_of(View::Expanded);
+        let (tx, ty, seg) = tab_bar(tw, th);
+        let x0 = self.origin + tx;
+        p.rrect(x0, ty, seg * MODES.len() as f32, TAB_H, TAB_H / 2.0, Color::white(0.06 * alpha));
+        let hx = x0 + self.tab.value * seg;
+        p.rrect(hx + 2.0, ty + 2.0, seg - 4.0, TAB_H - 4.0, (TAB_H - 4.0) / 2.0, Color::white(0.15 * alpha));
+        let font = &self.gfx.fonts.label;
         for (i, &m) in MODES.iter().enumerate() {
-            let cx = self.origin + tw / 2.0 + (i as f32 - 1.0) * 16.0;
+            let sx = x0 + i as f32 * seg;
             let active = m == self.mode;
             let hovered = self.hovered == Some(Hot::Tab(i));
-            let a = if active {
-                0.9
-            } else if hovered {
-                0.55
-            } else {
-                0.28
-            };
-            if active {
-                p.rrect(cx - 7.0, th - 13.0, 14.0, 6.0, 3.0, Color::white(a * alpha));
-            } else {
-                p.circle(cx, th - 10.0, 3.0, Color::white(a * alpha));
+            if hovered && !active {
+                p.rrect(sx + 2.0, ty + 2.0, seg - 4.0, TAB_H - 4.0, (TAB_H - 4.0) / 2.0, Color::white(0.07 * alpha));
             }
+            let label = match m {
+                Mode::Media if self.media.is_some() => "Media",
+                Mode::Media => "Home",
+                Mode::Controls => "Controls",
+                Mode::Calendar => "Calendar",
+            };
+            let c = Color::white(
+                if active {
+                    0.95
+                } else if hovered {
+                    0.8
+                } else {
+                    0.5
+                } * alpha,
+            );
+            let lw = self.gfx.measure(label, font);
+            let start = sx + (seg - (14.0 + 6.0 + lw)) / 2.0;
+            let cy = ty + TAB_H / 2.0;
+            tab_icon(p, m, self.media.is_some(), start + 7.0, cy, c);
+            p.text(label, font, start + 20.0, ty, lw + 4.0, TAB_H, Align::Left, c);
         }
     }
 
@@ -2962,7 +3031,7 @@ impl App {
             Mode::Controls => self.draw_controls(p, alpha),
             Mode::Calendar => self.draw_calendar(p, alpha),
         }
-        self.draw_tabs(p, alpha);
+        self.draw_tabs(p);
     }
 
     fn draw_media(&self, p: &Painter, alpha: f32) {
@@ -3232,6 +3301,50 @@ impl App {
                 _ if self.pomo.running() => pause(p, bx, by, white),
                 _ => play(p, bx, by, white),
             }
+        }
+    }
+}
+
+// --------------------------------------------------------------- tab bar --
+
+/// Height of the open notch's tab bar, and the room it takes at the bottom.
+const TAB_H: f32 = 30.0;
+const TAB_BAR: f32 = TAB_H + 12.0 + 6.0;
+
+/// Left edge and top of the tab bar in an open notch `tw` x `th`, and the
+/// width of one tab.
+fn tab_bar(tw: f32, th: f32) -> (f32, f32, f32) {
+    let (x0, x1) = (16.0, tw - 16.0);
+    (x0, th - TAB_H - 12.0, (x1 - x0) / MODES.len() as f32)
+}
+
+/// The little picture on a tab.
+fn tab_icon(p: &Painter, mode: Mode, media: bool, cx: f32, cy: f32, c: Color) {
+    match mode {
+        Mode::Media if media => {
+            // A quaver.
+            p.circle(cx - 2.2, cy + 3.6, 2.6, c);
+            p.line(cx + 0.2, cy + 3.6, cx + 0.2, cy - 5.6, c, 1.4);
+            p.line(cx + 0.2, cy - 5.6, cx + 4.6, cy - 3.4, c, 1.4);
+        }
+        Mode::Media => {
+            // A clock.
+            p.stroke_circle(cx, cy, 5.8, c, 1.3);
+            p.line(cx, cy, cx, cy - 3.4, c, 1.3);
+            p.line(cx, cy, cx + 2.6, cy, c, 1.3);
+        }
+        Mode::Controls => {
+            // Two sliders.
+            p.line(cx - 6.0, cy - 2.8, cx + 6.0, cy - 2.8, c, 1.3);
+            p.circle(cx - 2.0, cy - 2.8, 2.0, c);
+            p.line(cx - 6.0, cy + 2.8, cx + 6.0, cy + 2.8, c, 1.3);
+            p.circle(cx + 2.6, cy + 2.8, 2.0, c);
+        }
+        Mode::Calendar => {
+            p.stroke_rrect(cx - 5.6, cy - 4.4, 11.2, 10.4, 2.2, c, 1.2);
+            p.line(cx - 5.6, cy - 1.2, cx + 5.6, cy - 1.2, c, 1.2);
+            p.line(cx - 2.6, cy - 6.4, cx - 2.6, cy - 3.4, c, 1.2);
+            p.line(cx + 2.6, cy - 6.4, cx + 2.6, cy - 3.4, c, 1.2);
         }
     }
 }

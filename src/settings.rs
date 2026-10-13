@@ -13,8 +13,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::Config;
-use crate::gfx::{Align, Color, Gfx};
+use crate::gfx::{Align, Color, Fonts, Gfx, Painter};
 use crate::theme;
+use crate::weather::Lookup;
 
 const CW: f32 = 900.0;
 const CH: f32 = 620.0;
@@ -69,6 +70,8 @@ enum Ctl {
     Button(&'static str),
     /// One option of a list shown a row each (the themes): the value it sets.
     Pick(&'static str),
+    /// Tiles to drag between lanes (which widgets show, where and in what order).
+    Board(Board),
     Note,
     /// A group title with no control.
     Heading,
@@ -92,6 +95,7 @@ fn heading(key: &'static str, title: &'static str) -> Row {
 fn row_h(r: &Row) -> f32 {
     match r.ctl {
         Ctl::Heading => HEAD_H,
+        Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
         Ctl::Note => ROW_H,
         _ if r.desc.is_empty() => COMPACT_H,
         _ => ROW_H,
@@ -107,8 +111,215 @@ fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
     Ctl::Slider { min, max, step, unit }
 }
 
-/// Where a taskbar widget goes.
-const PLACE: Ctl = Ctl::Choice(&[("off", "Off"), ("left", "Left"), ("right", "Right")]);
+/// Room for a board row's title and description, above its lanes.
+const BOARD_HEAD: f32 = 58.0;
+const LANE_H: f32 = 52.0;
+const LANE_GAP: f32 = 6.0;
+/// The lane's name, left of its tiles.
+const LANE_LABEL: f32 = 70.0;
+const TILE_W: f32 = 66.0;
+const TILE_H: f32 = 42.0;
+const TILE_GAP: f32 = 6.0;
+
+/// A set of things arranged by dragging tiles between lanes: shown lanes
+/// (each saved as a comma-separated config value) and a last lane holding
+/// the hidden ones.
+#[derive(Clone, Copy, PartialEq)]
+enum Board {
+    /// The taskbar's widgets: left of the apps, right of them, or off.
+    Taskbar,
+    /// The widgets panel's cards.
+    Panel,
+}
+
+impl Board {
+    /// (config name, label) of everything on the board.
+    fn items(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Board::Taskbar => &[
+                ("weather", "Weather"),
+                ("music", "Music"),
+                ("cpu", "CPU"),
+                ("ram", "Memory"),
+                ("gpu", "GPU"),
+                ("net", "Network"),
+                ("widgets", "Widgets"),
+            ],
+            Board::Panel => {
+                &[("media", "Media"), ("system", "System"), ("weather", "Weather"), ("calendar", "Calendar")]
+            }
+        }
+    }
+
+    fn lanes(self) -> &'static [&'static str] {
+        match self {
+            Board::Taskbar => &["Left", "Right", "Hidden"],
+            Board::Panel => &["Shown", "Hidden"],
+        }
+    }
+
+    /// The config value behind each shown lane.
+    fn keys(self) -> &'static [&'static str] {
+        match self {
+            Board::Taskbar => &["taskbar_left", "taskbar_right"],
+            Board::Panel => &["widgets_panel"],
+        }
+    }
+
+    fn label(self, item: &str) -> &'static str {
+        self.items().iter().find(|(k, _)| *k == item).map_or("", |(_, l)| *l)
+    }
+
+    /// What each lane holds, in order; the hidden lane last. Unknown names
+    /// and repeats in the config are dropped.
+    fn read(self, get: &dyn Fn(&str) -> String) -> Vec<Vec<&'static str>> {
+        let mut seen: Vec<&'static str> = Vec::new();
+        let mut lanes = Vec::new();
+        for key in self.keys() {
+            let mut lane = Vec::new();
+            for name in get(key).split(',') {
+                let name = name.trim().to_ascii_lowercase();
+                // Other spellings the taskbar and panel accept.
+                let name = match (self, name.as_str()) {
+                    (Board::Taskbar, "memory") => "ram",
+                    (Board::Taskbar, "network") => "net",
+                    (Board::Panel, "music") => "media",
+                    (Board::Panel, "stats") => "system",
+                    (_, n) => n,
+                };
+                if let Some(&(item, _)) = self.items().iter().find(|(k, _)| *k == name) {
+                    if !seen.contains(&item) {
+                        seen.push(item);
+                        lane.push(item);
+                    }
+                }
+            }
+            lanes.push(lane);
+        }
+        lanes.push(self.items().iter().map(|(k, _)| *k).filter(|k| !seen.contains(k)).collect());
+        lanes
+    }
+}
+
+/// A tile being dragged on a board (layout units).
+#[derive(Clone, Copy)]
+struct TileDrag {
+    row: usize,
+    item: &'static str,
+    lane: usize,
+    start: (f32, f32),
+    at: (f32, f32),
+    /// Where in the tile it was picked up.
+    grab: (f32, f32),
+    /// Dragged rather than only clicked.
+    moved: bool,
+}
+
+/// Lane `j` of a board whose lanes start at `area`.
+fn lane_rect(area: (f32, f32, f32, f32), j: usize) -> (f32, f32, f32, f32) {
+    (area.0, area.1 + j as f32 * (LANE_H + LANE_GAP), area.2, LANE_H)
+}
+
+/// Tile slot `k` in a lane.
+fn tile_rect(lane: (f32, f32, f32, f32), k: usize) -> (f32, f32) {
+    (lane.0 + LANE_LABEL + k as f32 * (TILE_W + TILE_GAP), lane.1 + (LANE_H - TILE_H) / 2.0)
+}
+
+/// The lane and slot a tile dropped at (x, y) goes to, given the lanes
+/// without it.
+fn drop_slot(area: (f32, f32, f32, f32), lanes: &[Vec<&'static str>], x: f32, y: f32) -> (usize, usize) {
+    let j = ((y - area.1) / (LANE_H + LANE_GAP)).floor().clamp(0.0, lanes.len() as f32 - 1.0) as usize;
+    let lane = lane_rect(area, j);
+    let k = (0..lanes[j].len()).filter(|&k| tile_rect(lane, k).0 + TILE_W / 2.0 < x).count();
+    (j, k)
+}
+
+/// The little picture on a board tile.
+fn tile_icon(p: &Painter, item: &str, cx: f32, cy: f32, c: Color) {
+    match item {
+        "weather" => crate::ui::weather_icon(p, cx, cy, 17.0, 2, true, c.3),
+        "music" | "media" => {
+            p.circle(cx - 2.4, cy + 4.0, 2.8, c);
+            p.line(cx + 0.2, cy + 4.0, cx + 0.2, cy - 6.0, c, 1.4);
+            p.line(cx + 0.2, cy - 6.0, cx + 5.0, cy - 3.6, c, 1.4);
+        }
+        "cpu" => {
+            p.stroke_rrect(cx - 5.0, cy - 5.0, 10.0, 10.0, 1.5, c, 1.3);
+            p.rrect(cx - 2.0, cy - 2.0, 4.0, 4.0, 0.8, c);
+            for t in [-2.5, 2.5] {
+                p.line(cx + t, cy - 8.0, cx + t, cy - 5.5, c, 1.2);
+                p.line(cx + t, cy + 5.5, cx + t, cy + 8.0, c, 1.2);
+                p.line(cx - 8.0, cy + t, cx - 5.5, cy + t, c, 1.2);
+                p.line(cx + 5.5, cy + t, cx + 8.0, cy + t, c, 1.2);
+            }
+        }
+        "ram" => {
+            p.stroke_rrect(cx - 8.0, cy - 4.5, 16.0, 8.0, 1.5, c, 1.3);
+            for i in 0..3 {
+                p.rrect(cx - 5.5 + i as f32 * 4.0, cy - 2.5, 3.0, 4.0, 0.6, c);
+            }
+            for i in 0..4 {
+                let x = cx - 6.0 + i as f32 * 4.0;
+                p.line(x, cy + 3.5, x, cy + 6.0, c, 1.2);
+            }
+        }
+        "gpu" => {
+            p.stroke_rrect(cx - 7.0, cy - 5.0, 15.0, 10.0, 1.5, c, 1.3);
+            p.stroke_circle(cx + 1.0, cy, 2.8, c, 1.2);
+            p.line(cx - 7.0, cy + 5.0, cx - 7.0, cy + 7.5, c, 1.3);
+        }
+        "net" => {
+            p.line(cx - 3.0, cy + 6.0, cx - 3.0, cy - 4.0, c, 1.4);
+            p.polygon(&[(cx - 6.0, cy - 3.0), (cx - 3.0, cy - 7.0), (cx, cy - 3.0)], c);
+            p.line(cx + 3.0, cy - 6.0, cx + 3.0, cy + 4.0, c, 1.4);
+            p.polygon(&[(cx, cy + 3.0), (cx + 3.0, cy + 7.0), (cx + 6.0, cy + 3.0)], c);
+        }
+        "widgets" => {
+            for (dx, dy) in [(-6.0, -6.0), (1.0, -6.0), (-6.0, 1.0), (1.0, 1.0)] {
+                p.rrect(cx + dx, cy + dy, 5.0, 5.0, 1.4, c);
+            }
+        }
+        "system" => {
+            p.arc(cx, cy + 2.5, 7.0, std::f32::consts::PI, std::f32::consts::TAU, c, 1.4);
+            p.line(cx, cy + 2.5, cx + 3.5, cy - 2.5, c, 1.4);
+            p.circle(cx, cy + 2.5, 1.6, c);
+        }
+        "calendar" => {
+            p.stroke_rrect(cx - 6.0, cy - 5.0, 12.0, 11.0, 2.2, c, 1.3);
+            p.line(cx - 6.0, cy - 1.5, cx + 6.0, cy - 1.5, c, 1.3);
+            p.line(cx - 3.0, cy - 7.0, cx - 3.0, cy - 4.0, c, 1.3);
+            p.line(cx + 3.0, cy - 7.0, cx + 3.0, cy - 4.0, c, 1.3);
+        }
+        _ => {}
+    }
+}
+
+/// A board tile: its picture over its name.
+fn draw_tile(p: &Painter, f: &Fonts, item: &str, label: &str, x: f32, y: f32, bg: f32, a: f32) {
+    p.rrect(x, y, TILE_W, TILE_H, 9.0, Color::white(bg));
+    tile_icon(p, item, x + TILE_W / 2.0, y + 15.0, Color::white(0.92 * a));
+    p.text(label, &f.small, x, y + 24.0, TILE_W, 16.0, Align::Center, Color::white(0.8 * a));
+}
+
+const GOOD: Color = Color(0.42, 0.84, 0.52, 1.0);
+const BAD: Color = Color(1.0, 0.46, 0.42, 1.0);
+const WARN: Color = Color(0.98, 0.76, 0.36, 1.0);
+
+/// The line under the Location box: whether the place was found (and
+/// which one), still being looked up, or not found. `on` is whether the
+/// weather is turned on at all.
+fn location_note(location: &str, on: bool) -> Option<(String, Color, Option<bool>)> {
+    if !on {
+        return None;
+    }
+    Some(match crate::weather::lookup(location)? {
+        Lookup::Checking => ("Looking it up\u{2026}".into(), Color::white(0.55), None),
+        Lookup::Found(name) if location.trim().is_empty() => (format!("From your IP: {name}"), GOOD, Some(true)),
+        Lookup::Found(name) => (format!("Found: {name}"), GOOD, Some(true)),
+        Lookup::NotFound => ("Not found. Try \"City, Country\" or lat,lon.".into(), BAD, Some(false)),
+        Lookup::Offline => ("Couldn't check: no connection. Retrying soon.".into(), WARN, None),
+    })
+}
 
 fn rows(section: usize) -> Vec<Row> {
     use Ctl::*;
@@ -305,38 +516,25 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_place_network", "Network", "", Toggle),
         ],
         5 => vec![
-            heading("h_where", "Where each widget goes"),
-            row("place_weather", "Weather", "Where the weather sits on the taskbar.", PLACE),
-            row("place_music", "Music", "What's playing, with a play / pause button.", PLACE),
-            row("place_cpu", "CPU", "Processor load.", PLACE),
-            row("place_ram", "Memory", "Memory in use.", PLACE),
-            row("place_gpu", "GPU", "Graphics load.", PLACE),
-            row("place_net", "Network", "Download and upload speed.", PLACE),
-            row("place_widgets", "Widgets button", "Opens the widgets panel.", PLACE),
-            heading("h_order", "Order and panel"),
+            heading("h_bar", "Taskbar"),
             row(
-                "taskbar_left",
-                "Left side order",
-                "Left to right: weather, music, cpu, ram, gpu, net, widgets.",
-                Text { secret: false },
+                "taskbar_board",
+                "Taskbar widgets",
+                "Drag to arrange, or between sides. Click one to show or hide it.",
+                Board(self::Board::Taskbar),
             ),
+            heading("h_panel", "Widgets panel"),
             row(
-                "taskbar_right",
-                "Right side order",
-                "Left to right, ending at the system tray.",
-                Text { secret: false },
+                "panel_board",
+                "Panel cards",
+                "Drag to put them in order. Click one to show or hide it.",
+                Board(self::Board::Panel),
             ),
             row(
                 "widgets_notifications",
                 "Notifications card",
                 "Windows' notifications at the top of the panel. The clock opens it.",
                 Toggle,
-            ),
-            row(
-                "widgets_panel",
-                "Panel cards",
-                "In order: media, system, weather, calendar. Remove one to hide it.",
-                Text { secret: false },
             ),
             row("widgets_columns", "Panel columns", "Cards side by side.", Choice(&[("1", "One"), ("2", "Two")])),
             row(
@@ -425,6 +623,8 @@ enum Hit {
     Row(usize),
     /// The "reset to default" button of a row.
     Reset(usize),
+    /// A board tile: row, lane, slot.
+    Tile(usize, usize, usize),
 }
 
 /// The default for `key`, if the row should offer a reset button.
@@ -452,6 +652,8 @@ fn changed(r: &Row, value: &str) -> Option<String> {
 
 pub enum Change {
     Set(&'static str, String),
+    /// Several values at once (e.g. both sides of the taskbar).
+    Many(Vec<(&'static str, String)>),
     Action(&'static str),
 }
 
@@ -463,6 +665,7 @@ pub struct Settings {
     hovered: Option<Hit>,
     tracking: bool,
     drag: Option<(usize, f32)>,
+    tile_drag: Option<TileDrag>,
     /// Text boxes: window, row index, and the text they were loaded with (only
     /// a box the user actually edited is written back).
     edits: Vec<(HWND, usize, String)>,
@@ -508,6 +711,7 @@ impl Settings {
                 hovered: None,
                 tracking: false,
                 drag: None,
+                tile_drag: None,
                 edits: Vec::new(),
                 font: HFONT::default(),
                 brush: CreateSolidBrush(COLORREF(0x002B2B2B)),
@@ -596,6 +800,13 @@ impl Settings {
             Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
             // The whole row is the button.
             Ctl::Pick(_) => (SIDEBAR + 24.0, y, self.content_w(), h),
+            // The lanes, under the title.
+            Ctl::Board(b) => (
+                SIDEBAR + 24.0 + 18.0,
+                y + BOARD_HEAD,
+                self.content_w() - 36.0,
+                b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP,
+            ),
             Ctl::Note | Ctl::Heading => (x1, y, 0.0, 0.0),
         }
     }
@@ -676,6 +887,18 @@ impl Settings {
             }
         }
         for (i, r) in rows(self.section).iter().enumerate() {
+            if let Ctl::Board(b) = r.ctl {
+                let area = self.ctl_rect(i, &r.ctl);
+                for (j, lane) in b.read(get).iter().enumerate() {
+                    for k in 0..lane.len() {
+                        let (tx, ty) = tile_rect(lane_rect(area, j), k);
+                        if lx >= tx && lx < tx + TILE_W && ly >= ty && ly < ty + TILE_H && ly >= TOP - 8.0 {
+                            return Some(Hit::Tile(i, j, k));
+                        }
+                    }
+                }
+                continue;
+            }
             let (cx, cy, cw, ch) = self.ctl_rect(i, &r.ctl);
             let (cx, cw) = if matches!(r.ctl, Ctl::Slider { .. }) { (cx - 8.0, cw + 16.0) } else { (cx, cw) };
             if lx >= cx && lx < cx + cw && ly >= cy && ly < cy + ch && ly >= TOP - 8.0 {
@@ -705,6 +928,15 @@ impl Settings {
                 };
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
+        }
+        if let Some(d) = &mut self.tile_drag {
+            let at = (x as f32 / self.k, y as f32 / self.k);
+            d.at = at;
+            if (at.0 - d.start.0).hypot(at.1 - d.start.1) > 4.0 {
+                d.moved = true;
+            }
+            self.invalidate();
+            return;
         }
         if let Some((i, _)) = self.drag {
             if let Some(v) = self.slider_value(i, x) {
@@ -744,6 +976,20 @@ impl Settings {
                 }
                 self.invalidate();
                 Some(Change::Set(r.key, d))
+            }
+            Hit::Tile(i, j, k) => {
+                let r = rows(self.section).into_iter().nth(i)?;
+                let Ctl::Board(b) = r.ctl else { return None };
+                let item = *b.read(get).get(j)?.get(k)?;
+                let (tx, ty) = tile_rect(lane_rect(self.ctl_rect(i, &r.ctl), j), k);
+                let at = (x as f32 / self.k, y as f32 / self.k);
+                self.tile_drag =
+                    Some(TileDrag { row: i, item, lane: j, start: at, at, grab: (at.0 - tx, at.1 - ty), moved: false });
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+                self.invalidate();
+                None
             }
             Hit::Nav(i) => {
                 if i != self.section {
@@ -785,7 +1031,31 @@ impl Settings {
         }
     }
 
-    pub fn on_up(&mut self) -> Option<Change> {
+    pub fn on_up(&mut self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Change> {
+        if let Some(d) = self.tile_drag.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            self.invalidate();
+            let r = rows(self.section).into_iter().nth(d.row)?;
+            let Ctl::Board(b) = r.ctl else { return None };
+            let mut lanes = b.read(get);
+            for lane in &mut lanes {
+                lane.retain(|&n| n != d.item);
+            }
+            let hidden = lanes.len() - 1;
+            let (j, k) = if d.moved {
+                drop_slot(self.ctl_rect(d.row, &r.ctl), &lanes, x as f32 / self.k, y as f32 / self.k)
+            } else if d.lane == hidden {
+                // A click shows a hidden one, at the end of the last lane...
+                (hidden - 1, lanes[hidden - 1].len())
+            } else {
+                // ...and hides a shown one.
+                (hidden, lanes[hidden].len())
+            };
+            lanes[j].insert(k.min(lanes[j].len()), d.item);
+            return Some(Change::Many(b.keys().iter().zip(&lanes).map(|(key, l)| (*key, l.join(","))).collect()));
+        }
         let (i, v) = self.drag.take()?;
         unsafe {
             let _ = ReleaseCapture();
@@ -892,7 +1162,11 @@ impl Settings {
                     }
                     let row_hover = matches!(r.ctl, Ctl::Pick(_)) && self.hovered == Some(Hit::Row(i));
                     p.rrect(x0, y, cw, h, 8.0, Color::white(if row_hover { 0.075 } else { 0.045 }));
-                    let text_w = cw - 330.0;
+                    let text_w = match r.ctl {
+                        Ctl::Pick(_) => cw - 180.0,
+                        Ctl::Board(_) => cw - 36.0,
+                        _ => cw - 330.0,
+                    };
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
                     } else if r.key == "screens_info" {
@@ -909,6 +1183,13 @@ impl Settings {
                     } else {
                         r.desc.to_string()
                     };
+                    // Live feedback on the location: found (and where), or not.
+                    let note = if r.key == "weather_location" {
+                        location_note(&get(r.key), get("weather") == "true")
+                    } else {
+                        None
+                    };
+                    let (desc, tone, mark) = note.unwrap_or((desc, Color::white(0.55), None));
                     if desc.is_empty() {
                         p.text(
                             r.title,
@@ -922,7 +1203,19 @@ impl Settings {
                         );
                     } else {
                         p.text(r.title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
-                        p.text(&desc, &f.small, x0 + 18.0, y + 30.0, text_w, 18.0, Align::Left, Color::white(0.55));
+                        let mut dx = x0 + 18.0;
+                        if let Some(ok) = mark {
+                            let (mx, my) = (dx + 5.0, y + 39.0);
+                            if ok {
+                                p.line(mx - 4.0, my, mx - 1.2, my + 3.0, tone, 1.6);
+                                p.line(mx - 1.2, my + 3.0, mx + 4.5, my - 3.5, tone, 1.6);
+                            } else {
+                                p.line(mx - 3.5, my - 3.5, mx + 3.5, my + 3.5, tone, 1.6);
+                                p.line(mx - 3.5, my + 3.5, mx + 3.5, my - 3.5, tone, 1.6);
+                            }
+                            dx += 15.0;
+                        }
+                        p.text(&desc, &f.small, dx, y + 30.0, text_w - (dx - x0 - 18.0), 18.0, Align::Left, tone);
                     }
                     let (cx, cy, cwid, ch) = self.ctl_rect(i, &r.ctl);
                     let hovered = self.hovered == Some(Hit::Row(i));
@@ -1003,18 +1296,10 @@ impl Settings {
                             let on = get(r.key) == value;
                             let t = theme::THEMES.iter().find(|t| t.key == value).map(|t| theme::resolve(*t));
                             let x1 = cx + cwid - 18.0;
-                            // A little preview: the panel colour, its outline and accent.
+                            // A little sample of the glass, over a colourful backdrop.
                             if let Some(t) = t {
-                                let (sx, sy, sw, sh) = (x1 - 128.0, y + (h - 30.0) / 2.0, 84.0, 30.0);
-                                let (tr, tg, tb) = t.solid;
-                                p.rrect(sx, sy, sw, sh, 7.0, Color(tr, tg, tb, 1.0));
-                                if t.sheen > 0.0 {
-                                    p.rrect(sx + 1.0, sy + 1.0, sw - 2.0, sh * 0.45, 6.0, Color::white(t.sheen * 0.6));
-                                }
-                                let border = if t.border.3 > 0.0 { t.border } else { Color::white(0.06) };
-                                p.stroke_rrect(sx + 0.5, sy + 0.5, sw - 1.0, sh - 1.0, 7.0, border, 1.0);
-                                p.rrect(sx + 12.0, sy + sh / 2.0 - 2.0, 30.0, 4.0, 2.0, t.accent);
-                                p.circle(sx + sw - 16.0, sy + sh / 2.0, 4.0, Color::white(0.8));
+                                let (sx, sy, sw, sh) = (x1 - 142.0, y + (h - 36.0) / 2.0, 98.0, 36.0);
+                                theme::preview(&p, &t, sx, sy, sw, sh, 9.0);
                             }
                             // A radio button.
                             let (rx, ry) = (x1 - 11.0, y + h / 2.0);
@@ -1024,6 +1309,101 @@ impl Settings {
                             } else {
                                 let a = if hovered { 0.75 } else { 0.5 };
                                 p.stroke_circle(rx, ry, 10.0, Color::white(a), 1.4);
+                            }
+                        }
+                        Ctl::Board(b) => {
+                            let area = (cx, cy, cwid, ch);
+                            let mut lanes = b.read(get);
+                            let drag = self.tile_drag.filter(|d| d.row == i && d.moved);
+                            // While a tile is dragged, the others make room where it would land.
+                            let target = drag.map(|d| {
+                                for lane in &mut lanes {
+                                    lane.retain(|&n| n != d.item);
+                                }
+                                drop_slot(area, &lanes, d.at.0, d.at.1)
+                            });
+                            let hidden = lanes.len() - 1;
+                            for (j, lane) in lanes.iter().enumerate() {
+                                let lr = lane_rect(area, j);
+                                p.rrect(
+                                    lr.0,
+                                    lr.1,
+                                    lr.2,
+                                    lr.3,
+                                    10.0,
+                                    Color::white(if j == hidden { 0.02 } else { 0.035 }),
+                                );
+                                p.stroke_rrect(
+                                    lr.0 + 0.5,
+                                    lr.1 + 0.5,
+                                    lr.2 - 1.0,
+                                    lr.3 - 1.0,
+                                    10.0,
+                                    Color::white(0.06),
+                                    1.0,
+                                );
+                                p.text(
+                                    b.lanes()[j],
+                                    &f.small,
+                                    lr.0 + 14.0,
+                                    lr.1,
+                                    LANE_LABEL - 14.0,
+                                    lr.3,
+                                    Align::Left,
+                                    Color::white(0.5),
+                                );
+                                let mut slot = 0;
+                                for (k, &item) in lane.iter().enumerate() {
+                                    if target == Some((j, k)) {
+                                        slot += 1;
+                                    }
+                                    let (tx, ty) = tile_rect(lr, slot);
+                                    let pressed = self.tile_drag.is_some_and(|d| d.row == i && d.item == item);
+                                    let hovered = self.hovered == Some(Hit::Tile(i, j, k));
+                                    let bg = if pressed {
+                                        0.16
+                                    } else if hovered {
+                                        0.12
+                                    } else {
+                                        0.075
+                                    };
+                                    let a = if j == hidden { 0.45 } else { 1.0 };
+                                    draw_tile(&p, f, item, b.label(item), tx, ty, bg, a);
+                                    slot += 1;
+                                }
+                                if let Some((tj, tk)) = target.filter(|&(tj, _)| tj == j) {
+                                    let (tx, ty) = tile_rect(lr, tk);
+                                    p.rrect(tx, ty, TILE_W, TILE_H, 9.0, theme::accent().alpha(0.14));
+                                    p.stroke_rrect(
+                                        tx + 0.75,
+                                        ty + 0.75,
+                                        TILE_W - 1.5,
+                                        TILE_H - 1.5,
+                                        9.0,
+                                        theme::accent(),
+                                        1.5,
+                                    );
+                                } else if lane.is_empty() {
+                                    let hint = if j == hidden { "Nothing hidden" } else { "Drag one here" };
+                                    let (tx, _) = tile_rect(lr, 0);
+                                    p.text(hint, &f.small, tx, lr.1, 200.0, lr.3, Align::Left, Color::white(0.3));
+                                }
+                            }
+                            // The dragged tile follows the pointer, lifted a little.
+                            if let Some(d) = drag {
+                                let (tx, ty) = (d.at.0 - d.grab.0, d.at.1 - d.grab.1);
+                                p.rrect(tx + 2.0, ty + 4.0, TILE_W, TILE_H, 9.0, Color(0.0, 0.0, 0.0, 0.35));
+                                p.rrect(tx, ty, TILE_W, TILE_H, 9.0, Color(0.20, 0.20, 0.22, 1.0));
+                                draw_tile(&p, f, d.item, b.label(d.item), tx, ty, 0.06, 1.0);
+                                p.stroke_rrect(
+                                    tx + 0.75,
+                                    ty + 0.75,
+                                    TILE_W - 1.5,
+                                    TILE_H - 1.5,
+                                    9.0,
+                                    theme::accent(),
+                                    1.5,
+                                );
                             }
                         }
                         Ctl::Note | Ctl::Heading => {}
@@ -1064,5 +1444,36 @@ impl Drop for Settings {
             }
             let _ = DeleteObject(self.brush.into());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boards_read_lists() {
+        let get = |k: &str| match k {
+            "taskbar_left" => "Weather, memory,bogus".to_string(),
+            "taskbar_right" => "cpu,gpu,gpu,weather".to_string(),
+            _ => String::new(),
+        };
+        let lanes = Board::Taskbar.read(&get);
+        assert_eq!(lanes, vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "widgets"]]);
+        let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
+        assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather"]]);
+    }
+
+    #[test]
+    fn tiles_drop_between_others() {
+        let area = (0.0, 0.0, 600.0, 2.0 * LANE_H + LANE_GAP);
+        let lanes = vec![vec!["media", "system"], vec!["weather"]];
+        let (x0, _) = tile_rect(lane_rect(area, 0), 0);
+        // Left of the first tile's middle: first. Past the second: last.
+        assert_eq!(drop_slot(area, &lanes, x0 + 10.0, 10.0), (0, 0));
+        assert_eq!(drop_slot(area, &lanes, x0 + 2.0 * (TILE_W + TILE_GAP), 10.0), (0, 2));
+        // Lower down, the hidden lane; below everything, still the last lane.
+        assert_eq!(drop_slot(area, &lanes, 0.0, LANE_H + 10.0).0, 1);
+        assert_eq!(drop_slot(area, &lanes, 0.0, 999.0).0, 1);
     }
 }

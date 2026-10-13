@@ -838,12 +838,9 @@ impl Launcher {
             crate::mousehook::set_rect(0, Some(RECT { left: x, top: y, right: x + pw, bottom: y + ph }));
         }
 
-        let settled = self.open && self.acrylic && self.reveal.value > 0.97;
-        if settled {
-            self.backdrop.place(RECT { left: x, top: y, right: x + pw, bottom: y + ph }, self.hwnd);
-        } else {
-            self.backdrop.hide();
-        }
+        // Glass while it slides in and out too, not only once it has landed.
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        let screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
 
         // Icons for what is on screen (loaded lazily through the dock's cache).
         let searching = self.searching();
@@ -892,8 +889,8 @@ impl Launcher {
             let f = &gfx.fonts;
             let r = self.radius;
             // Over the blur only the theme's wash (it also keeps the pixels
-            // clickable); while animating or without blur, a solid panel.
-            theme::panel(&p, 0.0, 0.0, g.w, g.h, r, settled, self.opacity, 0.97, 1.0);
+            // clickable); without blur a solid panel.
+            theme::panel(&p, 0.0, 0.0, g.w, g.h, r, glass, self.opacity, 0.97, 1.0);
             if g.show_side {
                 p.clip(1.0, 1.0, g.side - 1.0, g.h - 2.0);
                 p.rrect(0.0, 0.0, g.side + r * 2.0, g.h, r, Color(0.0, 0.0, 0.0, 0.16));
@@ -1313,7 +1310,13 @@ impl Launcher {
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
-        gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)
+        let shown = gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha);
+        if !glass {
+            self.backdrop.hold(screen);
+        } else if self.backdrop.track(screen, None, self.hwnd) {
+            self.dirty = true;
+        }
+        shown
     }
 }
 

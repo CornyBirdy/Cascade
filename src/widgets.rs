@@ -374,19 +374,16 @@ impl Widgets {
         if self.open {
             crate::mousehook::set_rect(2, Some(RECT { left: x, top: y, right: x + pw, bottom: y + ph }));
         }
-        let settled = self.open && self.acrylic && self.reveal.value > 0.97;
-        if settled {
-            self.backdrop.place(RECT { left: x, top: y, right: x + pw, bottom: y + ph }, self.hwnd);
-        } else {
-            self.backdrop.hide();
-        }
+        // Glass while it slides in and out too (placed once the frame is out).
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        let screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
 
         self.hits.clear();
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
             let f = &gfx.fonts;
-            theme::panel(&p, 0.0, 0.0, w, h, self.radius, settled, self.opacity, 0.97, 1.0);
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, glass, self.opacity, 0.97, 1.0);
 
             // Header with the customise button.
             p.text("Widgets", &f.title, PAD + 4.0, 0.0, 200.0, HEADER, Align::Left, Color::white(0.95));
@@ -419,7 +416,13 @@ impl Widgets {
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
-        gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)
+        let shown = gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha);
+        if !glass {
+            self.backdrop.hold(screen);
+        } else if self.backdrop.track(screen, None, self.hwnd) {
+            self.dirty = true;
+        }
+        shown
     }
 
     fn notifications_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
