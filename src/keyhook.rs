@@ -18,7 +18,7 @@
 //! and shortly afterwards the key state is checked and a release sent if it's
 //! still down.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -29,6 +29,8 @@ use crate::msg;
 /// Set in the admin helper, which tells the main Cascade window instead.
 static IN_HELPER: AtomicBool = AtomicBool::new(false);
 static MAIN_SEEN: AtomicBool = AtomicBool::new(false);
+/// Tick count of the latest Win key-down (repeats included).
+static LAST_WIN: AtomicU32 = AtomicU32::new(0);
 static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Sent to the admin helper's window to check the keys afterwards.
@@ -209,7 +211,12 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // Win key.
             if WIN_ON.load(Ordering::Relaxed) {
                 if is_win && down {
-                    if !WIN_DOWN.load(Ordering::Relaxed) && handled_here() {
+                    // A Win release this hook never saw (an elevated window had
+                    // the keyboard) leaves the key looking held. Real repeats
+                    // come at least every second, so a longer gap means stale.
+                    let gap = k.time.wrapping_sub(LAST_WIN.swap(k.time, Ordering::Relaxed));
+                    let stale = WIN_DOWN.load(Ordering::Relaxed) && gap > 1500;
+                    if (!WIN_DOWN.load(Ordering::Relaxed) || stale) && handled_here() {
                         WIN_DOWN.store(true, Ordering::Relaxed);
                         COMBO.store(false, Ordering::Relaxed);
                         // Break the lone Win now, while it's held; the real

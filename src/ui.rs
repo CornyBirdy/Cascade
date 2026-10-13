@@ -230,6 +230,8 @@ struct App {
     edge_key: String,
     /// Whether the taskbar is being held in view for an open pop-up.
     dock_held: bool,
+    /// When the Win key last closed the menu.
+    win_closed_at: Option<Instant>,
     /// When a click outside last closed the Start menu or tray flyout, so the
     /// same click on its button doesn't open it again.
     outside_close: Option<Instant>,
@@ -651,6 +653,7 @@ impl App {
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
             widgets_seen: false,
             dock_held: false,
+            win_closed_at: None,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -1406,7 +1409,7 @@ impl App {
         if event == EVENT_SYSTEM_FOREGROUND
             && self.cfg.launcher
             && self.cfg.launcher_win_key
-            && (self.launcher.open || self.launcher.closed_within(800))
+            && self.win_closed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(800))
             && shell::is_start_menu(hwnd)
         {
             config::log("start: the Windows Start menu opened as Cascade's closed; closing it");
@@ -1670,6 +1673,7 @@ impl App {
 
     fn toggle_launcher(&mut self) {
         if self.launcher.open {
+            self.win_closed_at = Some(Instant::now());
             self.launcher.hide();
         } else {
             self.open_launcher();
