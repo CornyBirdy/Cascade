@@ -1,5 +1,5 @@
-//! The widgets panel: cards for what's playing, system stats with graphs,
-//! the weather and a calendar, in the order set in Settings. It opens above
+//! The widgets panel: cards for Windows' notifications, what's playing,
+//! system stats with graphs, the weather and a calendar, in the order set in Settings. It opens above
 //! the taskbar's right side and closes when you click away.
 
 use std::collections::VecDeque;
@@ -16,6 +16,7 @@ use crate::backdrop::Backdrop;
 use crate::dock::ACCENT;
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::media::MediaInfo;
+use crate::notifications::{Access, Snapshot};
 use crate::spring::Spring;
 use crate::sysmon::{self, Sampler, HISTORY};
 use crate::weather::Weather;
@@ -26,9 +27,13 @@ const GAP: f32 = 10.0;
 const HEADER: f32 = 40.0;
 const GREEN: Color = Color(0.40, 0.85, 0.50, 1.0);
 const ORANGE: Color = Color(1.0, 0.65, 0.30, 1.0);
+const NOTIF_ROW: f32 = 52.0;
+/// Notifications listed at once (the newest).
+const NOTIF_MAX: usize = 5;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Card {
+    Notifications,
     Media,
     System,
     Weather,
@@ -40,6 +45,7 @@ fn parse_cards(list: &str) -> Vec<Card> {
     let mut out = Vec::new();
     for name in list.split(',') {
         let card = match name.trim().to_ascii_lowercase().as_str() {
+            "notifications" | "notification" => Card::Notifications,
             "media" | "music" => Card::Media,
             "system" | "stats" => Card::System,
             "weather" => Card::Weather,
@@ -59,6 +65,9 @@ enum Target {
     Play,
     Next,
     Gear,
+    NotifClear,
+    NotifRemove(u32),
+    NotifSettings,
 }
 
 pub enum Action {
@@ -66,6 +75,9 @@ pub enum Action {
     PlayPause,
     Next,
     Customise,
+    ClearNotifications,
+    RemoveNotification(u32),
+    NotificationSettings,
 }
 
 /// What the cards show.
@@ -74,6 +86,7 @@ pub struct Ctx<'a> {
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
     pub weather: Option<&'a Weather>,
+    pub notifs: &'a Snapshot,
 }
 
 pub struct Widgets {
@@ -85,6 +98,8 @@ pub struct Widgets {
     reveal: Spring,
     cards: Vec<Card>,
     columns: usize,
+    /// Tallest the panel may be (layout units) before it goes to two columns.
+    max_h: f32,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -149,6 +164,13 @@ fn spark(p: &Painter, hist: &VecDeque<f32>, x: f32, y: f32, w: f32, h: f32, max:
 
 fn card_height(card: Card, ctx: &Ctx) -> f32 {
     match card {
+        Card::Notifications => {
+            let rows = match ctx.notifs.access {
+                Access::Allowed => ctx.notifs.items.len().clamp(1, NOTIF_MAX),
+                _ => 1,
+            };
+            34.0 + rows as f32 * NOTIF_ROW + 6.0
+        }
         Card::Media => 128.0,
         Card::System => {
             let s = &ctx.sampler.stats;
@@ -178,6 +200,7 @@ impl Widgets {
             reveal: Spring::new(0.0, 600.0, 44.0),
             cards: Vec::new(),
             columns: 1,
+            max_h: f32::MAX,
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -197,10 +220,26 @@ impl Widgets {
         self.dirty = true;
     }
 
-    /// Opens with its right edge at screen x `right`, just above `bottom`.
-    pub fn show(&mut self, cards: &str, columns: u32, right: i32, bottom: i32, k: f32) {
+    /// Opens with its right edge at screen x `right`, just above `bottom`,
+    /// at most `max_h` screen pixels tall (two columns if one is too tall).
+    /// `notifications` puts the Notifications card first.
+    pub fn show(
+        &mut self,
+        cards: &str,
+        notifications: bool,
+        columns: u32,
+        right: i32,
+        bottom: i32,
+        max_h: i32,
+        k: f32,
+    ) {
         self.cards = parse_cards(cards);
+        self.cards.retain(|&c| c != Card::Notifications);
+        if notifications {
+            self.cards.insert(0, Card::Notifications);
+        }
         self.columns = columns.clamp(1, 2) as usize;
+        self.max_h = max_h as f32 / k;
         self.anchor = (right, bottom);
         self.k = k;
         self.open = true;
@@ -254,6 +293,12 @@ impl Widgets {
         }
     }
 
+    /// Forgets the hovered button (its item just went away).
+    pub fn hovered_clear(&mut self) {
+        self.hovered = None;
+        self.dirty = true;
+    }
+
     pub fn on_leave(&mut self) {
         self.tracking = false;
         self.hovered = None;
@@ -266,6 +311,9 @@ impl Widgets {
             Target::Play => Action::PlayPause,
             Target::Next => Action::Next,
             Target::Gear => Action::Customise,
+            Target::NotifClear => Action::ClearNotifications,
+            Target::NotifRemove(id) => Action::RemoveNotification(id),
+            Target::NotifSettings => Action::NotificationSettings,
         })
     }
 
@@ -278,7 +326,14 @@ impl Widgets {
     }
 
     fn layout(&self, ctx: &Ctx) -> Layout {
-        let cols = self.columns.max(1);
+        let one = self.layout_in(ctx, self.columns.max(1));
+        if one.h > self.max_h && self.columns == 1 && self.cards.len() > 1 {
+            return self.layout_in(ctx, 2);
+        }
+        one
+    }
+
+    fn layout_in(&self, ctx: &Ctx, cols: usize) -> Layout {
         let mut col_y = vec![HEADER; cols];
         let mut out = Vec::new();
         for &card in &self.cards {
@@ -355,6 +410,7 @@ impl Widgets {
                 p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.05));
                 p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.07), 1.0);
                 match card {
+                    Card::Notifications => self.notifications_card(&p, f, ctx, cx, cy),
                     Card::Media => self.media_card(&p, f, ctx, cx, cy),
                     Card::System => system_card(&p, f, ctx, cx, cy),
                     Card::Weather => weather_card(&p, f, ctx, cx, cy),
@@ -364,6 +420,58 @@ impl Widgets {
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
         gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)
+    }
+
+    fn notifications_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
+        let n = ctx.notifs;
+        p.text("Notifications", &f.label, x + 14.0, y + 6.0, 200.0, 26.0, Align::Left, Color::white(0.9));
+        let top = y + 34.0;
+        match n.access {
+            Access::Unknown => {
+                p.text("Loading\u{2026}", &f.body, x, top, CARD_W, NOTIF_ROW, Align::Center, Color::white(0.5));
+            }
+            Access::Denied => {
+                let msg = "Cascade isn't allowed to read notifications.";
+                p.text(msg, &f.small, x + 14.0, top, CARD_W - 28.0, 18.0, Align::Left, Color::white(0.6));
+                let (bx, by, bw, bh) = (x + 14.0, top + 22.0, 170.0, 24.0);
+                let a = if self.hovered == Some(Target::NotifSettings) { 0.16 } else { 0.09 };
+                p.rrect(bx, by, bw, bh, 6.0, Color::white(a));
+                p.text("Open privacy settings", &f.small, bx, by, bw, bh, Align::Center, Color::white(0.9));
+                self.hits.push((Target::NotifSettings, bx, by, bw, bh));
+            }
+            Access::Allowed if n.items.is_empty() => {
+                p.text("No new notifications", &f.body, x, top, CARD_W, NOTIF_ROW, Align::Center, Color::white(0.5));
+            }
+            Access::Allowed => {
+                let (cw, ch) = (70.0, 22.0);
+                let (bx, by) = (x + CARD_W - 10.0 - cw, y + 8.0);
+                if self.hovered == Some(Target::NotifClear) {
+                    p.rrect(bx, by, cw, ch, 6.0, Color::white(0.10));
+                }
+                p.text("Clear all", &f.small, bx, by, cw, ch, Align::Center, Color::white(0.75));
+                self.hits.push((Target::NotifClear, bx, by, cw, ch));
+                let tw = CARD_W - 28.0 - 30.0;
+                for (i, item) in n.items.iter().take(NOTIF_MAX).enumerate() {
+                    let ry = top + i as f32 * NOTIF_ROW;
+                    if i > 0 {
+                        p.rrect(x + 14.0, ry, CARD_W - 28.0, 1.0, 0.0, Color::white(0.06));
+                    }
+                    p.text(&item.app, &f.small, x + 14.0, ry + 4.0, tw, 15.0, Align::Left, Color::white(0.5));
+                    p.text(&item.title, &f.label, x + 14.0, ry + 18.0, tw, 16.0, Align::Left, Color::white(0.95));
+                    p.text(&item.body, &f.small, x + 14.0, ry + 34.0, tw, 15.0, Align::Left, Color::white(0.65));
+                    // Dismiss.
+                    let t = Target::NotifRemove(item.id);
+                    let (cx, cy) = (x + CARD_W - 26.0, ry + NOTIF_ROW / 2.0);
+                    if self.hovered == Some(t) {
+                        p.circle(cx, cy, 11.0, Color::white(0.10));
+                    }
+                    let c = Color::white(0.7);
+                    p.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, c, 1.3);
+                    p.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, c, 1.3);
+                    self.hits.push((t, cx - 12.0, cy - 12.0, 24.0, 24.0));
+                }
+            }
+        }
     }
 
     fn media_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
@@ -510,6 +618,7 @@ mod tests {
     fn parses_card_list() {
         assert!(parse_cards("media, system,Weather,bogus,media") == [Card::Media, Card::System, Card::Weather]);
         assert!(parse_cards("").is_empty());
+        assert!(parse_cards("calendar,notifications") == [Card::Calendar, Card::Notifications]);
     }
 
     #[test]

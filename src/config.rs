@@ -37,7 +37,7 @@ hide_taskbar = true
 taskbar_style = full
 # center or left
 taskbar_align = center
-# with_apps = Start sits with the apps, right = Start alone on its own island at the far right.
+# with_apps = Start sits with the apps (centre or left, as above), left = Start alone on its own island at the far left.
 taskbar_start = with_apps
 # Gap between the taskbar and the screen edges (0 = flush like Windows).
 taskbar_gap = 6
@@ -81,8 +81,10 @@ alt_tab = true
 # either list, or leave it out of both to hide it. Click one to open the panel.
 taskbar_left = weather
 taskbar_right = music,cpu,ram,widgets
-# The panel's cards, in order (remove one to hide it): media, system, weather, calendar.
+# The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar.
 widgets_panel = media,system,weather,calendar
+# Windows' notifications as a card at the top of the panel (also opened by the clock).
+widgets_notifications = true
 # 1 or 2 columns of cards.
 widgets_columns = 1
 # Seconds between system stats readings (only taken while one is on screen).
@@ -192,6 +194,7 @@ pub struct Config {
     pub taskbar_right: String,
     pub widgets_panel: String,
     pub widgets_columns: u32,
+    pub widgets_notifications: bool,
     pub stats_seconds: u32,
     pub launcher: bool,
     pub launcher_win_key: bool,
@@ -278,6 +281,7 @@ impl Default for Config {
             taskbar_right: "music,cpu,ram,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
             widgets_columns: 1,
+            widgets_notifications: true,
             stats_seconds: 2,
             launcher: true,
             launcher_win_key: true,
@@ -435,7 +439,9 @@ impl Config {
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
-                "taskbar_start" if matches!(v, "with_apps" | "right") => c.taskbar_start = v.into(),
+                "taskbar_start" if matches!(v, "with_apps" | "left") => c.taskbar_start = v.into(),
+                // An earlier build offered the far right; the far left replaced it.
+                "taskbar_start" if v == "right" => c.taskbar_start = "left".into(),
                 "taskbar_gap" => set_f(&mut c.taskbar_gap, 0.0, 32.0),
                 "taskbar_pad" => set_f(&mut c.taskbar_pad, 0.0, 24.0),
                 "taskbar_tile" => set_f(&mut c.taskbar_tile, 0.0, 16.0),
@@ -472,6 +478,7 @@ impl Config {
                 "taskbar_right" => c.taskbar_right = v.trim_matches('"').to_string(),
                 "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
                 "widgets_columns" => set_u(&mut c.widgets_columns, 1.0, 2.0),
+                "widgets_notifications" => set_b(&mut c.widgets_notifications),
                 "stats_seconds" => set_u(&mut c.stats_seconds, 1.0, 10.0),
                 "launcher" => set_b(&mut c.launcher),
                 "launcher_win_key" => set_b(&mut c.launcher_win_key),
@@ -576,6 +583,7 @@ impl Config {
             k if k.starts_with("place_") => self.place_of(&k["place_".len()..]).to_string(),
             "widgets_panel" => self.widgets_panel.clone(),
             "widgets_columns" => self.widgets_columns.to_string(),
+            "widgets_notifications" => b(self.widgets_notifications),
             "stats_seconds" => self.stats_seconds.to_string(),
             "launcher" => b(self.launcher),
             "launcher_win_key" => b(self.launcher_win_key),

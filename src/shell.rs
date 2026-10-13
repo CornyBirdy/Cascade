@@ -575,6 +575,7 @@ pub enum AppCmd {
     NewWindow,
     TogglePin,
     CloseAll,
+    ForceClose,
 }
 
 /// Right-click menu for a dock icon.
@@ -588,11 +589,14 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
         if windows > 0 {
             let label = if windows == 1 { "Close window".to_string() } else { format!("Close {windows} windows") };
             let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from(label));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, 4, w!("Force close (End task)"));
         }
         match track(hwnd, menu) {
             1 => AppCmd::NewWindow,
             2 => AppCmd::TogglePin,
             3 => AppCmd::CloseAll,
+            4 => AppCmd::ForceClose,
             _ => AppCmd::None,
         }
     }

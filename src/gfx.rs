@@ -296,6 +296,30 @@ impl Painter<'_> {
         &self.gfx.brush
     }
 
+    /// A length in layout units rounded to whole device pixels (at least one),
+    /// so thin strokes land on the pixel grid instead of smearing across it.
+    pub fn px(&self, w: f32) -> f32 {
+        let k = self.gfx.scale.get();
+        (w * k).round().max(1.0) / k
+    }
+
+    /// A coordinate rounded to a whole device pixel.
+    pub fn snap(&self, v: f32) -> f32 {
+        let k = self.gfx.scale.get();
+        (v * k).round() / k
+    }
+
+    /// The centre line for a stroke `w` wide (already from `px`) near `v`, put
+    /// so its edges fall on pixel boundaries.
+    pub fn snap_line(&self, v: f32, w: f32) -> f32 {
+        let k = self.gfx.scale.get();
+        if (w * k).round() as i32 % 2 == 1 {
+            ((v * k).floor() + 0.5) / k
+        } else {
+            (v * k).round() / k
+        }
+    }
+
     pub fn fill_geometry(&self, g: &ID2D1PathGeometry, c: Color) {
         unsafe { self.gfx.rt.FillGeometry(g, self.brush(c), None) };
     }
@@ -349,6 +373,8 @@ impl Painter<'_> {
         if s.is_empty() || w <= 0.0 {
             return;
         }
+        // Whole-pixel origin: grayscale text drawn between pixel rows is smeared.
+        let (x, y) = (self.snap(x), self.snap(y));
         let wide: Vec<u16> = s.encode_utf16().collect();
         let a = match align {
             Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,

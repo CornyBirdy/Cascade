@@ -14,7 +14,8 @@ use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, DATE_SHORT
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
@@ -99,7 +100,7 @@ impl Icon {
         let n = ICON_SIZE as usize;
         let small = crate::gfx::shrink(self.pixels.as_ref()?, n, n, px as usize, px as usize);
         let b = gfx.bitmap(px, px, &small).ok()?;
-        if self.bitmaps.len() >= 5 {
+        if self.bitmaps.len() >= 24 {
             self.bitmaps.remove(0);
         }
         self.bitmaps.push((px, b.clone()));
@@ -235,8 +236,8 @@ pub struct Dock {
     pub shown: bool,
     /// What the app asked for (false while something is fullscreen).
     wanted: bool,
-    /// Start sits alone on its own island at the far right.
-    start_right: bool,
+    /// Start sits alone on its own island at the far left.
+    start_left: bool,
     /// The window is on screen (auto-hide hides it once faded out).
     window_visible: bool,
     autohide: bool,
@@ -350,6 +351,35 @@ pub fn process_path(pid: u32) -> Option<String> {
     }
 }
 
+/// The process behind window `h`. A Store app's frame belongs to
+/// ApplicationFrameHost, which hosts every Store app's frame, so that one
+/// answers with the app inside it instead.
+fn app_pid(h: HWND) -> Option<u32> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    if !process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\applicationframehost.exe")) {
+        return Some(pid);
+    }
+    let mut found: (u32, u32) = (pid, 0);
+    unsafe extern "system" fn child(c: HWND, lp: LPARAM) -> BOOL {
+        let found = &mut *(lp.0 as *mut (u32, u32));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(c, Some(&mut pid));
+        if pid != 0 && pid != found.0 {
+            found.1 = pid;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumChildWindows(Some(h), Some(child), LPARAM(&mut found as *mut _ as isize));
+    }
+    (found.1 != 0).then_some(found.1)
+}
+
 /// The id the dock uses for the app that owns `h`: the exe path, or
 /// `shell:AppsFolder\<AppUserModelID>` for Store apps.
 pub fn window_app_id(h: HWND) -> Option<String> {
@@ -446,7 +476,7 @@ impl Dock {
             enabled: false,
             shown: false,
             wanted: true,
-            start_right: false,
+            start_left: false,
             window_visible: false,
             autohide: false,
             hide_taskbar: false,
@@ -583,7 +613,7 @@ impl Dock {
         self.hide_taskbar = cfg.hide_taskbar;
         self.full = cfg.taskbar_style != "floating";
         self.left = cfg.taskbar_align == "left";
-        self.start_right = cfg.taskbar_start == "right";
+        self.start_left = cfg.taskbar_start == "left";
         self.margin = cfg.taskbar_gap;
         self.padding = cfg.taskbar_pad.clamp(0.0, 24.0);
         self.tile = cfg.taskbar_tile.clamp(0.0, 16.0);
@@ -610,7 +640,7 @@ impl Dock {
         }
 
         if self.enabled && !self.autohide {
-            let px = ((self.bar_h + self.margin) * k).round() as i32;
+            let px = self.reserve_px(k);
             self.reserve_slot = Some(shell::reserve_bottom(self.hwnd, monitor, px, &mut self.reserved, self.reserve_slot));
         } else if self.reserved {
             shell::unregister_appbar(self.hwnd);
@@ -619,6 +649,13 @@ impl Dock {
         }
         self.refresh_bottom();
         self.apply_visible(true);
+    }
+
+    /// Screen strip kept free for the bar: the bar, the gap under it and the
+    /// same gap above it, so windows stop as far above the bar as the bar
+    /// sits above the screen edge.
+    fn reserve_px(&self, k: f32) -> i32 {
+        ((self.bar_h + 2.0 * self.margin) * k).round() as i32
     }
 
     /// Recomputes where the taskbar sits (after work-area changes).
@@ -637,7 +674,7 @@ impl Dock {
     /// Re-applies the app-bar reservation after the shell moved things.
     pub fn reposition(&mut self) {
         if self.reserved {
-            let px = ((self.bar_h + self.margin) * self.k).round() as i32;
+            let px = self.reserve_px(self.k);
             let slot = shell::reserve_bottom(self.hwnd, self.monitor, px, &mut self.reserved, self.reserve_slot);
             self.reserve_slot = Some(slot);
             self.bottom = slot.bottom;
@@ -835,15 +872,15 @@ impl Dock {
         let m = self.margin;
         let y1 = wh - m;
         let y0 = y1 - self.bar_h;
-        // Start alone at the far right gets its own island; everything else
-        // ends before it.
+        // Start alone at the far left gets its own island; everything else
+        // begins after it.
         let start_w = b + 2.0 * pad;
-        let (x0, x1) = (m, if self.start_right { ww - m - start_w - ISLAND_GAP } else { ww - m });
+        let (x0, x1) = (if self.start_left { m + start_w + ISLAND_GAP } else { m }, ww - m);
 
         // Centre group: Start, search, apps.
         let slots: Vec<f32> = self.apps.iter().map(|a| (b + GAP) * a.presence.value.clamp(0.0, 1.0)).collect();
         let search_w = if self.show_search { SEARCH_W + GAP } else { 0.0 };
-        let lead = if self.start_right { 0.0 } else { b + GAP };
+        let lead = if self.start_left { 0.0 } else { b + GAP };
         let group_w = (lead + search_w + slots.iter().sum::<f32>() - GAP).max(0.0);
 
         // Left side widgets, from the bar's left end.
@@ -863,7 +900,7 @@ impl Dock {
             (true, false, false) => left_end + ISLAND_GAP + pad,
         };
 
-        let start = if self.start_right { Span { x: ww - m - pad - b, w: b } } else { Span { x: gx, w: b } };
+        let start = if self.start_left { Span { x: m + pad, w: b } } else { Span { x: gx, w: b } };
         let mut x = gx + lead;
         let search = self.show_search.then(|| {
             let s = Span { x, w: SEARCH_W };
@@ -920,8 +957,8 @@ impl Dock {
             }
             v
         };
-        if self.start_right {
-            islands.push((ww - m - start_w, ww - m));
+        if self.start_left {
+            islands.insert(0, (m, m + start_w));
         }
         Geo {
             y0,
@@ -1110,6 +1147,39 @@ impl Dock {
         }
     }
 
+    /// Ends the app's processes outright, like Task Manager's End task.
+    /// File Explorer windows belong to the shell itself, so those are only
+    /// asked to close.
+    pub fn force_close(&self, i: usize) {
+        let Some(app) = self.apps.get(i) else { return };
+        let me = unsafe { GetCurrentProcessId() };
+        let mut pids: Vec<u32> = Vec::new();
+        for &w in &app.windows {
+            // No process to end (a suspended Store app has no window of its
+            // own), the shell, or Cascade: just ask the window to close.
+            let pid = app_pid(w).filter(|&p| {
+                p != me && !process_path(p).unwrap_or_default().to_ascii_lowercase().ends_with("\\explorer.exe")
+            });
+            let Some(pid) = pid else {
+                unsafe {
+                    let _ = PostMessageW(Some(w), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                continue;
+            };
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+        for pid in pids {
+            unsafe {
+                if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    let _ = TerminateProcess(h, 1);
+                    let _ = CloseHandle(h);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------- frames --
 
     pub fn wants_frame(&self) -> bool {
@@ -1164,11 +1234,20 @@ impl Dock {
         }
         let k = self.k;
         // App icons at exactly the size they're drawn, so they stay sharp.
+        // While magnified (or fading in) they get a bitmap of their own at the
+        // size they're drawn, in steps of two pixels, instead of stretching one.
         let icon_px = (self.icon * k).round() as u32;
         let app_icons: Vec<Option<ID2D1Bitmap>> = (0..self.apps.len())
             .map(|i| {
-                let key = self.apps[i].id.to_ascii_lowercase();
-                self.icons.get_mut(&key).and_then(|ic| ic.at(gfx, icon_px))
+                let a = &self.apps[i];
+                let scale = (1.0 + self.magnify * a.mag.value) * a.presence.value.clamp(0.0, 1.0);
+                let px = if (scale - 1.0).abs() < 0.01 {
+                    icon_px
+                } else {
+                    ((self.icon * k * scale / 2.0).round() as u32) * 2
+                };
+                let key = a.id.to_ascii_lowercase();
+                self.icons.get_mut(&key).and_then(|ic| ic.at(gfx, px))
             })
             .collect();
         let (inline, overflow) =
@@ -1273,9 +1352,8 @@ impl Dock {
                 let size = self.icon * (1.0 + self.magnify * a.mag.value) * presence;
                 let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0;
                 match app_icons.get(i).cloned().flatten() {
-                    // At rest: pixel for pixel, so it's sharp.
-                    Some(bmp) if (size - self.icon).abs() < 0.01 => p.icon(&bmp, cx, iy + size / 2.0, presence),
-                    Some(bmp) => p.image(&bmp, cx - size / 2.0, iy, size, size, presence),
+                    // Always pixel for pixel, so it's sharp.
+                    Some(bmp) => p.icon(&bmp, cx, iy + size / 2.0, presence),
                     None => p.rrect(cx - size * 0.4, iy + size * 0.1, size * 0.8, size * 0.8, size * 0.2, Color::white(0.15 * presence)),
                 }
                 if running {
@@ -1392,30 +1470,40 @@ impl Dock {
                     p.rrect(g.status.x, by, g.status.w, b, 5.0, c);
                 }
                 let white = Color::white(0.92);
-                let mut x = g.status.x + 6.0 + STATUS_ICON / 2.0;
-                let cy = g.y0 + bh / 2.0;
+                // Whole pixels everywhere, so the thin strokes stay crisp at
+                // any display scale.
+                let mut x = p.snap(g.status.x + 6.0 + STATUS_ICON / 2.0);
+                let cy = p.snap(g.y0 + bh / 2.0);
+                let sw = p.px(1.5);
                 match status.wifi {
                     Some(on) => {
                         let c = if on { white } else { Color::white(0.4) };
-                        p.arc(x, cy + 5.0, 4.5, -2.4, -0.74, c, 1.6);
-                        p.arc(x, cy + 5.0, 8.5, -2.4, -0.74, c, 1.6);
-                        p.circle(x, cy + 5.0, 1.5, c);
+                        let base = cy + 5.0;
+                        p.arc(x, base, 4.5, -2.4, -0.74, c, sw);
+                        p.arc(x, base, 8.5, -2.4, -0.74, c, sw);
+                        p.circle(x, base, 1.5, c);
                     }
                     None => {
                         // Wired: a small monitor.
-                        p.stroke_rrect(x - 7.0, cy - 6.0, 14.0, 10.0, 1.5, white, 1.3);
-                        p.line(x, cy + 4.0, x, cy + 7.0, white, 1.3);
-                        p.line(x - 4.0, cy + 7.0, x + 4.0, cy + 7.0, white, 1.3);
+                        let sw = p.px(1.0);
+                        let (lx, ty) = (p.snap_line(x - 7.0, sw), p.snap_line(cy - 6.0, sw));
+                        p.stroke_rrect(lx, ty, 14.0, 10.0, 1.5, white, sw);
+                        let sx = p.snap_line(x, sw);
+                        p.line(sx, ty + 10.0, sx, p.snap_line(cy + 7.0, sw), white, sw);
+                        let fy = p.snap_line(cy + 7.0, sw);
+                        p.line(lx + 3.0, fy, lx + 11.0, fy, white, sw);
                     }
                 }
                 x += STATUS_ICON;
                 crate::ui::speaker(&p, x, cy, 15.0, status.volume, status.muted, white);
                 x += STATUS_ICON;
                 if let Some((pct, charging)) = status.battery {
-                    p.stroke_rrect(x - 8.0, cy - 4.5, 15.0, 9.0, 2.0, white, 1.2);
-                    p.rrect(x + 7.5, cy - 1.5, 1.5, 3.0, 0.7, white);
+                    let sw = p.px(1.0);
+                    let (bx, ty) = (p.snap_line(x - 8.0, sw), p.snap_line(cy - 4.5, sw));
+                    p.stroke_rrect(bx, ty, 15.0, 9.0, 2.0, white, sw);
+                    p.rrect(bx + 15.5, p.snap(cy - 1.5), 1.5, 3.0, 0.7, white);
                     let c = if charging { Color(0.45, 0.9, 0.5, 1.0) } else if pct <= 20 { Color(1.0, 0.4, 0.35, 1.0) } else { white };
-                    p.rrect(x - 6.5, cy - 3.0, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
+                    p.rrect(bx + 1.5, ty + 1.5, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
                 }
             }
             if g.clock.w > 0.0 {
@@ -1482,9 +1570,9 @@ impl Dock {
     /// Screen x the Start menu should line up with (its left edge when the
     /// taskbar is left-aligned), or None when centred.
     pub fn start_anchor(&self) -> Option<i32> {
-        if self.start_right {
-            // The menu lines up with the right edge of the screen.
-            return Some(self.screen.right);
+        if self.start_left {
+            // The menu lines up with the Start button's island at the left edge.
+            return Some(self.screen.left + (self.margin * self.k) as i32);
         }
         self.left.then(|| self.screen.left + ((self.geo.start.x - 4.0).max(self.margin) * self.k) as i32)
     }

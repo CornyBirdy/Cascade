@@ -9,7 +9,7 @@ A small black notch at the top centre of your main screen. Turn it off in the ri
 - **Live activity:** while music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
 - **Hover to open.** Scroll, or click the dots at the bottom, to switch between three modes:
   - **Media:** title, artist, progress bar and play/pause/skip buttons. With nothing playing it shows the time, date, weather and battery instead.
-  - **Controls:** Wi-Fi and Bluetooth toggles, a notification-centre button, and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
+  - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
   - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
 - **Fullscreen apps and games:** the notch and taskbar hide automatically.
@@ -20,10 +20,10 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 
 - **Left:** the current weather. **Centre:** Start, a search box, then your pinned and running apps. **Right:** hidden icons, network / volume / battery, and the clock.
 - **App buttons** work like Windows: a short line marks apps with open windows and a longer blue one the app in front. Hover for a name and live window previews; click a preview to switch to it, or its × to close it.
-- **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin or close. **Drag** pinned apps to reorder them.
+- **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin, close, or force close (Task Manager's *End task*). **Drag** pinned apps to reorder them.
 - **Tray icons:** apps' notification-area icons show by the clock, the same ones you chose to show in Windows' taskbar settings. The rest are under the **^** button. Click and right-click them as usual. Cascade gets them the way alternative taskbars like RetroBar do: it keeps its own hidden tray window and passes everything on to Explorer, without touching Explorer itself.
-- **Clicks on the right:** the status icons open quick settings, and the clock opens notifications.
-- **Look:** full width or floating islands, centred or left-aligned, the Start button with your apps or alone on its own island at the far right, icon size, icon padding, bar padding (the gap from the bar's edge to its buttons on all four sides, which together set the bar's height) and the gap from the screen edge (all three default to the same small gap), corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
+- **Clicks on the right:** the status icons open quick settings, and the clock opens the widgets panel with your notifications.
+- **Look:** full width or floating islands, centred or left-aligned, the Start button with your apps or alone on its own island at the far left, icon size, icon padding, bar padding (the gap from the bar's edge to its buttons on all four sides, which together set the bar's height) and the gap from the screen edge (all three default to the same small gap), corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
 - **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
 - **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
@@ -32,8 +32,8 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 ## Widgets
 
 - **On the taskbar:** the weather, what's playing (with a play / pause button), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order (Settings → Widgets, or the two lists `taskbar_left` and `taskbar_right` in the config).
-- **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for what's playing (art, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
-- **Customising it** (Settings → Widgets): where each taskbar widget sits and in what order, the panel's cards and their order (a list like `media,system,weather,calendar`; leave one out to hide it), one or two columns, and how often stats are read.
+- **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (dismiss one with its ×, or *Clear all*), what's playing (art, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
+- **Customising it** (Settings → Widgets): the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (a list like `media,system,weather,calendar`; leave one out to hide it), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 
 ## Start menu
