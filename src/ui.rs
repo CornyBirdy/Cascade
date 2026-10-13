@@ -52,6 +52,7 @@ use crate::sysmon::Sampler;
 use crate::widgets::{self, Widgets};
 use crate::helper;
 use crate::spring::Spring;
+use crate::theme;
 use crate::update;
 use crate::weather::{self, Weather};
 
@@ -81,6 +82,8 @@ const TIMER_NOTIFS: usize = 18;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// The Windows accent colour changed (Tinted Glass follows it).
+const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
@@ -90,7 +93,6 @@ const EVENT_OBJECT_CLOAKED: u32 = 0x8017;
 const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
 
 const BLACK: Color = Color(0.0, 0.0, 0.0, 1.0);
-const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const GREEN: Color = Color(0.40, 0.85, 0.50, 1.0);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -164,6 +166,9 @@ struct App {
     refresh_hz: u32,
 
     layer: Layer,
+    /// The blur behind the lip (and the notch pulled down from it).
+    notch_backdrop: Backdrop,
+    notch_blur: bool,
     w: Spring,
     h: Spring,
     r: Spring,
@@ -297,9 +302,11 @@ pub fn run() -> Result<()> {
         let widgets = (widgets_hwnd, Backdrop::create(instance)?);
         let switcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
         let switcher = (switcher_hwnd, Backdrop::create(instance)?);
+        let notch_backdrop = Backdrop::create(instance)?;
 
         let app = App::new(
             hwnd,
+            notch_backdrop,
             dock_hwnd,
             trigger,
             preview_hwnd,
@@ -577,6 +584,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 impl App {
     fn new(
         hwnd: HWND,
+        notch_backdrop: Backdrop,
         dock_hwnd: HWND,
         trigger: HWND,
         preview_hwnd: HWND,
@@ -588,6 +596,7 @@ impl App {
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
+        theme::set(&cfg.theme);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
@@ -613,6 +622,8 @@ impl App {
             dpi: 1.0,
             refresh_hz: 60,
             layer: Layer::default(),
+            notch_backdrop,
+            notch_blur: false,
             // Start small and flat so the notch grows in on launch.
             w: start_w,
             h: size,
@@ -677,7 +688,7 @@ impl App {
             tray_announced: None,
             tray_syncs: 0,
             message: String::new(),
-            message_color: ACCENT,
+            message_color: theme::accent(),
             update_available: None,
             updating: false,
             cfg,
@@ -829,6 +840,12 @@ impl App {
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.notch_blur = theme::style_backdrop(
+            &self.notch_backdrop,
+            self.cfg.acrylic,
+            self.cfg.taskbar_opacity,
+            self.cfg.corner_radius(),
+        );
         self.arm_stats();
         self.apply_edges(false);
         mouseedge::raise();
@@ -878,10 +895,22 @@ impl App {
         }
     }
 
+    /// Corner radius of the lip and the notch pulled down from it: the same
+    /// as the panels' (and their blur's), whatever the notch's own scale.
+    fn lip_radius(&self) -> f32 {
+        self.cfg.corner_radius() / self.cfg.scale.max(0.1)
+    }
+
     /// Width, height and corner radius of a view, in layout units.
     fn size_of(&self, view: View) -> (f32, f32, f32) {
         let (iw, ih) = (self.cfg.idle_width, self.cfg.idle_height);
-        match view {
+        let lip = self.cfg.lip();
+        if lip && matches!(view, View::Idle | View::Live) {
+            // The lip is sized in pixels at 100%, apart from the notch's scale.
+            let s = self.cfg.scale.max(0.1);
+            return (self.cfg.lip_width / s, self.cfg.lip_height / s, self.lip_radius());
+        }
+        let (w, h, r) = match view {
             View::Idle => (iw, ih, ih * 0.36),
             View::Live => (iw + 104.0, ih, ih * 0.42),
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
@@ -893,7 +922,8 @@ impl App {
                 Mode::Controls => (420.0, 172.0, 30.0),
                 Mode::Calendar => (420.0, 212.0, 30.0),
             },
-        }
+        };
+        (w, h, if lip { self.lip_radius() } else { r })
     }
 
     /// Re-derives the view and animation targets after any state change.
@@ -908,6 +938,7 @@ impl App {
                 self.expanded = false;
                 self.peek = None;
                 self.layer.release();
+                self.notch_backdrop.hide();
             }
         }
 
@@ -929,8 +960,12 @@ impl App {
         self.h.set(h);
         self.r.set(r);
 
-        let bars_visible =
-            matches!(view, View::Live | View::Expanded) && (view == View::Live || self.mode == Mode::Media);
+        // The lip only glows while music plays; the bars come with the notch.
+        let bars_visible = match view {
+            View::Live => !self.cfg.lip(),
+            View::Expanded => self.mode == Mode::Media,
+            _ => false,
+        };
         let visualize = self.shown && self.cfg.visualizer && self.playing() && bars_visible;
         self.visualizer.set(visualize);
         if !visualize {
@@ -1053,6 +1088,14 @@ impl App {
                 self.retarget();
                 return Some(LRESULT(0));
             }
+            WM_DWMCOLORIZATIONCOLORCHANGED if hwnd == self.hwnd => {
+                theme::refresh_accent();
+                if self.cfg.theme == "tinted" {
+                    self.apply_dock();
+                    self.restyle();
+                }
+                return Some(LRESULT(0));
+            }
             WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETWORKAREA.0 => {
                 self.dock.refresh_bottom();
                 return None;
@@ -1160,7 +1203,7 @@ impl App {
                     self.update_available = Some(build);
                     self.notify(
                         format!("Update available (build {build}) \u{2014} right-click to install"),
-                        ACCENT,
+                        theme::accent(),
                         false,
                     );
                 }
@@ -1169,7 +1212,7 @@ impl App {
                 self.updating = false;
                 self.notify(format!("Cascade is up to date (build {build})"), GREEN, true);
             }
-            update::INSTALLING => self.notify(format!("Downloading build {build}\u{2026}"), ACCENT, false),
+            update::INSTALLING => self.notify(format!("Downloading build {build}\u{2026}"), theme::accent(), false),
             update::INSTALLED => {
                 self.notify("Restarting into the new version\u{2026}".into(), GREEN, false);
                 // Quit outside this borrow so shutdown can run normally.
@@ -1681,7 +1724,7 @@ impl App {
             MenuCmd::Update => {
                 if !self.updating {
                     self.updating = true;
-                    self.notify("Checking for updates\u{2026}".into(), ACCENT, false);
+                    self.notify("Checking for updates\u{2026}".into(), theme::accent(), false);
                     update::spawn_install(self.cfg.github_token.clone());
                 }
             }
@@ -1699,6 +1742,7 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        theme::set(&self.cfg.theme);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -1716,9 +1760,19 @@ impl App {
         self.apply_flyout();
         self.apply_dock();
         self.retarget();
+        self.restyle();
         if let Some(s) = &self.settings {
             s.invalidate();
         }
+    }
+
+    /// Redraws every surface, e.g. after the theme changed.
+    fn restyle(&mut self) {
+        self.dirty = true;
+        self.dock.dirty = true;
+        self.launcher.dirty = true;
+        self.flyout.dirty = true;
+        self.widgets.dirty = true;
     }
 
     // --------------------------------------------------- launcher glue --
@@ -2552,7 +2606,11 @@ impl App {
         let bw = self.w.value.max(1.0);
         let bh = self.h.value.max(0.0);
         let mon_w = self.monitor.right - self.monitor.left;
-        let mut pw = ((bw + 2.0 * EAR) * k).ceil() as i32 + 2;
+        // The lip and the notch pulled down from it are a plain panel, flush
+        // with the top of the screen: no ears.
+        let lip = self.cfg.lip();
+        let ear = if lip { 0.0 } else { EAR };
+        let mut pw = ((bw + 2.0 * ear) * k).ceil() as i32 + 2;
         if (mon_w - pw) % 2 != 0 {
             pw += 1; // keep the window exactly centred, so it never jitters
         }
@@ -2564,12 +2622,37 @@ impl App {
         self.origin = cx - tw / 2.0;
         self.content_w = tw;
 
+        // The panel runs past the top of the screen by more than its corner
+        // radius, so only its bottom corners are round (the blur's too).
+        let r = self.r.value;
+        let above = r + 2.0;
+        // Glass only once the shape has settled (a moving blur window lags a
+        // frame behind); a solid panel while it moves.
+        let settled = self.w.settled() && self.h.settled() && self.r.settled();
+        let blurred = lip && self.notch_blur && settled;
+        if blurred {
+            let x0 = pos.x + (body_x * k).round() as i32;
+            let x1 = pos.x + ((body_x + bw) * k).round() as i32;
+            let top = pos.y - (above * k).ceil() as i32;
+            self.notch_backdrop.place(RECT { left: x0, top, right: x1, bottom: pos.y + ph }, self.hwnd);
+        } else {
+            self.notch_backdrop.hide();
+        }
+
         self.gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = self.gfx.painter();
-            p.notch(body_x, bw, bh, self.r.value, EAR, BLACK);
+            if lip {
+                theme::panel(&p, body_x, -above, bw, bh + above, r, blurred, self.cfg.taskbar_opacity, 0.97, 1.0);
+            } else {
+                p.notch(body_x, bw, bh, r, EAR, BLACK);
+            }
             let alpha = self.fade.value.clamp(0.0, 1.0);
-            if alpha > 0.01 && bh > 4.0 {
+            if lip && matches!(self.view, View::Idle | View::Live) {
+                if self.view == View::Live && alpha > 0.01 {
+                    self.draw_lip_glow(&p, body_x, bw, bh, alpha);
+                }
+            } else if alpha > 0.01 && bh > 4.0 {
                 p.clip(body_x, 0.0, bw, bh);
                 match self.view {
                     View::Idle => {}
@@ -2663,7 +2746,7 @@ impl App {
             let bars_w = BANDS as f32 * bar + (BANDS - 1) as f32 * gap;
             self.draw_bars(p, ox + tw - 12.0 - bars_w, th / 2.0, bar, gap, th - 12.0, alpha);
         } else {
-            let c = if self.pomo.focus { ACCENT } else { GREEN };
+            let c = if self.pomo.focus { theme::accent() } else { GREEN };
             let (cx, cy, r) = (ox + 22.0, th / 2.0, (th / 2.0 - 6.0).max(5.0));
             p.stroke_circle(cx, cy, r, Color::white(0.18 * alpha), 2.5);
             let a = self.pomo.progress().clamp(0.0, 0.999) * std::f32::consts::TAU;
@@ -2683,12 +2766,31 @@ impl App {
         }
     }
 
+    /// The resting lip while music plays or the focus timer runs: a thin
+    /// line in the album art's colour, or the timer's progress.
+    fn draw_lip_glow(&self, p: &Painter, x: f32, w: f32, h: f32, alpha: f32) {
+        let inset = self.r.value.min(w / 4.0) + 3.0;
+        let lw = (w - 2.0 * inset).max(0.0);
+        let t = (h * 0.4).clamp(1.0, 2.5);
+        let y = (h - t - 1.0).max(0.0);
+        if self.playing() {
+            p.rrect(x + inset, y, lw, t, t / 2.0, self.accent().alpha(0.9 * alpha));
+        } else {
+            let c = if self.pomo.focus { theme::accent() } else { GREEN };
+            p.rrect(x + inset, y, lw, t, t / 2.0, Color::white(0.14 * alpha));
+            let done = lw * self.pomo.progress().clamp(0.0, 1.0);
+            if done > 0.5 {
+                p.rrect(x + inset, y, done.max(t), t, t / 2.0, c.alpha(alpha));
+            }
+        }
+    }
+
     fn draw_timer_peek(&self, p: &Painter, alpha: f32) {
         let (tw, th, _) = self.size_of(View::Peek);
         let (text, c) = if self.peek == Some(PeekKind::Message) {
             (self.message.as_str(), self.message_color)
         } else if self.pomo.focus {
-            ("Break over \u{2014} time to focus", ACCENT)
+            ("Break over \u{2014} time to focus", theme::accent())
         } else {
             ("Focus done \u{2014} take a break", GREEN)
         };
@@ -2892,7 +2994,7 @@ impl App {
             p.rrect(x, y, tile_w, 54.0, 14.0, Color::white(if hovered { 0.13 } else { 0.08 } * alpha));
             let on = state == Some(true);
             let (icx, icy) = (x + 24.0, y + 27.0);
-            p.circle(icx, icy, 15.0, if on { ACCENT.alpha(alpha) } else { Color::white(0.14 * alpha) });
+            p.circle(icx, icy, 15.0, if on { theme::accent().alpha(alpha) } else { Color::white(0.14 * alpha) });
             let white = Color::white(0.95 * alpha);
             match hot {
                 Hot::Wifi => wifi(p, icx, icy, white),
@@ -2982,7 +3084,7 @@ impl App {
             let cy = 50.0 + row * 24.0;
             let is_today = day == today;
             if is_today {
-                p.circle(cx + cell / 2.0, cy + 11.0, 11.0, ACCENT.alpha(alpha));
+                p.circle(cx + cell / 2.0, cy + 11.0, 11.0, theme::accent().alpha(alpha));
             }
             let weekend = col >= 5.0;
             let a = if is_today {
@@ -2998,7 +3100,7 @@ impl App {
 
         // Focus timer.
         let (rx, rw) = (ox + 226.0, 176.0);
-        let c = if self.pomo.focus { ACCENT } else { GREEN };
+        let c = if self.pomo.focus { theme::accent() } else { GREEN };
         let phase = if self.pomo.focus { "Focus" } else { "Break" };
         p.text(phase, &fonts.label, rx, 10.0, rw, 20.0, Align::Center, c.alpha(alpha));
         let (cx, cy, r) = (ox + 314.0, 82.0, 40.0);

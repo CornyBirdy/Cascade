@@ -16,9 +16,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
-use crate::dock::{self, Dock, ACCENT};
+use crate::dock::{self, Dock};
 use crate::gfx::{Align, Color, Gfx, Layer};
 use crate::spring::Spring;
+use crate::theme;
 
 const CARD_W: f32 = 232.0;
 const CARD_H: f32 = 176.0;
@@ -67,6 +68,9 @@ pub struct Switcher {
     k: f32,
     monitor: RECT,
     radius: f32,
+    /// Whether the backdrop blurs (otherwise it is opaque), and the Tint slider.
+    blur: bool,
+    opacity: f32,
     pub dirty: bool,
 }
 
@@ -96,16 +100,21 @@ impl Switcher {
             k: 1.0,
             monitor: RECT::default(),
             radius: 8.0,
+            blur: true,
+            opacity: 0.55,
             dirty: false,
         }
     }
 
     pub fn configure(&mut self, acrylic: bool, opacity: f32, radius: f32) {
         self.radius = radius;
+        self.opacity = opacity.clamp(0.0, 1.0);
         // The backdrop also hosts the thumbnails, so it always exists: without
-        // acrylic it is simply opaque.
-        let tint = if acrylic { ((opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E } else { 0xFF1C1C1E };
-        self.backdrop.style(true, tint, radius);
+        // blur it is simply opaque.
+        self.blur = theme::style_backdrop(&self.backdrop, acrylic, opacity, radius);
+        if !self.blur {
+            theme::style_opaque(&self.backdrop, radius);
+        }
     }
 
     fn max_cols(&self) -> usize {
@@ -404,8 +413,9 @@ impl Switcher {
             let f = &gfx.fonts;
             let r = self.radius.max(6.0);
             let open = self.open.value.clamp(0.0, 1.0);
-            p.rrect(0.0, 0.0, w, h, self.radius, Color::white(0.015 * open));
-            p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, self.radius, Color::white(0.10 * open), 1.0);
+            // Without blur the backdrop itself is opaque, so only a trace on top
+            // (it keeps the pixels clickable).
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, self.blur, self.opacity, 0.02, open);
             for (i, it) in self.items.iter().enumerate() {
                 let (cx, cy0) = Self::card(i, cols);
                 let a = it.appear.value.clamp(0.0, 1.0);
@@ -436,7 +446,7 @@ impl Switcher {
                 let a = it.appear.value.clamp(0.0, 1.0);
                 let oy = (1.0 - it.appear.value) * RISE;
                 let (x, y) = (self.ring_x.value, self.ring_y.value + oy);
-                p.stroke_rrect(x + 1.0, y + 1.0, CARD_W - 2.0, CARD_H - 2.0, r, Color(ACCENT.0, ACCENT.1, ACCENT.2, a), 2.0);
+                p.stroke_rrect(x + 1.0, y + 1.0, CARD_W - 2.0, CARD_H - 2.0, r, theme::accent().alpha(a), 2.0);
             }
         }
         gfx.present(&self.layer, self.overlay, POINT { x, y }, pw, ph, 255)

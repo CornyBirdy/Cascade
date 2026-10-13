@@ -333,6 +333,23 @@ impl Painter<'_> {
         unsafe { self.gfx.rt.FillRoundedRectangle(&rr, self.brush(c)) };
     }
 
+    /// A rounded rect filled top to bottom with a gradient: `stops` are
+    /// (position from 0 at the top to 1 at the bottom, colour), in order.
+    pub fn gradient_rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, stops: &[(f32, Color)]) {
+        let stops: Vec<D2D1_GRADIENT_STOP> =
+            stops.iter().map(|&(position, c)| D2D1_GRADIENT_STOP { position, color: c.d2d() }).collect();
+        let rt = &self.gfx.rt;
+        unsafe {
+            let Ok(collection) = rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else {
+                return;
+            };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(x, y), endPoint: pt(x, y + h) };
+            let Ok(brush) = rt.CreateLinearGradientBrush(&props, None, &collection) else { return };
+            let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
+            rt.FillRoundedRectangle(&rr, &brush);
+        }
+    }
+
     pub fn stroke_rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color, width: f32) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
         unsafe { self.gfx.rt.DrawRoundedRectangle(&rr, self.brush(c), width, None) };

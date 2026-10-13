@@ -1,4 +1,5 @@
-//! Acrylic blur behind panels (taskbar islands, Start menu).
+//! Acrylic (or clear) blur behind panels (taskbar islands, Start menu, the
+//! notch's lip).
 //!
 //! A plain window the size of the panel sits just under the drawn content
 //! and asks DWM to blur what's behind it. The blur runs on the GPU inside
@@ -15,6 +16,8 @@ use windows::Win32::Graphics::Gdi::{GetStockObject, HBRUSH, BLACK_BRUSH};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::theme::Glass;
 
 #[repr(C)]
 struct AccentPolicy {
@@ -47,6 +50,7 @@ fn set_composition() -> Option<SetWindowCompositionAttribute> {
 
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
+const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -106,11 +110,16 @@ impl Backdrop {
         }
     }
 
-    /// `tint` is 0xAARRGGBB; `radius` picks the DWM corner style.
-    pub fn style(&self, acrylic: bool, tint: u32, radius: f32) {
+    /// `glass` picks the kind of blur (see `theme`), `tint` is 0xAARRGGBB and
+    /// `radius` picks the DWM corner style.
+    pub fn style(&self, glass: Glass, tint: u32, radius: f32) {
         let (a, r, g, b) = (tint >> 24, (tint >> 16) & 0xFF, (tint >> 8) & 0xFF, tint & 0xFF);
         let mut policy = AccentPolicy {
-            state: if acrylic { ACCENT_ENABLE_ACRYLICBLURBEHIND } else { ACCENT_DISABLED },
+            state: match glass {
+                Glass::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                Glass::Blur => ACCENT_ENABLE_BLURBEHIND,
+                Glass::Solid => ACCENT_DISABLED,
+            },
             flags: 0,
             // ABGR, as the API wants it.
             gradient: (a << 24) | (b << 16) | (g << 8) | r,

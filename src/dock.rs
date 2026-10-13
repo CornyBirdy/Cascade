@@ -30,6 +30,7 @@ use crate::sysmon::{self, Stats};
 use crate::shell;
 use crate::spring::Spring;
 use crate::systray::Systray;
+use crate::theme;
 use crate::weather::Weather;
 
 /// Room above the bar for tooltips (transparent, click-through).
@@ -49,7 +50,6 @@ const CHIP_MUSIC_W: f32 = 196.0;
 const WIDGETS_BTN_W: f32 = 28.0;
 /// Space between widgets on the same side.
 const ITEM_GAP: f32 = 2.0;
-pub const ACCENT: Color = Color(0.38, 0.67, 1.0, 1.0);
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
@@ -623,7 +623,7 @@ impl Dock {
         // A full-width bar flush with the screen edges has square corners.
         self.radius = if self.full && self.margin < 1.0 { 0.0 } else { cfg.corner_radius() };
         self.magnify = cfg.dock_magnify;
-        self.acrylic = cfg.acrylic;
+        self.acrylic = theme::blurs(cfg.acrylic);
         self.opacity = cfg.taskbar_opacity;
         self.show_search = cfg.show_search;
         self.show_status = cfg.show_status;
@@ -634,9 +634,8 @@ impl Dock {
         self.right_cfg = parse_chips(&cfg.taskbar_right);
         self.monitor = monitor;
         self.k = k;
-        let tint = ((self.opacity * 255.0) as u32) << 24 | 0x00_1C1C1E;
         for b in &self.backdrops {
-            b.style(self.acrylic, tint, self.radius);
+            theme::style_backdrop(b, cfg.acrylic, self.opacity, self.radius);
         }
 
         if self.enabled && !self.autohide {
@@ -1292,15 +1291,10 @@ impl Dock {
             let r = self.radius;
             let bh = g.y1 - g.y0;
             for &(x0, x1) in &g.islands {
-                // Over acrylic only a whisper of tint (it also keeps the
-                // pixels clickable); without acrylic a solid panel.
-                let fill = if self.acrylic && settled {
-                    Color::white(0.02)
-                } else {
-                    Color(0.11, 0.11, 0.12, 0.6 + 0.4 * self.opacity)
-                };
-                p.rrect(x0, g.y0, x1 - x0, bh, r, fill);
-                p.stroke_rrect(x0 + 0.5, g.y0 + 0.5, x1 - x0 - 1.0, bh - 1.0, r, Color::white(0.08), 1.0);
+                // Over the blur only the theme's wash (it also keeps the
+                // pixels clickable); without blur a solid panel.
+                let blurred = self.acrylic && settled;
+                theme::panel(&p, x0, g.y0, x1 - x0, bh, r, blurred, self.opacity, 0.6 + 0.4 * self.opacity, 1.0);
             }
             let b = self.button();
             let by = g.y0 + (bh - b) / 2.0;
@@ -1357,7 +1351,7 @@ impl Dock {
                     None => p.rrect(cx - size * 0.4, iy + size * 0.1, size * 0.8, size * 0.8, size * 0.2, Color::white(0.15 * presence)),
                 }
                 if running {
-                    let (w, c) = if active { (16.0, ACCENT) } else { (6.0, Color::white(0.55)) };
+                    let (w, c) = if active { (16.0, theme::accent()) } else { (6.0, Color::white(0.55)) };
                     p.rrect(cx - w / 2.0, by + b - 3.0, w, 3.0, 1.5, c.alpha(presence));
                 }
                 if self.hovered == Some(Hot::App(i)) && self.dragging.is_none() && presence > 0.9 {

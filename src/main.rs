@@ -28,6 +28,7 @@ mod spring;
 mod switcher;
 mod sysmon;
 mod systray;
+mod theme;
 mod ui;
 mod update;
 mod usage;

@@ -14,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::Config;
 use crate::gfx::{Align, Color, Gfx};
+use crate::theme;
 
 const CW: f32 = 900.0;
 const CH: f32 = 620.0;
@@ -24,12 +25,21 @@ const ROW_GAP: f32 = 8.0;
 const HEAD_H: f32 = 38.0;
 const COMPACT_H: f32 = 44.0;
 const TOP: f32 = 84.0;
-const ACCENT: Color = Color(0.27, 0.55, 1.0, 1.0);
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
 const CHOICE_W: f32 = 84.0;
 
-pub const SECTIONS: [&str; 9] =
-    ["General", "Notch", "Taskbar", "Start menu", "Widgets", "Screens", "Focus & weather", "Updates", "About"];
+pub const SECTIONS: [&str; 10] = [
+    "General",
+    "Appearance",
+    "Notch",
+    "Taskbar",
+    "Start menu",
+    "Widgets",
+    "Screens",
+    "Focus & weather",
+    "Updates",
+    "About",
+];
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -57,6 +67,8 @@ enum Ctl {
     /// Segmented buttons: (config value, label).
     Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
+    /// One option of a list shown a row each (the themes): the value it sets.
+    Pick(&'static str),
     Note,
     /// A group title with no control.
     Heading,
@@ -112,9 +124,49 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(30.0, 240.0, 10.0, Unit::Fps),
             ),
         ],
-        1 => vec![
+        1 => {
+            let mut v = vec![heading("h_theme", "Theme")];
+            v.extend(theme::THEMES.iter().map(|t| row("theme", t.name, t.about, Pick(t.key))));
+            v.extend([
+                heading("h_glass", "Glass"),
+                row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
+                row(
+                    "taskbar_corners",
+                    "Corners",
+                    "Taskbar, Start menu, panels and the lip.",
+                    Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
+                ),
+                row(
+                    "taskbar_opacity",
+                    "Tint",
+                    "How strong the glass's tint is.",
+                    slider(0.0, 1.0, 0.05, Unit::Percent),
+                ),
+                row(
+                    "start_opacity",
+                    "Start menu tint",
+                    "The same, for the Start menu.",
+                    slider(0.0, 1.0, 0.05, Unit::Percent),
+                ),
+            ]);
+            v
+        }
+        2 => vec![
             row("notch", "Show the notch", "The island at the top of your main screen.", Toggle),
-            row("live_activity", "Live activity", "Grow with album art or the focus timer.", Toggle),
+            row(
+                "notch_style",
+                "Style",
+                "Lip: pulled down from a thin strip on hover.",
+                Choice(&[("lip", "Lip"), ("notch", "Notch")]),
+            ),
+            row("lip_width", "Lip width", "Width of the resting lip.", slider(40.0, 400.0, 2.0, Unit::Px)),
+            row("lip_height", "Lip height", "Push the pointer up into it to open.", slider(2.0, 16.0, 1.0, Unit::Px)),
+            row(
+                "live_activity",
+                "Live activity",
+                "Music or the focus timer grows the notch or lights the lip.",
+                Toggle,
+            ),
             row("visualizer", "Music visualizer", "Bars that move with whatever is playing.", Toggle),
             row("volume_osd", "Volume pop-up", "Show volume changes in the notch.", Toggle),
             row("brightness_osd", "Brightness pop-up", "Show brightness changes in the notch.", Toggle),
@@ -126,7 +178,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("scroll_volume", "Scroll to change volume", "Scroll over the closed notch.", Toggle),
             row("scale", "Size", "Scales the whole notch.", slider(0.6, 2.0, 0.05, Unit::Times)),
-            row("idle_width", "Resting width", "Width of the closed notch.", slider(100.0, 320.0, 2.0, Unit::Px)),
+            row(
+                "idle_width",
+                "Notch width",
+                "Width of the closed notch (Notch style).",
+                slider(100.0, 320.0, 2.0, Unit::Px),
+            ),
             row(
                 "expand_delay_ms",
                 "Hover delay",
@@ -134,7 +191,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(0.0, 800.0, 10.0, Unit::Ms),
             ),
         ],
-        2 => vec![
+        3 => vec![
             row("dock", "Show the taskbar", "Cascade's taskbar along the bottom.", Toggle),
             row("hide_taskbar", "Replace the Windows taskbar", "Hide the Windows one while Cascade's is on.", Toggle),
             row("dock_autohide", "Auto-hide", "Push the mouse to the bottom edge to show it.", Toggle),
@@ -175,14 +232,6 @@ fn rows(section: usize) -> Vec<Row> {
                 "Set it equal to Bar padding for an even look. 0 = flush.",
                 slider(0.0, 32.0, 1.0, Unit::Px),
             ),
-            row(
-                "taskbar_corners",
-                "Corners",
-                "Also used by the Start menu.",
-                Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
-            ),
-            row("acrylic", "Acrylic blur", "Blur what's behind the taskbar and Start menu.", Toggle),
-            row("taskbar_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
             row("show_search", "Search box", "Next to the Start button.", Toggle),
             row("show_status", "Network, volume and battery", "Opens quick settings when clicked.", Toggle),
             row("show_clock", "Clock", "Opens the widgets panel, with your notifications, when clicked.", Toggle),
@@ -199,7 +248,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(0.0, 1.0, 0.05, Unit::Percent),
             ),
         ],
-        3 => vec![
+        4 => vec![
             heading("h_open", "Opening"),
             row("launcher", "Cascade Start menu", "Opened by the Start button on the taskbar.", Toggle),
             row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
@@ -217,7 +266,6 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("auto", "Auto"), ("center", "Centre"), ("left", "Left")]),
             ),
             row("start_height", "Height", "How tall the menu is.", slider(500.0, 800.0, 10.0, Unit::Px)),
-            row("start_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
             heading("h_parts", "What it shows"),
             row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_columns", "Pinned columns", "Apps per row in Pinned.", slider(3.0, 6.0, 1.0, Unit::Count)),
@@ -244,7 +292,7 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_place_videos", "Videos", "", Toggle),
             row("start_place_network", "Network", "", Toggle),
         ],
-        4 => vec![
+        5 => vec![
             heading("h_where", "Where each widget goes"),
             row("place_weather", "Weather", "Where the weather sits on the taskbar.", PLACE),
             row("place_music", "Music", "What's playing, with a play / pause button.", PLACE),
@@ -286,7 +334,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(1.0, 10.0, 1.0, Unit::Seconds),
             ),
         ],
-        5 => vec![
+        6 => vec![
             row(
                 "mouse_match",
                 "Match the pointer across screens",
@@ -307,7 +355,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("screens_info", "Detected", "", Note),
         ],
-        6 => vec![
+        7 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
             row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
@@ -332,7 +380,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
         ],
-        7 => vec![
+        8 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
@@ -534,6 +582,8 @@ impl Settings {
                 (x1 - w, y + (h - 32.0) / 2.0, w, 32.0)
             }
             Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
+            // The whole row is the button.
+            Ctl::Pick(_) => (SIDEBAR + 24.0, y, self.content_w(), h),
             Ctl::Note | Ctl::Heading => (x1, y, 0.0, 0.0),
         }
     }
@@ -716,6 +766,7 @@ impl Settings {
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
                     Ctl::Button(_) => Some(Change::Action(r.key)),
+                    Ctl::Pick(value) => (get(r.key) != value).then(|| Change::Set(r.key, value.to_string())),
                     _ => None,
                 }
             }
@@ -768,7 +819,7 @@ impl Settings {
                         );
                     }
                     if active {
-                        p.rrect(12.0, y + 12.0, 3.0, 16.0, 1.5, ACCENT);
+                        p.rrect(12.0, y + 12.0, 3.0, 16.0, 1.5, theme::accent());
                     }
                     p.text(
                         name,
@@ -823,11 +874,12 @@ impl Settings {
                             cw,
                             22.0,
                             Align::Left,
-                            Color(0.55, 0.74, 1.0, 1.0),
+                            theme::lighten(theme::accent(), 0.3),
                         );
                         continue;
                     }
-                    p.rrect(x0, y, cw, h, 8.0, Color::white(0.045));
+                    let row_hover = matches!(r.ctl, Ctl::Pick(_)) && self.hovered == Some(Hit::Row(i));
+                    p.rrect(x0, y, cw, h, 8.0, Color::white(if row_hover { 0.075 } else { 0.045 }));
                     let text_w = cw - 330.0;
                     let desc = if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
@@ -872,7 +924,7 @@ impl Settings {
                                     cwid,
                                     ch,
                                     ch / 2.0,
-                                    if hovered { Color(0.36, 0.62, 1.0, 1.0) } else { ACCENT },
+                                    if hovered { theme::accent_hover() } else { theme::accent() },
                                 );
                                 p.circle(cx + cwid - ch / 2.0, cy + ch / 2.0, ch / 2.0 - 4.0, Color::white(1.0));
                             } else {
@@ -901,7 +953,7 @@ impl Settings {
                             let t = ((v - min) / (max - min)).clamp(0.0, 1.0);
                             let ty = cy + ch / 2.0;
                             p.rrect(cx, ty - 2.0, cwid, 4.0, 2.0, Color::white(0.18));
-                            p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, ACCENT);
+                            p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, theme::accent());
                             let knob = if hovered || self.drag.is_some_and(|(d, _)| d == i) { 9.0 } else { 7.5 };
                             p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
                             p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, h, Align::Right, Color::white(0.8));
@@ -918,15 +970,49 @@ impl Settings {
                                 let sx = cx + j as f32 * CHOICE_W;
                                 let on = current == *value;
                                 if on {
-                                    p.rrect(sx + 3.0, cy + 3.0, CHOICE_W - 6.0, ch - 6.0, 4.0, ACCENT);
+                                    p.rrect(sx + 3.0, cy + 3.0, CHOICE_W - 6.0, ch - 6.0, 4.0, theme::accent());
                                 }
                                 let c = Color::white(if on { 1.0 } else { 0.75 });
                                 p.text(label, &f.body, sx, cy, CHOICE_W, ch, Align::Center, c);
                             }
                         }
                         Ctl::Button(label) => {
-                            p.rrect(cx, cy, cwid, ch, 6.0, if hovered { Color(0.36, 0.62, 1.0, 1.0) } else { ACCENT });
+                            p.rrect(
+                                cx,
+                                cy,
+                                cwid,
+                                ch,
+                                6.0,
+                                if hovered { theme::accent_hover() } else { theme::accent() },
+                            );
                             p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
+                        }
+                        Ctl::Pick(value) => {
+                            let on = get(r.key) == value;
+                            let t = theme::THEMES.iter().find(|t| t.key == value).map(|t| theme::resolve(*t));
+                            let x1 = cx + cwid - 18.0;
+                            // A little preview: the panel colour, its outline and accent.
+                            if let Some(t) = t {
+                                let (sx, sy, sw, sh) = (x1 - 128.0, y + (h - 30.0) / 2.0, 84.0, 30.0);
+                                let (tr, tg, tb) = t.solid;
+                                p.rrect(sx, sy, sw, sh, 7.0, Color(tr, tg, tb, 1.0));
+                                if t.sheen > 0.0 {
+                                    p.rrect(sx + 1.0, sy + 1.0, sw - 2.0, sh * 0.45, 6.0, Color::white(t.sheen * 0.6));
+                                }
+                                let border = if t.border.3 > 0.0 { t.border } else { Color::white(0.06) };
+                                p.stroke_rrect(sx + 0.5, sy + 0.5, sw - 1.0, sh - 1.0, 7.0, border, 1.0);
+                                p.rrect(sx + 12.0, sy + sh / 2.0 - 2.0, 30.0, 4.0, 2.0, t.accent);
+                                p.circle(sx + sw - 16.0, sy + sh / 2.0, 4.0, Color::white(0.8));
+                            }
+                            // A radio button.
+                            let (rx, ry) = (x1 - 11.0, y + h / 2.0);
+                            if on {
+                                p.circle(rx, ry, 11.0, theme::accent());
+                                p.circle(rx, ry, 4.5, Color::white(1.0));
+                            } else {
+                                let a = if hovered { 0.75 } else { 0.5 };
+                                p.stroke_circle(rx, ry, 10.0, Color::white(a), 1.4);
+                            }
                         }
                         Ctl::Note | Ctl::Heading => {}
                     }
