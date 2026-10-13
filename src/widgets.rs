@@ -13,12 +13,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
-use crate::dock::ACCENT;
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::media::MediaInfo;
 use crate::notifications::{Access, Snapshot};
 use crate::spring::Spring;
 use crate::sysmon::{self, Sampler, HISTORY};
+use crate::theme;
 use crate::weather::Weather;
 
 const CARD_W: f32 = 330.0;
@@ -107,6 +107,8 @@ pub struct Widgets {
     anchor: (i32, i32),
     k: f32,
     acrylic: bool,
+    /// The Tint slider.
+    opacity: f32,
     radius: f32,
     pub dirty: bool,
 }
@@ -207,16 +209,16 @@ impl Widgets {
             anchor: (0, 0),
             k: 1.0,
             acrylic: true,
+            opacity: 0.55,
             radius: 8.0,
             dirty: false,
         }
     }
 
     pub fn configure(&mut self, acrylic: bool, opacity: f32, radius: f32) {
-        self.acrylic = acrylic;
+        self.acrylic = theme::style_backdrop(&self.backdrop, acrylic, opacity, radius);
+        self.opacity = opacity.clamp(0.0, 1.0);
         self.radius = radius;
-        let tint = ((opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
-        self.backdrop.style(acrylic, tint, radius);
         self.dirty = true;
     }
 
@@ -384,9 +386,7 @@ impl Widgets {
         {
             let p = gfx.painter();
             let f = &gfx.fonts;
-            let fill = if settled { Color::white(0.015) } else { Color(0.13, 0.13, 0.14, 0.97) };
-            p.rrect(0.0, 0.0, w, h, self.radius, fill);
-            p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, self.radius, Color::white(0.10), 1.0);
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, settled, self.opacity, 0.97, 1.0);
 
             // Header with the customise button.
             p.text("Widgets", &f.title, PAD + 4.0, 0.0, 200.0, HEADER, Align::Left, Color::white(0.95));
@@ -494,7 +494,7 @@ impl Widgets {
         p.rrect(tx, by, tw, 4.0, 2.0, Color::white(0.15));
         if dur > Duration::ZERO {
             let t = (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0);
-            p.rrect(tx, by, (tw * t).max(4.0), 4.0, 2.0, ACCENT);
+            p.rrect(tx, by, (tw * t).max(4.0), 4.0, 2.0, theme::accent());
             p.text(&fmt_time(pos), &f.small, tx, by + 6.0, 60.0, 14.0, Align::Left, Color::white(0.5));
             p.text(&fmt_time(dur), &f.small, tx + tw - 60.0, by + 6.0, 60.0, 14.0, Align::Right, Color::white(0.5));
         }
@@ -532,7 +532,7 @@ fn system_card(p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
     p.text("System", &f.label, x + 14.0, y + 6.0, 200.0, 26.0, Align::Left, Color::white(0.9));
     let net_max = h.down.iter().copied().fold(100.0 * 1024.0, f32::max);
     let mut rows: Vec<(&str, String, &VecDeque<f32>, f32, Color)> = vec![
-        ("CPU", format!("{:.0}%", s.cpu), &h.cpu, 100.0, ACCENT),
+        ("CPU", format!("{:.0}%", s.cpu), &h.cpu, 100.0, theme::accent()),
         (
             "Memory",
             format!("{:.1} / {:.0} GB   {:.0}%", s.ram_used, s.ram_total, s.ram),
@@ -603,7 +603,7 @@ fn calendar_card(p: &Painter, f: &Fonts, x: f32, y: f32) {
         let (cx, cy) = (x + 14.0 + col * cell + cell / 2.0, top + 30.0 + row * 31.0);
         let is_today = day == now.wDay;
         if is_today {
-            p.circle(cx, cy, 13.0, ACCENT);
+            p.circle(cx, cy, 13.0, theme::accent());
         }
         let c = if is_today { Color::white(1.0) } else { Color::white(0.85) };
         p.text(&day.to_string(), &f.body, cx - cell / 2.0, cy - 12.0, cell, 24.0, Align::Center, c);

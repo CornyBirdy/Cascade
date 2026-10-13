@@ -6,8 +6,26 @@ use std::path::PathBuf;
 const DEFAULT: &str = "\
 # Cascade config. Edit, save, then right-click the notch or tray icon > Reload config.
 
+# ---- Look ----
+# One look for the notch's lip, taskbar, Start menu, panels and Alt+Tab:
+# acrylic, liquid_glass, windows_glass, frosted, tinted (your Windows accent
+# colour), translucent, rose_pine or clean_slate (no blur).
+theme = acrylic
+
 # ---- Notch ----
 notch = true
+# lip = a thin glass strip at the top of the screen that pulls the notch down
+# when the pointer touches it; notch = the classic black notch, always there.
+notch_style = lip
+# Size of the lip in pixels at 100% scaling (its length along the edge, and
+# how far it reaches out).
+lip_width = 160
+lip_height = 5
+# Which edge of the main screen it sits on (top, bottom, left or right), and
+# where along it: 0 = the left / top end, 0.5 = the middle, 1 = the right /
+# bottom end.
+notch_edge = top
+notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
 # Grow the notch with album art / timer while music or a focus timer runs.
@@ -22,7 +40,8 @@ hide_windows_flyout = true
 scroll_volume = true
 expand_delay_ms = 120
 collapse_delay_ms = 300
-# Resting notch size in pixels at 100% scaling, and an overall size multiplier.
+# Resting size of the classic notch in pixels at 100% scaling, and an overall
+# size multiplier for the notch.
 idle_width = 180
 idle_height = 28
 scale = 1.0
@@ -48,9 +67,11 @@ taskbar_pad = 6
 taskbar_tile = 6
 # round, small or square
 taskbar_corners = round
-# Blur what's behind the taskbar and Start menu (acrylic).
+# Blur what's behind the taskbar, Start menu, panels and the notch's lip (the
+# kind of blur comes from the theme).
 acrylic = true
-# Tint strength over the blur (0 = clear glass, 1 = solid).
+# Tint strength over the blur (0 = clear glass, 1 = solid). Also used by the
+# panels and the notch's lip.
 taskbar_opacity = 0.55
 show_search = true
 show_status = true
@@ -155,7 +176,13 @@ max_fps = 144
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub theme: String,
     pub notch: bool,
+    pub notch_style: String,
+    pub lip_width: f32,
+    pub lip_height: f32,
+    pub notch_edge: String,
+    pub notch_position: f32,
     pub hide_in_fullscreen: bool,
     pub live_activity: bool,
     pub visualizer: bool,
@@ -228,7 +255,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            theme: "acrylic".into(),
             notch: true,
+            notch_style: "lip".into(),
+            lip_width: 160.0,
+            lip_height: 5.0,
+            notch_edge: "top".into(),
+            notch_position: 0.5,
             hide_in_fullscreen: true,
             live_activity: true,
             visualizer: true,
@@ -373,6 +406,11 @@ impl Config {
         (left.join(","), right.join(","))
     }
 
+    /// The notch rests as a thin lip that pulls it down on hover.
+    pub fn lip(&self) -> bool {
+        self.notch_style == "lip"
+    }
+
     /// Corner radius (layout px) matching the DWM corner style.
     pub fn corner_radius(&self) -> f32 {
         match self.taskbar_corners.as_str() {
@@ -419,7 +457,13 @@ impl Config {
                 }
             };
             match k {
+                "theme" if crate::theme::is_known(v) => c.theme = v.into(),
                 "notch" => set_b(&mut c.notch),
+                "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
+                "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
+                "lip_height" => set_f(&mut c.lip_height, 2.0, 16.0),
+                "notch_edge" if matches!(v, "top" | "bottom" | "left" | "right") => c.notch_edge = v.into(),
+                "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
@@ -529,7 +573,13 @@ impl Config {
     pub fn get(&self, key: &str) -> String {
         let b = |v: bool| v.to_string();
         match key {
+            "theme" => self.theme.clone(),
             "notch" => b(self.notch),
+            "notch_style" => self.notch_style.clone(),
+            "lip_width" => self.lip_width.to_string(),
+            "lip_height" => self.lip_height.to_string(),
+            "notch_edge" => self.notch_edge.clone(),
+            "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),

@@ -25,6 +25,7 @@ use crate::backdrop::Backdrop;
 use crate::gfx::{Color, Gfx, Layer};
 use crate::msg;
 use crate::spring::Spring;
+use crate::theme;
 
 const NIM_ADD: u32 = 0;
 const NIM_MODIFY: u32 = 1;
@@ -524,6 +525,8 @@ pub struct Flyout {
     anchor: (i32, i32),
     k: f32,
     acrylic: bool,
+    /// The Tint slider.
+    opacity: f32,
     radius: f32,
     pub dirty: bool,
 }
@@ -543,16 +546,16 @@ impl Flyout {
             anchor: (0, 0),
             k: 1.0,
             acrylic: true,
+            opacity: 0.55,
             radius: 8.0,
             dirty: false,
         }
     }
 
     pub fn configure(&mut self, acrylic: bool, opacity: f32, radius: f32) {
-        self.acrylic = acrylic;
+        self.acrylic = theme::style_backdrop(&self.backdrop, acrylic, opacity, radius);
+        self.opacity = opacity.clamp(0.0, 1.0);
         self.radius = radius;
-        let tint = ((opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
-        self.backdrop.style(acrylic, tint, radius);
     }
 
     /// Opens centred on `x`, just above `bottom` (screen px).
@@ -676,9 +679,7 @@ impl Flyout {
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
-            let fill = if settled { Color::white(0.02) } else { Color(0.13, 0.13, 0.14, 0.97) };
-            p.rrect(0.0, 0.0, w, h, self.radius, fill);
-            p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, self.radius, Color::white(0.10), 1.0);
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, settled, self.opacity, 0.97, 1.0);
             for (n, (&i, icon)) in self.items.iter().zip(&icons).enumerate() {
                 let (cx, cy) = (PAD + (n % COLS) as f32 * CELL, PAD + (n / COLS) as f32 * CELL);
                 if self.hovered == Some(i) {

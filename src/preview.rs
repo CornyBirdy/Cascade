@@ -9,6 +9,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{Align, Color, Gfx};
+use crate::theme;
 
 const ITEM_W: f32 = 220.0;
 const THUMB_W: f32 = 204.0;
@@ -210,7 +211,8 @@ impl Preview {
         let mut ps = PAINTSTRUCT::default();
         let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
         let r = (|| {
-            gfx.begin_dc(hdc, self.size.0, self.size.1, self.k, Color(0.12, 0.12, 0.13, 1.0))?;
+            let (r, g, b) = theme::current().solid;
+            gfx.begin_dc(hdc, self.size.0, self.size.1, self.k, Color(r, g, b, 1.0))?;
             {
                 let p = gfx.painter();
                 for (i, it) in self.items.iter().enumerate() {

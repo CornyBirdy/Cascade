@@ -20,11 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
 use crate::config::Config;
-use crate::dock::{Dock, ACCENT};
+use crate::dock::Dock;
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::msg;
 use crate::shell::Power;
 use crate::spring::Spring;
+use crate::theme;
 
 /// Sidebar width (when shown), and the slim icon rail it shrinks to.
 const SIDE: f32 = 184.0;
@@ -331,6 +332,8 @@ pub struct Launcher {
     layer: Layer,
     backdrop: Backdrop,
     acrylic: bool,
+    /// The Tint slider.
+    opacity: f32,
     radius: f32,
     pub open: bool,
     window_visible: bool,
@@ -398,6 +401,7 @@ impl Launcher {
             layer: Layer::default(),
             backdrop,
             acrylic: true,
+            opacity: 0.55,
             radius: 8.0,
             open: false,
             window_visible: false,
@@ -431,7 +435,8 @@ impl Launcher {
 
     /// Look and layout, from the settings.
     pub fn configure(&mut self, cfg: &Config) {
-        self.acrylic = cfg.acrylic;
+        self.acrylic = theme::blurs(cfg.acrylic);
+        self.opacity = cfg.start_opacity.clamp(0.0, 1.0);
         self.radius = cfg.corner_radius();
         self.geo = Geo::new(cfg);
         self.position = match cfg.start_position.as_str() {
@@ -439,8 +444,7 @@ impl Launcher {
             "left" => Position::Left,
             _ => Position::Auto,
         };
-        let tint = ((cfg.start_opacity.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00_1C1C1E;
-        self.backdrop.style(cfg.acrylic, tint, self.radius);
+        theme::style_backdrop(&self.backdrop, cfg.acrylic, self.opacity, self.radius);
         self.reset_scroll();
         self.close_popups();
         self.dirty = true;
@@ -887,16 +891,14 @@ impl Launcher {
             let p = gfx.painter();
             let f = &gfx.fonts;
             let r = self.radius;
-            // Over the blur only a faint wash (it also keeps the pixels
-            // clickable); while animating or without acrylic, a solid panel.
-            let fill = if settled { Color::white(0.015) } else { Color(0.13, 0.13, 0.14, 0.97) };
-            p.rrect(0.0, 0.0, g.w, g.h, r, fill);
+            // Over the blur only the theme's wash (it also keeps the pixels
+            // clickable); while animating or without blur, a solid panel.
+            theme::panel(&p, 0.0, 0.0, g.w, g.h, r, settled, self.opacity, 0.97, 1.0);
             if g.show_side {
-                p.clip(0.0, 0.0, g.side, g.h);
+                p.clip(1.0, 1.0, g.side - 1.0, g.h - 2.0);
                 p.rrect(0.0, 0.0, g.side + r * 2.0, g.h, r, Color(0.0, 0.0, 0.0, 0.16));
                 p.unclip();
             }
-            p.stroke_rrect(0.5, 0.5, g.w - 1.0, g.h - 1.0, r, Color::white(0.10), 1.0);
 
             // Search box across the two right-hand columns.
             let (sx, sw, sh) = (g.mx, g.w - PAD - g.mx, 38.0);
@@ -951,7 +953,7 @@ impl Launcher {
                         );
                     }
                     if selected {
-                        p.rrect(g.mx - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, ACCENT.alpha(e));
+                        p.rrect(g.mx - 6.0, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, theme::accent().alpha(e));
                     }
                     draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0, e);
                     let name = &self.apps[i].name;
@@ -1089,7 +1091,7 @@ impl Launcher {
                                     rw,
                                     LIST_ROW - 6.0,
                                     Align::Left,
-                                    ACCENT.alpha(e),
+                                    theme::accent().alpha(e),
                                 );
                                 let (vy0, vy1) = (y.max(top), (y + LIST_ROW).min(list_bottom));
                                 if vy1 > vy0 {
@@ -1157,7 +1159,7 @@ impl Launcher {
                                 p.rrect(cx + 3.0, cy + 3.0, cw - 6.0, ch - 6.0, 10.0, Color::white(0.06 * ja));
                             }
                             let col = match (has, hot) {
-                                (true, true) => ACCENT.alpha(ja),
+                                (true, true) => theme::accent().alpha(ja),
                                 (true, false) => Color::white(0.92 * ja),
                                 (false, _) => Color::white(0.13 * ja),
                             };
@@ -1209,7 +1211,7 @@ impl Launcher {
                     if self.hovered == Some(Target::Profile) {
                         p.rrect(10.0, py, iw, ph, 6.0, Color::white(0.07));
                     }
-                    p.circle(26.0, py + ph / 2.0, 14.0, ACCENT);
+                    p.circle(26.0, py + ph / 2.0, 14.0, theme::accent());
                     let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
                     p.text(
                         &initial,

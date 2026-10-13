@@ -4,15 +4,34 @@ A tiny native notch, taskbar and Start menu for Windows. Rust and Win32 only: no
 
 ## Notch
 
-A small black notch at the top centre of your main screen. Turn it off in the right-click menu if you don't want it.
+The notch lives at the top centre of your main screen. Turn it off in the right-click menu if you don't want it.
 
-- **Live activity:** while music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
+- **The lip (default):** at rest it's only a tiny strip of glass along the top edge, in the current theme. Push the pointer up into it and the full notch pulls down; move away and it tucks back up. While music plays the lip shows a thin line in the album art's colour, and while the focus timer runs, the timer's progress. Set its length and thickness in Settings → Notch (`lip_width`, `lip_height`, in pixels at 100% scaling).
+- **Any edge, anywhere along it:** put it on the top, bottom, left or right edge of the main screen, and slide it anywhere along that edge (Settings → Notch → Edge and Position; `notch_edge`, `notch_position` from 0 to 1). On a side edge it works like a sidebar: the lip stands upright, and the notch slides out of the edge like a drawer, rounded on its free side, with its contents the right way up. It keeps clear of taskbars, and near a corner it grows away from the corner.
+- **The classic notch:** set Style to *Notch* (`notch_style = notch`) for the black notch that's always there. While music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
 - **Hover to open.** Scroll, or click the dots at the bottom, to switch between three modes:
   - **Media:** title, artist, progress bar and play/pause/skip buttons. With nothing playing it shows the time, date, weather and battery instead.
   - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
   - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
 - **Fullscreen apps and games:** the notch and taskbar hide automatically.
+
+## Themes
+
+One theme styles everything Cascade draws: the notch's lip, the taskbar, the Start menu, the widgets panel, the tray flyout, window previews and Alt+Tab. Pick one in Settings → Appearance (or `theme =` in the config):
+
+| Theme | Look |
+|---|---|
+| **Acrylic** (default) | Frosted dark glass, like Windows 11. |
+| **Liquid Glass** | Clear glass with bright edges that catch the light. |
+| **Windows Glass** | Aero-style clear blue glass with a glossy top. |
+| **Frosted Glass** | Lighter, thicker frost with a soft edge. |
+| **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it). |
+| **Translucent** | Barely-there glass with no outline. |
+| **Rosé Pine** | Deep purple glass with iris highlights. |
+| **Clean Slate** | Solid and flat, with no blur at all. |
+
+The names follow the community themes for Windhawk's taskbar and Start menu stylers. Cascade draws its own versions; it doesn't use or need Windhawk. Each theme sets the kind of glass (frosted acrylic, a clear blur, or none), its tint, the outline, the highlights and the accent colour. The **Blur**, **Corners** and **Tint** settings on the same page apply on top of any theme.
 
 ## Taskbar
 
@@ -23,7 +42,7 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 - **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin, close, or force close (Task Manager's *End task*). **Drag** pinned apps to reorder them.
 - **Tray icons:** apps' notification-area icons show by the clock, the same ones you chose to show in Windows' taskbar settings. The rest are under the **^** button. Click and right-click them as usual. Cascade gets them the way alternative taskbars like RetroBar do: it keeps its own hidden tray window and passes everything on to Explorer, without touching Explorer itself.
 - **Clicks on the right:** the status icons open quick settings, and the clock opens the widgets panel with your notifications.
-- **Look:** full width or floating islands, centred or left-aligned, the Start button with your apps or alone on its own island at the far left, icon size, icon padding, bar padding (the gap from the bar's edge to its buttons on all four sides, which together set the bar's height) and the gap from the screen edge (all three default to the same small gap), corners, blur and tint, and which parts to show. All of it is in Settings → Taskbar.
+- **Look:** full width or floating islands, centred or left-aligned, the Start button with your apps or alone on its own island at the far left, icon size, icon padding, bar padding (the gap from the bar's edge to its buttons on all four sides, which together set the bar's height) and the gap from the screen edge (all three default to the same small gap), and which parts to show, in Settings → Taskbar. The theme, blur, corners and tint are in Settings → Appearance.
 - **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
 - **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
@@ -47,7 +66,7 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 - **Right:** every installed app A to Z, Store apps included. Scrolling is smooth, and click any letter heading to open a grid of letters and jump straight to one.
 - **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
 
-**Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, whether to show the sidebar, recent files and the all-apps list, and the glass tint. Turn off the Win-key takeover or the whole Start menu there too.
+**Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, and whether to show the sidebar, recent files and the all-apps list. Its glass tint is in Settings → Appearance. Turn off the Win-key takeover or the whole Start menu there too.
 
 ## Screens
 
@@ -90,6 +109,7 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Window previews | Captured bitmaps | DWM live thumbnails (composited by Windows) |
 | Wi-Fi / Bluetooth | Queried on demand | Radio state-change events |
 | Fullscreen | — | App-bar `ABN_FULLSCREENAPP` notification |
+| Themes | — | A palette and a DWM blur style; nothing extra runs |
 | Visualizer | Runs whenever media plays | Runs only while the bars are on screen |
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
