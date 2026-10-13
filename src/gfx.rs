@@ -4,7 +4,7 @@
 
 use std::ffi::c_void;
 
-use windows::core::{w, Result};
+use windows::core::{w, Interface, Result};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -348,6 +348,43 @@ impl Painter<'_> {
             let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
             rt.FillRoundedRectangle(&rr, &brush);
         }
+    }
+
+    fn stops(&self, stops: &[(f32, Color)]) -> Option<ID2D1GradientStopCollection> {
+        let stops: Vec<D2D1_GRADIENT_STOP> =
+            stops.iter().map(|&(position, c)| D2D1_GRADIENT_STOP { position, color: c.d2d() }).collect();
+        unsafe { self.gfx.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok() }
+    }
+
+    /// A gradient running from (x0, y0) to (x1, y1); `stops` as in `gradient_rrect`.
+    pub fn linear(&self, x0: f32, y0: f32, x1: f32, y1: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
+        let collection = self.stops(stops)?;
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(x0, y0), endPoint: pt(x1, y1) };
+        let b = unsafe { self.gfx.rt.CreateLinearGradientBrush(&props, None, &collection).ok()? };
+        b.cast().ok()
+    }
+
+    /// A gradient spreading out from (cx, cy) to `radius`.
+    pub fn radial(&self, cx: f32, cy: f32, radius: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
+        let collection = self.stops(stops)?;
+        let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+            center: pt(cx, cy),
+            gradientOriginOffset: pt(0.0, 0.0),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let b = unsafe { self.gfx.rt.CreateRadialGradientBrush(&props, None, &collection).ok()? };
+        b.cast().ok()
+    }
+
+    pub fn fill_rrect_with(&self, x: f32, y: f32, w: f32, h: f32, r: f32, brush: &ID2D1Brush) {
+        let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
+        unsafe { self.gfx.rt.FillRoundedRectangle(&rr, brush) };
+    }
+
+    pub fn stroke_rrect_with(&self, x: f32, y: f32, w: f32, h: f32, r: f32, brush: &ID2D1Brush, width: f32) {
+        let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
+        unsafe { self.gfx.rt.DrawRoundedRectangle(&rr, brush, width, None) };
     }
 
     pub fn stroke_rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color, width: f32) {

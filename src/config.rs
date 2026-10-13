@@ -9,7 +9,8 @@ const DEFAULT: &str = "\
 # ---- Look ----
 # One look for the notch's lip, taskbar, Start menu, panels and Alt+Tab:
 # acrylic, liquid_glass, windows_glass, frosted, tinted (your Windows accent
-# colour), translucent, rose_pine or clean_slate (no blur).
+# colour), translucent, rose_pine, neon, obsidian (no blur) or clean_slate
+# (no blur).
 theme = acrylic
 
 # ---- Notch ----
@@ -153,7 +154,8 @@ break_minutes = 5
 
 # ---- Weather (Open-Meteo, no account needed) ----
 weather = true
-# Empty = detect from your IP. Or a city name, or \"lat,lon\".
+# Empty = detect from your IP. Or a city name (\"Town, Country\" to pick
+# between places with the same name), or \"lat,lon\".
 weather_location =
 fahrenheit = false
 # What clicking the weather does: panel (Cascade's widgets panel), google, bing,

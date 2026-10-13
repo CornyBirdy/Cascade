@@ -2,8 +2,11 @@
 //! taskbar, the Start menu, the panels and Alt+Tab). Picked in Settings >
 //! Appearance, or `theme =` in the config.
 //!
-//! A theme only chooses colours and which kind of glass DWM puts behind a
-//! panel, so switching costs nothing at run time.
+//! A theme is a material, not only a colour: which glass DWM puts behind a
+//! panel (frosted acrylic, a clear blur or none), how the glass is washed,
+//! and how its edge catches the light (a flat line, a specular rim with
+//! glints on the corners, Aero's dark-and-light double edge, a coloured
+//! glow). It costs nothing at run time beyond a few strokes per panel.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -18,10 +21,26 @@ use crate::gfx::{Color, Painter};
 pub enum Glass {
     /// Frosted acrylic, like the Windows 11 taskbar.
     Acrylic,
-    /// A plain blur with no frost or noise (Aero-style clear glass).
+    /// A plain blur with no frost or noise (clear glass).
     Blur,
     /// No blur: a solid panel.
     Solid,
+}
+
+/// How a panel's edge is drawn.
+#[derive(Clone, Copy)]
+pub enum Rim {
+    None,
+    /// One flat line.
+    Line(Color),
+    /// Light catching thick glass: a bright top edge with glints on the
+    /// top-left and bottom-right corners, faint down the sides (the number
+    /// is its strength).
+    Specular(f32),
+    /// A dark outer line around a light inner one, like Aero's frames.
+    Double(Color, Color),
+    /// A line shading from one colour (top-left) to another (bottom-right).
+    Gradient(Color, Color),
 }
 
 #[derive(Clone, Copy)]
@@ -35,134 +54,169 @@ pub struct Theme {
     pub tint: (f32, f32, f32),
     /// Scales the Tint sliders, so clear-glass themes stay clear.
     pub tint_scale: f32,
-    /// Panel colour without blur, and while a panel animates.
+    /// Panel colour without blur.
     pub solid: (f32, f32, f32),
-    /// A faint wash over the blur (it also keeps the pixels clickable).
-    pub film: Color,
-    /// Panel outline.
-    pub border: Color,
-    /// Light catching the top edge, and pooling along the bottom (0 = none).
-    pub sheen: f32,
-    pub glow: f32,
+    /// A wash over the panel, top and bottom (it also keeps the pixels over
+    /// the blur clickable, so neither end may be fully clear).
+    pub film: (Color, Color),
+    pub rim: Rim,
+    /// Light caught just inside the edge, as in the thick rim of real glass
+    /// (with a Gradient rim, a glow in its colours). 0 = none.
+    pub bezel: f32,
+    /// A glossy reflection over the top of the panel, Aero-style. 0 = none.
+    pub gloss: f32,
     /// Highlights: the app in front, toggles, progress, today.
     pub accent: Color,
 }
 
 const WIN_BLUE: Color = Color(0.38, 0.67, 1.0, 1.0);
+const LOVE: Color = Color(0.922, 0.435, 0.573, 1.0);
 
-pub const THEMES: [Theme; 8] = [
+const fn white(a: f32) -> Color {
+    Color(1.0, 1.0, 1.0, a)
+}
+
+pub const THEMES: [Theme; 10] = [
     Theme {
         key: "acrylic",
         name: "Acrylic",
-        about: "Frosted dark glass, like Windows 11. The default.",
+        about: "Frosted dark glass with a fine outline, like Windows 11. The default.",
         glass: Glass::Acrylic,
         tint: (0.110, 0.110, 0.118),
         tint_scale: 1.0,
         solid: (0.13, 0.13, 0.14),
-        film: Color::white(0.015),
-        border: Color::white(0.10),
-        sheen: 0.0,
-        glow: 0.0,
+        film: (white(0.015), white(0.015)),
+        rim: Rim::Line(white(0.10)),
+        bezel: 0.0,
+        gloss: 0.0,
         accent: WIN_BLUE,
     },
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Clear glass with bright edges that catch the light.",
+        about: "Apple-style: nearly clear, with a thick rim that catches the light on its corners.",
         glass: Glass::Blur,
-        tint: (0.09, 0.10, 0.13),
-        tint_scale: 0.6,
-        solid: (0.15, 0.16, 0.19),
-        film: Color::white(0.04),
-        border: Color::white(0.30),
-        sheen: 0.16,
-        glow: 0.07,
-        accent: Color(0.42, 0.72, 1.0, 1.0),
+        tint: (0.10, 0.11, 0.14),
+        tint_scale: 0.3,
+        solid: (0.17, 0.18, 0.21),
+        film: (white(0.07), white(0.02)),
+        rim: Rim::Specular(1.0),
+        bezel: 0.12,
+        gloss: 0.0,
+        accent: Color(0.04, 0.52, 1.0, 1.0),
     },
     Theme {
         key: "windows_glass",
         name: "Windows Glass",
-        about: "Aero-style clear blue glass with a glossy top.",
+        about: "Aero, as in Windows 7: sky-blue glass, a glossy top and a dark-and-light edge.",
         glass: Glass::Blur,
-        tint: (0.07, 0.19, 0.33),
-        tint_scale: 0.8,
-        solid: (0.09, 0.19, 0.31),
-        film: Color::white(0.03),
-        border: Color::white(0.38),
-        sheen: 0.22,
-        glow: 0.0,
+        tint: (0.10, 0.28, 0.48),
+        tint_scale: 0.85,
+        solid: (0.10, 0.22, 0.36),
+        film: (white(0.06), white(0.01)),
+        rim: Rim::Double(Color(0.0, 0.0, 0.0, 0.55), white(0.40)),
+        bezel: 0.0,
+        gloss: 0.20,
         accent: Color(0.45, 0.78, 1.0, 1.0),
     },
     Theme {
         key: "frosted",
         name: "Frosted Glass",
-        about: "Lighter, thicker frost with a soft edge.",
+        about: "Milky, sand-blasted glass that glows softly at its edges.",
         glass: Glass::Acrylic,
-        tint: (0.24, 0.24, 0.27),
+        tint: (0.30, 0.31, 0.34),
         tint_scale: 1.0,
-        solid: (0.21, 0.21, 0.23),
-        film: Color::white(0.05),
-        border: Color::white(0.18),
-        sheen: 0.05,
-        glow: 0.0,
+        solid: (0.25, 0.26, 0.28),
+        film: (white(0.11), white(0.06)),
+        rim: Rim::Line(white(0.24)),
+        bezel: 0.09,
+        gloss: 0.0,
         accent: Color(0.42, 0.70, 1.0, 1.0),
     },
     Theme {
         key: "tinted",
         name: "Tinted Glass",
-        about: "Acrylic in your Windows accent colour.",
+        about: "Acrylic in your Windows accent colour, edged in a lighter shade of it.",
         glass: Glass::Acrylic,
-        // Filled in from the accent colour by `current`.
+        // Filled in from the accent colour by `resolve`.
         tint: (0.11, 0.11, 0.12),
         tint_scale: 1.0,
         solid: (0.13, 0.13, 0.14),
-        film: Color::white(0.02),
-        border: Color::white(0.14),
-        sheen: 0.04,
-        glow: 0.0,
+        film: (white(0.05), white(0.01)),
+        rim: Rim::Gradient(white(0.4), white(0.1)),
+        bezel: 0.0,
+        gloss: 0.0,
         accent: WIN_BLUE,
     },
     Theme {
         key: "translucent",
         name: "Translucent",
-        about: "Barely-there glass with no outline.",
+        about: "Barely-there clear glass: no tint, no outline.",
         glass: Glass::Blur,
-        tint: (0.06, 0.06, 0.07),
-        tint_scale: 0.35,
+        tint: (0.05, 0.05, 0.06),
+        tint_scale: 0.15,
         solid: (0.12, 0.12, 0.13),
-        film: Color::white(0.02),
-        border: Color::white(0.0),
-        sheen: 0.0,
-        glow: 0.0,
+        film: (white(0.012), white(0.012)),
+        rim: Rim::None,
+        bezel: 0.0,
+        gloss: 0.0,
         accent: WIN_BLUE,
     },
     Theme {
         key: "rose_pine",
         name: "Ros\u{e9} Pine",
-        about: "Deep purple glass with iris highlights.",
+        about: "Deep purple glass edged from iris to love, from the Ros\u{e9} Pine palette.",
         glass: Glass::Acrylic,
         tint: (0.098, 0.090, 0.141),
         tint_scale: 1.0,
         solid: (0.122, 0.114, 0.180),
-        film: Color(0.77, 0.65, 0.91, 0.02),
-        border: Color(0.77, 0.65, 0.91, 0.22),
-        sheen: 0.0,
-        glow: 0.0,
-        accent: Color(0.769, 0.655, 0.906, 1.0),
+        film: (Color(0.77, 0.65, 0.91, 0.05), Color(0.92, 0.44, 0.57, 0.025)),
+        rim: Rim::Gradient(Color(0.769, 0.655, 0.906, 0.75), Color(0.922, 0.435, 0.573, 0.6)),
+        bezel: 0.0,
+        gloss: 0.0,
+        accent: LOVE,
+    },
+    Theme {
+        key: "neon",
+        name: "Neon",
+        about: "Near-black glass with a cyan-to-magenta glow round the edge.",
+        glass: Glass::Acrylic,
+        tint: (0.02, 0.02, 0.04),
+        tint_scale: 1.4,
+        solid: (0.03, 0.03, 0.05),
+        film: (Color(0.0, 0.85, 1.0, 0.025), Color(1.0, 0.2, 0.8, 0.025)),
+        rim: Rim::Gradient(Color(0.0, 0.9, 1.0, 0.95), Color(1.0, 0.25, 0.85, 0.95)),
+        bezel: 0.35,
+        gloss: 0.0,
+        accent: Color(0.10, 0.70, 0.95, 1.0),
+    },
+    Theme {
+        key: "obsidian",
+        name: "Obsidian",
+        about: "Solid black, polished: a soft reflection on top and a lit rim. No blur.",
+        glass: Glass::Solid,
+        tint: (0.035, 0.035, 0.04),
+        tint_scale: 1.0,
+        solid: (0.035, 0.035, 0.04),
+        film: (white(0.02), white(0.0)),
+        rim: Rim::Specular(0.45),
+        bezel: 0.0,
+        gloss: 0.07,
+        accent: Color(0.98, 0.55, 0.20, 1.0),
     },
     Theme {
         key: "clean_slate",
         name: "Clean Slate",
-        about: "Solid and flat, with no blur at all.",
+        about: "Matte and flat: solid slate grey, no blur, no shine.",
         glass: Glass::Solid,
-        tint: (0.12, 0.12, 0.13),
+        tint: (0.12, 0.125, 0.14),
         tint_scale: 1.0,
-        solid: (0.12, 0.12, 0.13),
-        film: Color::white(0.0),
-        border: Color::white(0.08),
-        sheen: 0.0,
-        glow: 0.0,
-        accent: WIN_BLUE,
+        solid: (0.12, 0.125, 0.14),
+        film: (white(0.0), white(0.0)),
+        rim: Rim::Line(white(0.05)),
+        bezel: 0.0,
+        gloss: 0.0,
+        accent: Color(0.36, 0.52, 0.74, 1.0),
     },
 ];
 
@@ -220,7 +274,11 @@ pub fn resolve(mut t: Theme) -> Theme {
         // Darkened behind the glass so white text stays readable.
         t.tint = (r * 0.4, g * 0.4, b * 0.4);
         t.solid = (r * 0.3 + 0.04, g * 0.3 + 0.04, b * 0.3 + 0.04);
-        t.border = Color(mix(r, 1.0, 0.5), mix(g, 1.0, 0.5), mix(b, 1.0, 0.5), 0.22);
+        t.film = (Color(r, g, b, 0.08), Color(r, g, b, 0.01));
+        t.rim = Rim::Gradient(
+            Color(mix(r, 1.0, 0.6), mix(g, 1.0, 0.6), mix(b, 1.0, 0.6), 0.55),
+            Color(mix(r, 1.0, 0.2), mix(g, 1.0, 0.2), mix(b, 1.0, 0.2), 0.2),
+        );
         t.accent = Color(mix(r, 1.0, 0.3), mix(g, 1.0, 0.3), mix(b, 1.0, 0.3), 1.0);
     }
     t
@@ -234,6 +292,11 @@ pub fn accent() -> Color {
 pub fn accent_hover() -> Color {
     lighten(accent(), 0.15)
 }
+
+/// How far a panel fading in (or out) has to be shown for its glass to be
+/// on. Below it the panel is too faint for the blur to look right, so it is
+/// drawn solid; above it the blur follows the panel as it slides.
+pub const GLASS_FROM: f32 = 0.3;
 
 /// Whether panels blur what's behind them (`acrylic` is the Blur setting).
 pub fn blurs(acrylic: bool) -> bool {
@@ -250,7 +313,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
     // painted over the blur in `panel` instead, so it looks the same on
     // every Windows build).
     let tint = match t.glass {
-        Glass::Acrylic => pack(t.tint, opacity * t.tint_scale),
+        Glass::Acrylic => pack(t.tint, (opacity * t.tint_scale).min(1.0)),
         _ => pack(t.tint, 0.0),
     };
     b.style(if blur { t.glass } else { Glass::Solid }, tint, radius);
@@ -263,9 +326,9 @@ pub fn style_opaque(b: &Backdrop, radius: f32) {
     b.style(Glass::Acrylic, pack(current().solid, 1.0), radius);
 }
 
-/// Paints a panel: over a live blur (`blurred`) the theme's wash, otherwise
-/// a solid panel at `solid_alpha`; then the sheen and the outline. `alpha`
-/// fades all of it.
+/// Paints a panel in the current theme: over a live blur (`blurred`) the
+/// theme's wash, otherwise a solid panel at `solid_alpha`; then its
+/// reflections and edge. `alpha` fades all of it.
 pub fn panel(
     p: &Painter,
     x: f32,
@@ -278,37 +341,164 @@ pub fn panel(
     solid_alpha: f32,
     alpha: f32,
 ) {
-    let t = current();
+    paint(p, &current(), x, y, w, h, r, blurred, opacity, solid_alpha, alpha);
+}
+
+/// `panel` in theme `t`.
+pub fn paint(
+    p: &Painter,
+    t: &Theme,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    blurred: bool,
+    opacity: f32,
+    solid_alpha: f32,
+    alpha: f32,
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
     if blurred {
         if t.glass == Glass::Blur {
             let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, (opacity * t.tint_scale).clamp(0.0, 1.0) * alpha));
         }
-        p.rrect(x, y, w, h, r, t.film.alpha(alpha));
     } else {
         let (cr, cg, cb) = t.solid;
         p.rrect(x, y, w, h, r, Color(cr, cg, cb, solid_alpha * alpha));
     }
-    if (t.sheen > 0.0 || t.glow > 0.0) && h > 2.0 {
-        // The light fades out over the first and last few pixels.
-        let edge = (36.0 / h).min(0.5);
+    let (top, bottom) = t.film;
+    if top.3 > 0.0 || bottom.3 > 0.0 {
+        p.gradient_rrect(x, y, w, h, r, &[(0.0, top.alpha(alpha)), (1.0, bottom.alpha(alpha))]);
+    }
+
+    if t.gloss > 0.0 && h > 4.0 {
+        // A reflection with a crisp lower edge over the top of the panel
+        // (about half of a bar, a strip across the top of a tall panel).
+        let band = (h * 0.5).min(42.0) / h;
+        let g = t.gloss * alpha;
         p.gradient_rrect(
             x,
             y,
             w,
             h,
             r,
-            &[
-                (0.0, Color::white(t.sheen * alpha)),
-                (edge, Color::white(0.0)),
-                (1.0 - edge, Color::white(0.0)),
-                (1.0, Color::white(t.glow * alpha)),
-            ],
+            &[(0.0, white(g)), (band * 0.92, white(g * 0.35)), (band, white(0.0)), (1.0, white(0.0))],
         );
     }
-    if t.border.3 > 0.0 {
-        p.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, r, t.border.alpha(alpha), 1.0);
+
+    if t.bezel > 0.0 && h > 6.0 {
+        bezel(p, t, x, y, w, h, r, alpha);
     }
+
+    let line = p.px(1.0);
+    let (lx, ly, lw, lh) = (x + line / 2.0, y + line / 2.0, w - line, h - line);
+    match t.rim {
+        Rim::None => {}
+        Rim::Line(c) => p.stroke_rrect(lx, ly, lw, lh, r, c.alpha(alpha), line),
+        Rim::Double(outer, inner) => {
+            p.stroke_rrect(lx, ly, lw, lh, r, outer.alpha(alpha), line);
+            let i = line;
+            p.stroke_rrect(lx + i, ly + i, lw - 2.0 * i, lh - 2.0 * i, (r - i).max(0.0), inner.alpha(alpha), line);
+        }
+        Rim::Gradient(a, b) => {
+            if let Some(brush) = p.linear(x, y, x + w, y + h, &[(0.0, a.alpha(alpha)), (1.0, b.alpha(alpha))]) {
+                p.stroke_rrect_with(lx, ly, lw, lh, r, &brush, line);
+            }
+        }
+        Rim::Specular(s) => specular(p, x, y, w, h, r, s * alpha),
+    }
+}
+
+/// The lit rim of thick glass: a faint line all round, brighter along the
+/// top and a little along the bottom, with glints on the top-left and
+/// bottom-right corners.
+fn specular(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
+    let line = p.px(1.0);
+    let (lx, ly, lw, lh) = (x + line / 2.0, y + line / 2.0, w - line, h - line);
+    let edge = (28.0 / h).min(0.45);
+    if let Some(b) = p.linear(
+        x,
+        y,
+        x,
+        y + h,
+        &[(0.0, white(0.50 * s)), (edge, white(0.16 * s)), (1.0 - edge, white(0.12 * s)), (1.0, white(0.30 * s))],
+    ) {
+        p.stroke_rrect_with(lx, ly, lw, lh, r, &b, line);
+    }
+    // Glints, a little wider than the line so they read as light.
+    let reach = w.min(h * 3.0).clamp(24.0, 220.0);
+    let glint = p.px(1.5);
+    let (gx, gy, gw, gh) = (x + glint / 2.0, y + glint / 2.0, w - glint, h - glint);
+    for (cx, cy, a) in [(x + r * 0.3, y + r * 0.3, 0.85), (x + w - r * 0.3, y + h - r * 0.3, 0.5)] {
+        if let Some(b) = p.radial(cx, cy, reach, &[(0.0, white(a * s)), (0.45, white(a * s * 0.3)), (1.0, white(0.0))])
+        {
+            p.stroke_rrect_with(gx, gy, gw, gh, r, &b, glint);
+        }
+    }
+}
+
+/// Light just inside the edge: a few soft rings, strongest at the rim and
+/// fading inwards. Over glass they read as the bevel of a thick pane; with a
+/// gradient rim they are its glow.
+fn bezel(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32, alpha: f32) {
+    let rings = [(1.5, 1.0), (3.5, 0.55), (6.0, 0.25)];
+    for (inset, k) in rings {
+        let (ix, iy, iw, ih) = (x + inset, y + inset, w - 2.0 * inset, h - 2.0 * inset);
+        if iw <= 0.0 || ih <= 0.0 {
+            break;
+        }
+        let a = t.bezel * k * alpha;
+        let ir = (r - inset).max(0.0);
+        let width = 2.0;
+        let stops = match t.rim {
+            Rim::Gradient(c0, c1) => [(0.0, Color(c0.0, c0.1, c0.2, a)), (1.0, Color(c1.0, c1.1, c1.2, a))],
+            // Glass: brighter at the top, where the light comes from.
+            _ => [(0.0, white(a)), (1.0, white(a * 0.45))],
+        };
+        let brush = match t.rim {
+            Rim::Gradient(..) => p.linear(x, y, x + w, y + h, &stops),
+            _ => p.linear(x, y, x, y + h, &stops),
+        };
+        if let Some(b) = brush {
+            p.stroke_rrect_with(ix, iy, iw, ih, ir, &b, width);
+        }
+    }
+}
+
+/// A small sample of theme `t` for the settings page: the panel over a
+/// colourful wallpaper, so clear and frosted glass look different.
+pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
+    // The "wallpaper", seen through the glass.
+    if let Some(b) = p.linear(
+        x,
+        y,
+        x + w,
+        y + h,
+        &[(0.0, Color(1.0, 0.42, 0.24, 1.0)), (0.5, Color(0.98, 0.31, 0.64, 1.0)), (1.0, Color(0.48, 0.24, 1.0, 1.0))],
+    ) {
+        p.fill_rrect_with(x, y, w, h, r, &b);
+    }
+    let opacity = 0.55;
+    match t.glass {
+        // Frost hides the wallpaper; clear glass mostly shows it.
+        Glass::Acrylic => {
+            let (cr, cg, cb) = t.tint;
+            p.rrect(x, y, w, h, r, Color(cr, cg, cb, (0.55 + opacity * t.tint_scale * 0.4).min(0.95)));
+            p.rrect(x, y, w, h, r, white(0.04));
+        }
+        Glass::Blur => {
+            let (cr, cg, cb) = t.tint;
+            p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5));
+        }
+        Glass::Solid => {}
+    }
+    paint(p, t, x, y, w, h, r, t.glass != Glass::Solid, opacity, 1.0, 1.0);
+    p.rrect(x + 12.0, y + h / 2.0 - 2.0, 30.0, 4.0, 2.0, t.accent);
+    p.circle(x + w - 16.0, y + h / 2.0, 4.0, white(0.85));
 }
 
 #[cfg(test)]
@@ -320,6 +510,15 @@ mod tests {
         assert_eq!(THEMES[0].key, "acrylic");
         for (i, a) in THEMES.iter().enumerate() {
             assert!(THEMES.iter().skip(i + 1).all(|b| b.key != a.key), "duplicate theme {}", a.key);
+        }
+    }
+
+    #[test]
+    fn glass_stays_clickable() {
+        // Over a blur, the film is all that keeps the panel's pixels from
+        // being fully clear (and so clicking through).
+        for t in THEMES.iter().filter(|t| t.glass != Glass::Solid) {
+            assert!(t.film.0 .3 > 0.0 && t.film.1 .3 > 0.0, "{} has a clear film", t.key);
         }
     }
 

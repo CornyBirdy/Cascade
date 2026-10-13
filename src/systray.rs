@@ -668,18 +668,15 @@ impl Flyout {
         if self.open {
             crate::mousehook::set_rect(1, Some(RECT { left: x, top: y, right: x + pw, bottom: y + ph }));
         }
-        let settled = self.open && self.acrylic && self.reveal.value > 0.97;
-        if settled {
-            self.backdrop.place(RECT { left: x, top: y, right: x + pw, bottom: y + ph }, self.hwnd);
-        } else {
-            self.backdrop.hide();
-        }
+        // Glass while it slides in and out too (placed once the frame is out).
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        let screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         let px = (16.0 * k).round() as u32;
         let icons: Vec<_> = self.items.iter().map(|&i| tray.bitmap(i, gfx, px)).collect();
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
-            theme::panel(&p, 0.0, 0.0, w, h, self.radius, settled, self.opacity, 0.97, 1.0);
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, glass, self.opacity, 0.97, 1.0);
             for (n, (&i, icon)) in self.items.iter().zip(&icons).enumerate() {
                 let (cx, cy) = (PAD + (n % COLS) as f32 * CELL, PAD + (n / COLS) as f32 * CELL);
                 if self.hovered == Some(i) {
@@ -692,6 +689,12 @@ impl Flyout {
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
-        gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)
+        let shown = gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha);
+        if !glass {
+            self.backdrop.hold(screen);
+        } else if self.backdrop.track(screen, None, self.hwnd) {
+            self.dirty = true;
+        }
+        shown
     }
 }

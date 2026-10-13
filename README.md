@@ -9,7 +9,7 @@ The notch lives at the top centre of your main screen. Turn it off in the right-
 - **The lip (default):** at rest it's only a tiny strip of glass along the top edge, in the current theme. Push the pointer up into it and the full notch pulls down; move away and it tucks back up. While music plays the lip shows a thin line in the album art's colour, and while the focus timer runs, the timer's progress. Set its length and thickness in Settings → Notch (`lip_width`, `lip_height`, in pixels at 100% scaling).
 - **Any edge, anywhere along it:** put it on the top, bottom, left or right edge of the main screen, and slide it anywhere along that edge (Settings → Notch → Edge and Position; `notch_edge`, `notch_position` from 0 to 1). On a side edge it works like a sidebar: the lip stands upright, and the notch slides out of the edge like a drawer, rounded on its free side, with its contents the right way up. It keeps clear of taskbars, and near a corner it grows away from the corner.
 - **The classic notch:** set Style to *Notch* (`notch_style = notch`) for the black notch that's always there. While music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
-- **Hover to open.** Scroll, or click the dots at the bottom, to switch between three modes:
+- **Hover to open.** Click a tab in the tab bar along the bottom (or scroll, or swipe sideways on a touchpad) to switch between three modes:
   - **Media:** title, artist, progress bar and play/pause/skip buttons. With nothing playing it shows the time, date, weather and battery instead.
   - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
   - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
@@ -22,16 +22,18 @@ One theme styles everything Cascade draws: the notch's lip, the taskbar, the Sta
 
 | Theme | Look |
 |---|---|
-| **Acrylic** (default) | Frosted dark glass, like Windows 11. |
-| **Liquid Glass** | Clear glass with bright edges that catch the light. |
-| **Windows Glass** | Aero-style clear blue glass with a glossy top. |
-| **Frosted Glass** | Lighter, thicker frost with a soft edge. |
-| **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it). |
-| **Translucent** | Barely-there glass with no outline. |
-| **Rosé Pine** | Deep purple glass with iris highlights. |
-| **Clean Slate** | Solid and flat, with no blur at all. |
+| **Acrylic** (default) | Frosted dark glass with a fine outline, like Windows 11. |
+| **Liquid Glass** | Apple-style: nearly clear glass with a thick rim that catches the light, with glints on its corners. |
+| **Windows Glass** | Aero, as in Windows 7: sky-blue glass, a glossy top and a dark-and-light edge. |
+| **Frosted Glass** | Milky, sand-blasted glass that glows softly at its edges. |
+| **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it), edged in a lighter shade of it. |
+| **Translucent** | Barely-there clear glass: no tint, no outline. |
+| **Rosé Pine** | Deep purple glass edged from iris to love, from the Rosé Pine palette. |
+| **Neon** | Near-black glass with a cyan-to-magenta glow round the edge. |
+| **Obsidian** | Polished solid black with a soft reflection and a lit rim. No blur. |
+| **Clean Slate** | Matte, flat slate grey. No blur, no shine. |
 
-The names follow the community themes for Windhawk's taskbar and Start menu stylers. Cascade draws its own versions; it doesn't use or need Windhawk. Each theme sets the kind of glass (frosted acrylic, a clear blur, or none), its tint, the outline, the highlights and the accent colour. The **Blur**, **Corners** and **Tint** settings on the same page apply on top of any theme.
+Each theme is a material: the kind of glass (frosted acrylic, a clear blur, or none), how it's washed, and how its edge catches the light. Settings → Appearance shows a sample of each over a colourful backdrop. The glass stays on while panels slide and the notch opens, not just once they've settled. The **Blur**, **Corners** and **Tint** settings on the same page apply on top of any theme.
 
 ## Taskbar
 
@@ -50,9 +52,10 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
 ## Widgets
 
-- **On the taskbar:** the weather, what's playing (with a play / pause button), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order (Settings → Widgets, or the two lists `taskbar_left` and `taskbar_right` in the config).
+- **On the taskbar:** the weather, what's playing (with a play / pause button), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
 - **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (dismiss one with its ×, or *Clear all*), what's playing (art, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
-- **Customising it** (Settings → Widgets): the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (a list like `media,system,weather,calendar`; leave one out to hide it), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
+- **Customising it** (Settings → Widgets): the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
+- **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
 - **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 
 ## Start menu

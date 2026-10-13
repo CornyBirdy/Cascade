@@ -1267,22 +1267,19 @@ impl Dock {
         self.geo = self.layout(ww, wh, status, &inline, overflow, wd.media.is_some(), has_weather);
         let g = &self.geo;
 
-        // Blur behind each island, just under this window.
-        let settled = self.reveal.value > 0.95;
-        for (i, b) in self.backdrops.iter_mut().enumerate() {
-            match g.islands.get(i) {
-                Some(&(x0, x1)) if self.acrylic && settled => b.place(
-                    RECT {
-                        left: pos.x + (x0 * k).round() as i32,
-                        top: pos.y + (g.y0 * k).round() as i32,
-                        right: pos.x + (x1 * k).round() as i32,
-                        bottom: pos.y + (g.y1 * k).round() as i32,
-                    },
-                    self.hwnd,
-                ),
-                _ => b.hide(),
-            }
-        }
+        // Blur behind each island, just under this window (placed once the
+        // frame is presented). Also while the bar sinks or rises: it follows.
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        let islands: Vec<RECT> = g
+            .islands
+            .iter()
+            .map(|&(x0, x1)| RECT {
+                left: pos.x + (x0 * k).round() as i32,
+                top: pos.y + (g.y0 * k).round() as i32,
+                right: pos.x + (x1 * k).round() as i32,
+                bottom: pos.y + (g.y1 * k).round() as i32,
+            })
+            .collect();
 
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
@@ -1293,8 +1290,7 @@ impl Dock {
             for &(x0, x1) in &g.islands {
                 // Over the blur only the theme's wash (it also keeps the
                 // pixels clickable); without blur a solid panel.
-                let blurred = self.acrylic && settled;
-                theme::panel(&p, x0, g.y0, x1 - x0, bh, r, blurred, self.opacity, 0.6 + 0.4 * self.opacity, 1.0);
+                theme::panel(&p, x0, g.y0, x1 - x0, bh, r, glass, self.opacity, 0.6 + 0.4 * self.opacity, 1.0);
             }
             let b = self.button();
             let by = g.y0 + (bh - b) / 2.0;
@@ -1523,6 +1519,13 @@ impl Dock {
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
         gfx.present(&self.layer, self.hwnd, pos, pw, ph, alpha)?;
+        for (i, b) in self.backdrops.iter_mut().enumerate() {
+            match islands.get(i) {
+                Some(&rect) if glass => self.dirty |= b.track(rect, None, self.hwnd),
+                Some(&rect) => b.hold(rect),
+                None => b.hide(),
+            }
+        }
         if self.autohide && self.reveal.target == 0.0 && self.reveal.value < 0.01 && self.window_visible {
             // Fully faded out: stop covering anything.
             self.hide_window();
