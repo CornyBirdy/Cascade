@@ -18,6 +18,7 @@ mod launcher;
 mod media;
 mod mouseedge;
 mod mousehook;
+mod notifications;
 mod pomodoro;
 mod preview;
 mod radios;
@@ -59,6 +60,8 @@ pub mod msg {
     pub const KEY_CHECK: u32 = WM_APP + 19;
     /// Alt+Tab: wParam 0 next, 1 previous, 2 commit, 3 cancel.
     pub const SWITCH: u32 = WM_APP + 20;
+    /// The notifications widget's list (a boxed `notifications::Snapshot`).
+    pub const NOTIFS: u32 = WM_APP + 21;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

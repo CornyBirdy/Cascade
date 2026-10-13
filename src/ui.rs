@@ -46,6 +46,7 @@ use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::mouseedge;
 use crate::switcher::Switcher;
+use crate::notifications::{self, NotifCmd};
 use crate::systray::{self, Flyout, Systray};
 use crate::sysmon::Sampler;
 use crate::widgets::{self, Widgets};
@@ -75,6 +76,8 @@ const TIMER_PREVIEW_SHOW: usize = 12;
 const TIMER_PREVIEW_HIDE: usize = 13;
 const TIMER_CLOCK: usize = 14;
 const TIMER_SCAN2: usize = 16;
+const TIMER_TRAYSYNC: usize = 17;
+const TIMER_NOTIFS: usize = 18;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -185,6 +188,9 @@ struct App {
     media: Option<MediaInfo>,
     art: Option<(Arc<Art>, ID2D1Bitmap, u32)>,
     media_tx: Sender<MediaCmd>,
+    notif_tx: Sender<NotifCmd>,
+    /// Windows' notifications, for the widgets panel.
+    notifs: notifications::Snapshot,
     volume: Option<Volume>,
     vol: (f32, bool),
     brightness: u32,
@@ -232,6 +238,10 @@ struct App {
     dock_held: bool,
     /// When the Win key last closed the menu.
     win_closed_at: Option<Instant>,
+    /// When Cascade last asked apps to re-add their tray icons, and how many
+    /// of the follow-up asks after a start are still to come.
+    tray_announced: Option<Instant>,
+    tray_syncs: u8,
     /// When a click outside last closed the Start menu or tray flyout, so the
     /// same click on its button doesn't open it again.
     outside_close: Option<Instant>,
@@ -459,6 +469,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::NOTIFS => {
+            let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
+            with_app(move |a| {
+                a.notifs = *n;
+                a.widgets.dirty = true;
+            });
+            return LRESULT(0);
+        }
         msg::WEATHER => {
             let w = Box::from_raw(lp.0 as *mut Weather);
             with_app(move |a| {
@@ -618,6 +636,8 @@ impl App {
             media: None,
             art: None,
             media_tx,
+            notif_tx: notifications::spawn(),
+            notifs: notifications::Snapshot::default(),
             volume,
             vol,
             brightness: 0,
@@ -654,6 +674,8 @@ impl App {
             widgets_seen: false,
             dock_held: false,
             win_closed_at: None,
+            tray_announced: None,
+            tray_syncs: 0,
             message: String::new(),
             message_color: ACCENT,
             update_available: None,
@@ -815,6 +837,13 @@ impl App {
             (true, None) => {
                 self.systray.hwnd = systray::start(self.instance);
                 self.tray_rect = RECT::default();
+                // Apps still starting (or Explorer, at sign-in) miss the first
+                // announcement: ask again a few times.
+                self.tray_announced = Some(Instant::now());
+                self.tray_syncs = 3;
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 4000, None);
+                }
             }
             (false, Some(h)) => {
                 systray::stop(h);
@@ -991,6 +1020,16 @@ impl App {
             return Some(LRESULT(0));
         }
         if m == self.taskbar_created && m != 0 {
+            // Explorer made its taskbar (sign-in, or it restarted): its tray
+            // window now sits in front of ours, so take the front back and
+            // have the apps add their icons here. Our own announcement comes
+            // back to us too, hence the pause.
+            let echo = self.tray_announced.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+            if self.systray.hwnd.is_some() && !echo {
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 500, None);
+                }
+            }
             if let Some(t) = &self.tray {
                 t.add();
             }
@@ -1294,8 +1333,15 @@ impl App {
                 }
             }
             Hot::Notifications => {
-                shell::open("ms-actioncenter:");
-                self.expanded = false;
+                // Cascade's widgets panel holds the notifications when its
+                // taskbar is on; without one there's nowhere to anchor it.
+                if self.cfg.dock {
+                    self.expanded = false;
+                    self.toggle_widgets();
+                } else {
+                    shell::open("ms-actioncenter:");
+                    self.expanded = false;
+                }
             }
             Hot::PomoToggle => {
                 self.pomo.toggle();
@@ -1366,6 +1412,26 @@ impl App {
             TIMER_TICK => self.dirty = true,
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
+            TIMER_NOTIFS => {
+                if self.widgets.open && self.cfg.widgets_notifications {
+                    let _ = self.notif_tx.send(NotifCmd::Refresh);
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_NOTIFS, 3000, None);
+                    }
+                }
+            }
+            TIMER_TRAYSYNC => {
+                if let Some(h) = self.systray.hwnd {
+                    self.tray_announced = Some(Instant::now());
+                    systray::announce(h);
+                    if self.tray_syncs > 0 {
+                        self.tray_syncs -= 1;
+                        unsafe {
+                            SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 8000, None);
+                        }
+                    }
+                }
+            }
             TIMER_STATS => self.sample_stats(),
             TIMER_SWITCH => {
                 self.switcher.show_now();
@@ -1415,6 +1481,17 @@ impl App {
             config::log("start: the Windows Start menu opened as Cascade's closed; closing it");
             self.launcher.hide();
             shell::close_start_menu();
+            return;
+        }
+        // Windows' menu came up over ours (the Win key reached both): take the
+        // foreground back, which closes theirs and leaves ours alone.
+        if event == EVENT_SYSTEM_FOREGROUND
+            && self.cfg.launcher
+            && self.launcher.open
+            && shell::is_start_menu(hwnd)
+        {
+            config::log("start: the Windows Start menu opened over Cascade's; closing it");
+            launcher::force_foreground(self.launcher.hwnd);
             return;
         }
         if event == EVENT_SYSTEM_FOREGROUND
@@ -1885,6 +1962,10 @@ impl App {
                 self.dock.close_all(i);
                 self.preview.hide();
             }
+            AppCmd::ForceClose => {
+                self.dock.force_close(i);
+                self.preview.hide();
+            }
             AppCmd::None => {}
         }
     }
@@ -1993,7 +2074,8 @@ impl App {
             DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
             DockHot::MusicToggle => self.toggle_play(),
             DockHot::Status => shell::open("ms-actioncenter:controlcenter/&showFooter=true"),
-            DockHot::Clock => shell::open("ms-actioncenter:"),
+            // Notifications live in the widgets panel now.
+            DockHot::Clock => self.toggle_widgets(),
         }
     }
 
@@ -2095,8 +2177,18 @@ impl App {
         self.dock.set_held(true);
         let right = self.dock.bar_rect().right;
         let bottom = self.dock.panel_top() - (8.0 * self.dpi) as i32;
-        self.widgets.show(&self.cfg.widgets_panel, self.cfg.widgets_columns, right, bottom, self.dpi);
+        let max_h = bottom - self.monitor.top - (8.0 * self.dpi) as i32;
+        let notifications = self.cfg.widgets_notifications;
+        let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
+        self.widgets.show(panel, notifications, columns, right, bottom, max_h, self.dpi);
         self.arm_stats();
+        if notifications {
+            // Read now, then every few seconds while the panel stays open.
+            let _ = self.notif_tx.send(NotifCmd::Refresh);
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_NOTIFS, 3000, None);
+            }
+        }
     }
 
     fn handle_widgets(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
@@ -2126,6 +2218,20 @@ impl App {
                     Some(widgets::Action::Customise) => {
                         self.widgets.hide();
                         self.open_settings();
+                    }
+                    Some(widgets::Action::ClearNotifications) => {
+                        self.notifs.items.clear();
+                        let _ = self.notif_tx.send(NotifCmd::Clear);
+                    }
+                    Some(widgets::Action::RemoveNotification(id)) => {
+                        // Gone right away; the next read confirms it.
+                        self.notifs.items.retain(|n| n.id != id);
+                        self.widgets.hovered_clear();
+                        let _ = self.notif_tx.send(NotifCmd::Remove(id));
+                    }
+                    Some(widgets::Action::NotificationSettings) => {
+                        self.widgets.hide();
+                        shell::open("ms-settings:privacy-notifications");
                     }
                     None => {}
                 }
@@ -2385,6 +2491,7 @@ impl App {
                 media: self.media.as_ref(),
                 art,
                 weather: self.weather.as_ref(),
+                notifs: &self.notifs,
             };
             let _ = self.widgets.render(&mut self.gfx, &ctx);
         }
@@ -2949,6 +3056,7 @@ fn pause(p: &Painter, x: f32, cy: f32, c: Color) {
 }
 
 pub(crate) fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: bool, c: Color) {
+    let (cx, cy) = (p.snap(cx), p.snap(cy));
     let x0 = cx - s * 0.5;
     p.polygon(
         &[
@@ -2962,7 +3070,7 @@ pub(crate) fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: 
         c,
     );
     let ax = x0 + s * 0.47;
-    let stroke = s * 0.09;
+    let stroke = p.px(s * 0.09);
     if muted {
         let (a, b) = (ax + s * 0.2, ax + s * 0.5);
         p.line(a, cy - s * 0.15, b, cy + s * 0.15, c, stroke);

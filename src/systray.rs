@@ -207,10 +207,19 @@ pub fn start(instance: HINSTANCE) -> Option<HWND> {
             None,
         )
         .ok()?;
+        announce(hwnd);
+        Some(hwnd)
+    }
+}
+
+/// Puts our tray window first and tells every app a taskbar exists, so they
+/// add their icons to it. Apps that started before Cascade, or before
+/// Explorer finished signing in, only do this when asked again.
+pub fn announce(hwnd: HWND) {
+    unsafe {
         put_first(hwnd);
         let created = RegisterWindowMessageW(w!("TaskbarCreated"));
         let _ = SendNotifyMessageW(HWND_BROADCAST, created, WPARAM(0), LPARAM(0));
-        Some(hwnd)
     }
 }
 

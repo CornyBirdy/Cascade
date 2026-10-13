@@ -226,7 +226,17 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else if is_win && up {
                     let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                     if was_down && !COMBO.load(Ordering::Relaxed) {
+                        // The mask tap at key-down can land before Windows has
+                        // registered the Win press, and then its Start menu
+                        // opens too. Send another one right before the release,
+                        // as one batch with it, and hold back the real release.
+                        // If Windows didn't accept the batch the real one passes.
+                        let handled = masked_release(vk);
                         on_lone_win();
+                        if handled {
+                            request_check();
+                            return LRESULT(1);
+                        }
                     }
                 } else if down && WIN_DOWN.load(Ordering::Relaxed) {
                     COMBO.store(true, Ordering::Relaxed);

@@ -153,8 +153,8 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "taskbar_start",
                 "Start button",
-                "With your apps, or alone on its own island at the far right.",
-                Choice(&[("with_apps", "With the apps"), ("right", "Far right")]),
+                "With your apps (centre or left, as set above), or alone on its own island at the far left.",
+                Choice(&[("with_apps", "With the apps"), ("left", "Far left")]),
             ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
@@ -185,7 +185,7 @@ fn rows(section: usize) -> Vec<Row> {
             row("taskbar_opacity", "Tint", "How dark the glass is.", slider(0.0, 1.0, 0.05, Unit::Percent)),
             row("show_search", "Search box", "Next to the Start button.", Toggle),
             row("show_status", "Network, volume and battery", "Opens quick settings when clicked.", Toggle),
-            row("show_clock", "Clock", "Opens notifications when clicked.", Toggle),
+            row("show_clock", "Clock", "Opens the widgets panel, with your notifications, when clicked.", Toggle),
             row(
                 "tray_icons",
                 "App icons by the clock",
@@ -265,6 +265,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "Right side order",
                 "Left to right, ending at the system tray.",
                 Text { secret: false },
+            ),
+            row(
+                "widgets_notifications",
+                "Notifications card",
+                "Windows' notifications at the top of the panel. The clock opens it.",
+                Toggle,
             ),
             row(
                 "widgets_panel",
