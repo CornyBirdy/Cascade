@@ -70,7 +70,6 @@ pub struct Theme {
 }
 
 const WIN_BLUE: Color = Color(0.38, 0.67, 1.0, 1.0);
-const IRIS: Color = Color(0.769, 0.655, 0.906, 1.0);
 const LOVE: Color = Color(0.922, 0.435, 0.573, 1.0);
 
 const fn white(a: f32) -> Color {
