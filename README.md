@@ -23,17 +23,17 @@ One theme styles everything Cascade draws: the notch's lip, the taskbar, the Sta
 | Theme | Look |
 |---|---|
 | **Acrylic** (default) | Frosted dark glass with a fine edge, lit along the top, like Windows 11. |
-| **Liquid Glass** | Apple-style clear glass: light gathers in its thick edge, splits into colour (a cool fringe on top, a warm one below) and glints on the corners. |
+| **Liquid Glass** | Apple-style clear glass you can see through (no blur): light gathers in its thick edge, splits into colour (a cool fringe on top, a warm one below) and glints on the corners. |
 | **Windows Glass** | Aero, as in Windows 7: coloured glass with a glossy top, faint diagonal light streaks and a dark-and-light edge. |
 | **Frosted Glass** | Milky, sand-blasted glass that carries light to its edges, where it glows. |
 | **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it), edged and softly lit in a lighter shade of it. |
-| **Translucent** | Barely-there clear glass: no tint, no outline, only a faint bend of light at its edge. |
+| **Translucent** | Barely-there clear glass: no blur, no tint, no outline, only a faint bend of light at its edge. |
 | **Rosé Pine** | Deep purple glass edged and lit from iris to love, from the Rosé Pine palette. |
 | **Neon** | Near-black glass whose cyan-to-magenta edge gives off light, glowing into the glass. |
 | **Obsidian** | Polished solid black: it reflects the room, with a bevelled, lit edge. No blur. |
 | **Clean Slate** | Matte, flat slate grey, softly lit from above. No blur, no shine. |
 
-Each theme is a material, not just a colour: the kind of glass (frosted acrylic, a clear blur, or none), how it's washed, how its edge is drawn, and how light passes through it. Thick glass bends light round its rounded edge, so it gathers in a band that fades smoothly into the glass; frosted glass glows at its edges; Aero has its gloss and streaks; polished stone reflects; matte slate is lit from above. Settings → Appearance shows a sample of each over a colourful backdrop: click one to use it. The glass stays on while panels slide and the notch opens, not just once they've settled.
+Each theme is a material, not just a colour: the kind of glass (frosted acrylic, a blur, clear glass with no blur at all, or none), how it's washed, how its edge is drawn, and how light passes through it. Thick glass bends light round its rounded edge, so it gathers in a band that fades smoothly into the glass; frosted glass glows at its edges; Aero has its gloss and streaks; polished stone reflects; matte slate is lit from above. Settings → Appearance shows a sample of each over a colourful backdrop: click one to use it. The glass stays on while panels slide and the notch opens, not just once they've settled.
 
 Everything about the look is on that one page:
 
