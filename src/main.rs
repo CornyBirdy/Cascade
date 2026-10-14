@@ -15,6 +15,7 @@ mod http;
 mod icons;
 mod keyhook;
 mod launcher;
+mod lens;
 mod media;
 mod mouseedge;
 mod mousehook;

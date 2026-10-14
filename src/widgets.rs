@@ -492,7 +492,7 @@ impl Widgets {
         }
         // Bars moving with the music, under the art.
         if let Some((levels, c)) = &ctx.bars {
-            crate::ui::spectrum(p, levels, x + 14.0, y + 106.0, art, 9, 18.0, c.alpha(0.95));
+            crate::ui::spectrum(p, levels, x + 14.0, y + 118.0, art, 12, 22.0, c.alpha(0.95));
         }
         let tx = x + 14.0 + art + 14.0;
         let tw = CARD_W - (tx - x) - 14.0;

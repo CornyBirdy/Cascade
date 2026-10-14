@@ -22,6 +22,9 @@ theme_intensity = 1
 # How strongly the glass's edge catches the light (its outline, and the light
 # gathered and glowing along it): 0 = none, 1 = as designed, 2 = twice as strong.
 theme_edge = 1
+# Clear glass (Liquid Glass, Translucent) bends what's behind it round its
+# edge, like real thick glass. Reads the screen behind it a few times a second.
+refraction = true
 
 # ---- Notch ----
 notch = true
@@ -201,6 +204,7 @@ pub struct Config {
     pub theme_hue: f32,
     pub theme_intensity: f32,
     pub theme_edge: f32,
+    pub refraction: bool,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -287,6 +291,7 @@ impl Default for Config {
             theme_hue: 210.0,
             theme_intensity: 1.0,
             theme_edge: 1.0,
+            refraction: true,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -496,6 +501,7 @@ impl Config {
                 "theme_hue" => set_f(&mut c.theme_hue, 0.0, 360.0),
                 "theme_intensity" => set_f(&mut c.theme_intensity, 0.0, 2.0),
                 "theme_edge" => set_f(&mut c.theme_edge, 0.0, 2.0),
+                "refraction" => set_b(&mut c.refraction),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -619,6 +625,7 @@ impl Config {
             "theme_hue" => self.theme_hue.to_string(),
             "theme_intensity" => self.theme_intensity.to_string(),
             "theme_edge" => self.theme_edge.to_string(),
+            "refraction" => b(self.refraction),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),

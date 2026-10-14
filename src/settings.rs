@@ -415,8 +415,14 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "theme_edge",
                 "Edge",
-                "How strongly the edge catches the light. 0% = no outline.",
+                "How strongly the edge catches (or bends) the light. 0% = no outline.",
                 slider(0.0, 2.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "refraction",
+                "Refraction",
+                "Clear glass bends what's behind it round its edge. Uses a little CPU.",
+                Toggle,
             ),
         ],
         2 => vec![

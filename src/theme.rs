@@ -13,7 +13,7 @@
 //! The theme's colours can be swapped for the Windows accent, a hue of your
 //! own or none at all, and made stronger or weaker (`set_colour`).
 
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use windows::core::BOOL;
 use windows::Win32::Graphics::Direct2D::ID2D1Brush;
@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
 
 use crate::backdrop::Backdrop;
 use crate::gfx::{Color, Painter};
+use crate::lens::Lens;
 
 /// What DWM puts behind a panel.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -114,6 +115,9 @@ pub struct Theme {
     pub film: (Color, Color),
     pub rim: Rim,
     pub light: Light,
+    /// Clear glass that bends what's behind it round its edge (see `lens`),
+    /// with Refraction on. It then needs no drawn edge: the bending shows it.
+    pub refract: Option<Lens>,
     /// Highlights: the app in front, toggles, progress, today.
     pub accent: Color,
 }
@@ -141,6 +145,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.015), white(0.015)),
         rim: Rim::Lit(white(0.14), white(0.06)),
         light: DARK,
+        refract: None,
         accent: WIN_BLUE,
     },
     Theme {
@@ -155,6 +160,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.05), white(0.02)),
         rim: Rim::Specular(0.55),
         light: Light { lens: (6.0, 0.10), dispersion: 0.12, ..DARK },
+        refract: Some(Lens { band: 18.0, bend: 0.75, split: 0.12 }),
         accent: Color(0.04, 0.52, 1.0, 1.0),
     },
     Theme {
@@ -169,6 +175,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.06), white(0.01)),
         rim: Rim::Double(black(0.55), white(0.40)),
         light: Light { lens: (5.0, 0.08), gloss: 0.20, streaks: 0.05, ..DARK },
+        refract: None,
         accent: Color(0.45, 0.78, 1.0, 1.0),
     },
     Theme {
@@ -182,6 +189,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.11), white(0.06)),
         rim: Rim::Line(white(0.16)),
         light: Light { glow: (10.0, 0.09), ..DARK },
+        refract: None,
         accent: Color(0.42, 0.70, 1.0, 1.0),
     },
     Theme {
@@ -196,6 +204,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.05), white(0.01)),
         rim: Rim::Gradient(white(0.3), white(0.08)),
         light: Light { glow: (6.0, 0.06), ..DARK },
+        refract: None,
         accent: WIN_BLUE,
     },
     Theme {
@@ -209,6 +218,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.012), white(0.012)),
         rim: Rim::None,
         light: Light { lens: (5.0, 0.05), ..DARK },
+        refract: Some(Lens { band: 10.0, bend: 0.5, split: 0.06 }),
         accent: WIN_BLUE,
     },
     Theme {
@@ -222,6 +232,7 @@ pub const THEMES: [Theme; 10] = [
         film: (Color(0.77, 0.65, 0.91, 0.05), Color(0.92, 0.44, 0.57, 0.025)),
         rim: Rim::Gradient(Color(0.769, 0.655, 0.906, 0.5), Color(0.922, 0.435, 0.573, 0.4)),
         light: Light { glow: (8.0, 0.07), ..DARK },
+        refract: None,
         accent: LOVE,
     },
     Theme {
@@ -235,6 +246,7 @@ pub const THEMES: [Theme; 10] = [
         film: (Color(0.0, 0.85, 1.0, 0.025), Color(1.0, 0.2, 0.8, 0.025)),
         rim: Rim::Gradient(Color(0.0, 0.9, 1.0, 0.95), Color(1.0, 0.25, 0.85, 0.95)),
         light: Light { glow: (16.0, 0.30), ..DARK },
+        refract: None,
         accent: Color(0.10, 0.70, 0.95, 1.0),
     },
     Theme {
@@ -248,6 +260,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.02), white(0.0)),
         rim: Rim::Specular(0.35),
         light: Light { lens: (3.0, 0.07), sheen: 0.10, ..DARK },
+        refract: None,
         accent: Color(0.98, 0.55, 0.20, 1.0),
     },
     Theme {
@@ -261,6 +274,7 @@ pub const THEMES: [Theme; 10] = [
         film: (white(0.0), white(0.0)),
         rim: Rim::Line(white(0.05)),
         light: Light { shade: 0.12, ..DARK },
+        refract: None,
         accent: Color(0.36, 0.52, 0.74, 1.0),
     },
 ];
@@ -488,7 +502,36 @@ pub fn lighten(c: Color, t: f32) -> Color {
 }
 
 pub fn current() -> Theme {
-    resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)])
+    let mut t = resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]);
+    if lens_of(&t).is_some() {
+        // The bent light shows the edge; a drawn one would only fight it.
+        t.rim = Rim::None;
+        t.light.lens = (0.0, 0.0);
+        t.light.dispersion = 0.0;
+    }
+    t
+}
+
+static REFRACT: AtomicBool = AtomicBool::new(true);
+
+/// Turns refraction for clear glass on or off (`refraction` in the config).
+pub fn set_refraction(on: bool) {
+    REFRACT.store(on, Ordering::Relaxed);
+}
+
+/// How `t` bends light, if it does and Refraction is on.
+fn lens_of(t: &Theme) -> Option<Lens> {
+    let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
+    let lens = t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && t.glass == Glass::Clear)?;
+    // The Edge slider sets how strongly it bends.
+    (k > 0.0).then_some(Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
+}
+
+/// Whether panels in the current theme bend light (and so need their
+/// rings refreshed as what's behind them changes). `acrylic` is the Blur
+/// setting.
+pub fn refracts(acrylic: bool) -> bool {
+    blurs(acrylic) && lens_of(&current()).is_some()
 }
 
 /// `t` with the colours it takes from Windows filled in, then turned to the
@@ -547,6 +590,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
         Glass::Acrylic => pack(t.tint, (opacity * t.tint_scale).min(1.0)),
         _ => pack(t.tint, 0.0),
     };
+    b.set_lens(lens_of(&t).filter(|_| blur));
     b.style(if blur { t.glass } else { Glass::Solid }, tint, radius);
     blur
 }
@@ -554,6 +598,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
 /// An opaque backdrop in the theme's panel colour (for Alt+Tab, whose
 /// backdrop also hosts the live previews, so it must always be there).
 pub fn style_opaque(b: &Backdrop, radius: f32) {
+    b.set_lens(None);
     b.style(Glass::Acrylic, pack(current().solid, 1.0), radius);
 }
 
