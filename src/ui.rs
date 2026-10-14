@@ -185,6 +185,15 @@ struct App {
     tabs_fade: Spring,
     level: Spring,
     bars: [Spring; BANDS],
+    /// Whether the notch (or the lip) shows the visualizer's bars.
+    notch_bars: bool,
+    /// Whether the music widget or the panel's music card shows them.
+    widget_bars: bool,
+    /// Whether the taskbar is up with a music widget on it.
+    dock_bars: bool,
+    /// When the taskbar was last redrawn for the bars (it is wide, so they
+    /// move on it at a gentler rate).
+    dock_bars_at: Instant,
     last_frame: Instant,
     dirty: bool,
 
@@ -618,6 +627,7 @@ impl App {
         let cfg = Config::load();
         theme::set(&cfg.theme);
         theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
+        theme::set_edge(cfg.theme_edge);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
@@ -658,6 +668,10 @@ impl App {
             // a held volume key instead of trailing behind it.
             level: Spring::new(vol.0, 1600.0, 78.0),
             bars: [Spring::new(0.0, 700.0, 30.0); BANDS],
+            notch_bars: false,
+            widget_bars: false,
+            dock_bars: false,
+            dock_bars_at: Instant::now(),
             last_frame: Instant::now(),
             dirty: true,
             view: View::Idle,
@@ -1016,20 +1030,47 @@ impl App {
         self.h.set(h);
         self.r.set(r);
 
-        // The lip only glows while music plays; the bars come with the notch.
-        let bars_visible = match view {
-            View::Live => !self.flat_rest(),
-            View::Expanded => self.mode == Mode::Media,
-            _ => false,
-        };
-        let visualize = self.shown && self.cfg.visualizer && self.playing() && bars_visible;
-        self.visualizer.set(visualize);
-        if !visualize {
+        self.sync_visualizer();
+        self.dirty = true;
+    }
+
+    /// Runs the music visualizer while something on screen shows its bars:
+    /// the notch (or the lip's line), the taskbar's music widget or the
+    /// widgets panel's music card.
+    fn sync_visualizer(&mut self) {
+        let playing = self.playing();
+        self.notch_bars = self.shown
+            && playing
+            && match self.view {
+                View::Live if self.flat_rest() => self.cfg.lip_visualizer,
+                View::Live => self.cfg.visualizer,
+                View::Expanded => self.mode == Mode::Media && self.cfg.visualizer,
+                _ => false,
+            };
+        let chip = [&self.cfg.taskbar_left, &self.cfg.taskbar_right]
+            .iter()
+            .any(|l| l.split(',').any(|c| c.trim().eq_ignore_ascii_case("music")));
+        let widget_bars =
+            playing && self.cfg.widget_visualizer && (self.widgets.open || (chip && self.dock.visible()));
+        self.dock_bars = chip && self.dock.visible();
+        if widget_bars != self.widget_bars {
+            // Draw them in, or take them away.
+            self.widget_bars = widget_bars;
+            self.dock.dirty = true;
+            self.widgets.dirty = true;
+        }
+        let on = self.notch_bars || self.widget_bars;
+        self.visualizer.set(on);
+        if !on {
             for b in &mut self.bars {
                 b.set(0.0);
             }
         }
-        self.dirty = true;
+    }
+
+    /// The visualizer's bands as they are on screen now.
+    fn levels(&self) -> [f32; BANDS] {
+        std::array::from_fn(|i| self.bars[i].value)
     }
 
     fn set_mode(&mut self, mode: Mode) {
@@ -1106,6 +1147,7 @@ impl App {
                     self.fullscreen = lp.0 != 0;
                     self.retarget();
                     self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen) || self.launcher.open);
+                    self.sync_visualizer();
                     if self.fullscreen {
                         self.preview.hide();
                     }
@@ -1842,6 +1884,7 @@ impl App {
         self.cfg = Config::load();
         theme::set(&self.cfg.theme);
         theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
+        theme::set_edge(self.cfg.theme_edge);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -2614,11 +2657,17 @@ impl App {
                 || !self.tab.settled()
                 || !self.tabs_fade.settled()
                 || !self.level.settled()
-                || self.bars.iter().any(|b| !b.settled()))
+                // (Bars only the widgets show don't redraw the notch.)
+                || ((self.notch_bars || !self.widget_bars) && self.bars_moving()))
+    }
+
+    fn bars_moving(&self) -> bool {
+        self.bars.iter().any(|b| !b.settled())
     }
 
     fn wants_frame(&self) -> bool {
         self.notch_wants()
+            || (self.widget_bars && self.bars_moving())
             || self.dock.wants_frame()
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
@@ -2635,6 +2684,22 @@ impl App {
         }
         self.last_frame = now;
 
+        // The visualizer's bars, wherever they show.
+        if self.bars_moving() {
+            for b in &mut self.bars {
+                b.step(dt);
+            }
+            if self.widget_bars {
+                if self.widgets.open {
+                    self.widgets.dirty = true;
+                }
+                if self.dock_bars && now.duration_since(self.dock_bars_at) >= Duration::from_millis(33) {
+                    self.dock_bars_at = now;
+                    self.dock.dirty = true;
+                }
+            }
+        }
+
         let mut fast = false;
         if self.notch_wants() {
             fast |= self.w.step(dt);
@@ -2644,9 +2709,6 @@ impl App {
             fast |= self.tab.step(dt);
             self.tabs_fade.step(dt);
             fast |= self.level.step(dt);
-            for b in &mut self.bars {
-                b.step(dt);
-            }
             self.dirty = false;
             let _ = self.render();
         }
@@ -2661,7 +2723,8 @@ impl App {
             self.sync_art();
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());
-            let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art };
+            let bars = (self.widget_bars && self.dock_bars).then(|| (self.levels(), self.accent()));
+            let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art, bars };
             let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);
             if let Some(h) = self.systray.hwnd {
                 let r = self.dock.bar_rect();
@@ -2683,7 +2746,9 @@ impl App {
             fast |= self.widgets.step(dt);
             self.sync_art();
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());
+            let bars = self.widget_bars.then(|| (self.levels(), self.accent()));
             let ctx = widgets::Ctx {
+                bars,
                 sampler: &self.sysmon,
                 media: self.media.as_ref(),
                 art,
@@ -2696,6 +2761,7 @@ impl App {
         if self.widgets.open != self.widgets_seen {
             self.widgets_seen = self.widgets.open;
             self.arm_stats();
+            self.sync_visualizer();
         }
         // Keep an auto-hidden taskbar up while the menu or flyout is open,
         // and let it go again shortly after they close.
@@ -3004,7 +3070,22 @@ impl App {
             let (x, y, w, h) = edge.rect(base, a + inset, v, l, t);
             p.rrect(x, y, w, h, t / 2.0, c);
         };
-        if self.playing() {
+        if self.playing() && self.cfg.lip_visualizer {
+            // The line as bars moving with the music: the bass in the middle,
+            // the treble at the ends, each up to the lip's full thickness.
+            let c = self.accent().alpha(0.9 * alpha);
+            let levels = self.levels();
+            let n = (lw / 4.0).floor().max(1.0) as usize;
+            let slot = lw / n as f32;
+            let bw = (slot * 0.6).max(1.0);
+            let max_h = (depth - 1.0).max(t);
+            for i in 0..n {
+                let h = t.max(max_h * band_at(&levels, i, n)).min(max_h);
+                let u = a + inset + i as f32 * slot + (slot - bw) / 2.0;
+                let (x, y, w, hh) = edge.rect(base, u, (depth - h) / 2.0, bw, h);
+                p.rrect(x, y, w, hh, bw.min(h) / 2.0, c);
+            }
+        } else if self.playing() {
             line(lw, self.accent().alpha(0.9 * alpha));
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
@@ -3453,6 +3534,30 @@ fn play(p: &Painter, x: f32, cy: f32, c: Color) {
 fn pause(p: &Painter, x: f32, cy: f32, c: Color) {
     p.rrect(x - 7.0, cy - 9.0, 5.0, 18.0, 1.5, c);
     p.rrect(x + 2.0, cy - 9.0, 5.0, 18.0, 1.5, c);
+}
+
+/// The visualizer's level for bar `i` of `n` in a row: the bass in the
+/// middle, the treble at the ends, blended between the bands.
+pub(crate) fn band_at(levels: &[f32; BANDS], i: usize, n: usize) -> f32 {
+    let u = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
+    let pos = (2.0 * u - 1.0).abs() * (BANDS - 1) as f32;
+    let k = (pos.floor() as usize).min(BANDS - 1);
+    let next = levels[(k + 1).min(BANDS - 1)];
+    (levels[k] + (next - levels[k]) * (pos - k as f32)).clamp(0.0, 1.0)
+}
+
+/// `n` bars across `w` from `x`, centred on `cy` and up to `max_h` tall,
+/// moving with the music (see `band_at`).
+pub(crate) fn spectrum(p: &Painter, levels: &[f32; BANDS], x: f32, cy: f32, w: f32, n: usize, max_h: f32, c: Color) {
+    if n == 0 || w <= 0.0 {
+        return;
+    }
+    let slot = w / n as f32;
+    let bar = (slot * 0.6).max(1.0);
+    for i in 0..n {
+        let h = bar.max(max_h * band_at(levels, i, n)).min(max_h);
+        p.rrect(x + i as f32 * slot + (slot - bar) / 2.0, cy - h / 2.0, bar, h, bar / 2.0, c);
+    }
 }
 
 /// Which of the speaker icon's looks a volume gets (muted, silent, one wave,

@@ -19,6 +19,9 @@ theme_color = theme
 theme_hue = 210
 # How colourful the theme is: 0 = grey, 1 = as designed, 2 = twice as strong.
 theme_intensity = 1
+# How strongly the glass's edge catches the light (its outline, and the light
+# gathered and glowing along it): 0 = none, 1 = as designed, 2 = twice as strong.
+theme_edge = 1
 
 # ---- Notch ----
 notch = true
@@ -39,6 +42,11 @@ hide_in_fullscreen = true
 # Grow the notch with album art / timer while music or a focus timer runs.
 live_activity = true
 visualizer = true
+# While music plays, the lip's coloured line moves with the music.
+lip_visualizer = true
+# Bars that move with the music on the taskbar's music widget and the widgets
+# panel's music card.
+widget_visualizer = true
 # Show volume / brightness changes in the notch.
 volume_osd = true
 brightness_osd = true
@@ -192,6 +200,7 @@ pub struct Config {
     pub theme_color: String,
     pub theme_hue: f32,
     pub theme_intensity: f32,
+    pub theme_edge: f32,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -201,6 +210,8 @@ pub struct Config {
     pub hide_in_fullscreen: bool,
     pub live_activity: bool,
     pub visualizer: bool,
+    pub lip_visualizer: bool,
+    pub widget_visualizer: bool,
     pub volume_osd: bool,
     pub brightness_osd: bool,
     pub hide_windows_flyout: bool,
@@ -275,6 +286,7 @@ impl Default for Config {
             theme_color: "theme".into(),
             theme_hue: 210.0,
             theme_intensity: 1.0,
+            theme_edge: 1.0,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -284,6 +296,8 @@ impl Default for Config {
             hide_in_fullscreen: true,
             live_activity: true,
             visualizer: true,
+            lip_visualizer: true,
+            widget_visualizer: true,
             volume_osd: true,
             brightness_osd: true,
             hide_windows_flyout: true,
@@ -481,6 +495,7 @@ impl Config {
                 "theme_color" if crate::theme::SOURCES.contains(&v) => c.theme_color = v.into(),
                 "theme_hue" => set_f(&mut c.theme_hue, 0.0, 360.0),
                 "theme_intensity" => set_f(&mut c.theme_intensity, 0.0, 2.0),
+                "theme_edge" => set_f(&mut c.theme_edge, 0.0, 2.0),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -490,6 +505,8 @@ impl Config {
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
+                "lip_visualizer" => set_b(&mut c.lip_visualizer),
+                "widget_visualizer" => set_b(&mut c.widget_visualizer),
                 "volume_osd" => set_b(&mut c.volume_osd),
                 "brightness_osd" => set_b(&mut c.brightness_osd),
                 "hide_windows_flyout" => set_b(&mut c.hide_windows_flyout),
@@ -601,6 +618,7 @@ impl Config {
             "theme_color" => self.theme_color.clone(),
             "theme_hue" => self.theme_hue.to_string(),
             "theme_intensity" => self.theme_intensity.to_string(),
+            "theme_edge" => self.theme_edge.to_string(),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),
@@ -610,6 +628,8 @@ impl Config {
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
+            "lip_visualizer" => b(self.lip_visualizer),
+            "widget_visualizer" => b(self.widget_visualizer),
             "volume_osd" => b(self.volume_osd),
             "brightness_osd" => b(self.brightness_osd),
             "hide_windows_flyout" => b(self.hide_windows_flyout),
