@@ -3,7 +3,7 @@
 //! Appearance, or `theme =` in the config.
 //!
 //! A theme is a material, not only a colour: which glass DWM puts behind a
-//! panel (frosted acrylic, a clear blur or none), how the glass is washed,
+//! panel (frosted acrylic, a blur, clear glass or none), how the glass is washed,
 //! how its edge is drawn, and how light passes through it (`Light`): thick
 //! glass bending light round its rounded edge and splitting it into colours,
 //! frosted glass carrying light to its edges, Aero's gloss and streaks, a
@@ -27,8 +27,11 @@ use crate::gfx::{Color, Painter};
 pub enum Glass {
     /// Frosted acrylic, like the Windows 11 taskbar.
     Acrylic,
-    /// A plain blur with no frost or noise (clear glass).
+    /// A plain blur with no frost or noise.
     Blur,
+    /// No blur at all: clear glass that what's behind shows through sharp,
+    /// with only the light in and on the glass drawn over it.
+    Clear,
     /// No blur: a solid panel.
     Solid,
 }
@@ -75,10 +78,22 @@ pub struct Light {
     /// Lit from above, as a matte or solid surface is: a touch lighter at the
     /// top, darker at the bottom.
     pub shade: f32,
+    /// The thickness of clear glass seen from the front: a soft dark band
+    /// just inside the edge, heaviest along the bottom, so the pane stands
+    /// out over light things behind it too.
+    pub depth: f32,
 }
 
-const DARK: Light =
-    Light { lens: (0.0, 0.0), dispersion: 0.0, glow: (0.0, 0.0), gloss: 0.0, streaks: 0.0, sheen: 0.0, shade: 0.0 };
+const DARK: Light = Light {
+    lens: (0.0, 0.0),
+    dispersion: 0.0,
+    glow: (0.0, 0.0),
+    gloss: 0.0,
+    streaks: 0.0,
+    sheen: 0.0,
+    shade: 0.0,
+    depth: 0.0,
+};
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -132,14 +147,14 @@ pub const THEMES: [Theme; 10] = [
         key: "liquid_glass",
         name: "Liquid Glass",
         about:
-            "Apple-style clear glass: light gathers in its thick edge, splits into colour and glints on the corners.",
-        glass: Glass::Blur,
+            "Apple-style clear glass you see through: light gathers in its thick edge, splits into colour and glints.",
+        glass: Glass::Clear,
         tint: (0.10, 0.11, 0.14),
-        tint_scale: 0.3,
+        tint_scale: 0.25,
         solid: (0.17, 0.18, 0.21),
-        film: (white(0.085), white(0.03)),
-        rim: Rim::Specular(0.9),
-        light: Light { lens: (18.0, 0.15), dispersion: 0.22, ..DARK },
+        film: (white(0.06), white(0.02)),
+        rim: Rim::Specular(1.0),
+        light: Light { lens: (16.0, 0.18), dispersion: 0.25, depth: 0.14, ..DARK },
         accent: Color(0.04, 0.52, 1.0, 1.0),
     },
     Theme {
@@ -186,14 +201,14 @@ pub const THEMES: [Theme; 10] = [
     Theme {
         key: "translucent",
         name: "Translucent",
-        about: "Barely-there clear glass: no tint, no outline, only a faint bend of light at its edge.",
-        glass: Glass::Blur,
+        about: "Barely-there clear glass: no blur, no tint, no outline, only a faint bend of light at its edge.",
+        glass: Glass::Clear,
         tint: (0.05, 0.05, 0.06),
-        tint_scale: 0.15,
+        tint_scale: 0.12,
         solid: (0.12, 0.12, 0.13),
         film: (white(0.012), white(0.012)),
         rim: Rim::None,
-        light: Light { lens: (7.0, 0.06), ..DARK },
+        light: Light { lens: (7.0, 0.07), depth: 0.06, ..DARK },
         accent: WIN_BLUE,
     },
     Theme {
@@ -492,8 +507,8 @@ pub fn blurs(acrylic: bool) -> bool {
 pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) -> bool {
     let t = current();
     let blur = blurs(acrylic);
-    // Acrylic takes its tint from DWM. A clear blur gets none there (it is
-    // painted over the blur in `panel` instead, so it looks the same on
+    // Acrylic takes its tint from DWM. A clear blur, or clear glass, gets
+    // none there (it is painted in `panel` instead, so it looks the same on
     // every Windows build).
     let tint = match t.glass {
         Glass::Acrylic => pack(t.tint, (opacity * t.tint_scale).min(1.0)),
@@ -546,7 +561,7 @@ pub fn paint(
     }
     // The body: what the glass does to the light coming through it.
     if blurred {
-        if t.glass == Glass::Blur {
+        if matches!(t.glass, Glass::Blur | Glass::Clear) {
             let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, (opacity * t.tint_scale).clamp(0.0, 1.0) * alpha));
         }
@@ -596,6 +611,11 @@ pub fn paint(
         };
         if let Some(b) = brush {
             edge_band(p, x, y, w, h, r, l.glow.0, l.glow.1 * alpha, &b);
+        }
+    }
+    if l.depth > 0.0 && h > 6.0 {
+        if let Some(b) = lit(p, x, y, w, h, &[(0.0, black(0.35)), (0.6, black(0.55)), (1.0, black(1.0))]) {
+            edge_band(p, x, y, w, h, r, 7.0, l.depth * alpha, &b);
         }
     }
     if l.lens.1 > 0.0 && h > 6.0 {
@@ -789,6 +809,8 @@ pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
             let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5));
         }
+        // Clear glass: the wallpaper as it is; `paint` adds the tint.
+        Glass::Clear => {}
         Glass::Solid => {}
     }
     paint(p, t, x, y, w, h, r, t.glass != Glass::Solid, opacity, 1.0, 1.0);

@@ -6,15 +6,17 @@
 //! DWM, the same way the Windows taskbar does it, and keeps working while the
 //! window is inactive (unlike the newer system backdrops).
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use windows::core::{s, w, Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
-use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, GetStockObject, SetWindowRgn, HBRUSH, BLACK_BRUSH};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, GetStockObject, SetWindowRgn, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::theme::Glass;
@@ -50,6 +52,7 @@ fn set_composition() -> Option<SetWindowCompositionAttribute> {
 
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
+const ACCENT_ENABLE_TRANSPARENTGRADIENT: u32 = 2;
 const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
@@ -84,6 +87,8 @@ pub struct Backdrop {
     shape: Option<(RECT, i32)>,
     /// Where `track` was last asked to put the blur.
     last: Option<RECT>,
+    /// Radius of DWM's rounded corners at 100% scaling (0 = square).
+    corner: Cell<f32>,
 }
 
 impl Backdrop {
@@ -110,7 +115,7 @@ impl Backdrop {
             // No DWM shadow/border lines of its own.
             let border = COLORREF(0xFFFFFFFE); // DWMWA_COLOR_NONE
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as *const _, 4);
-            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None, last: None })
+            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None, last: None, corner: Cell::new(0.0) })
         }
     }
 
@@ -122,9 +127,12 @@ impl Backdrop {
             state: match glass {
                 Glass::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
                 Glass::Blur => ACCENT_ENABLE_BLURBEHIND,
+                // Fully see-through: the gradient colour, with its alpha of 0.
+                Glass::Clear => ACCENT_ENABLE_TRANSPARENTGRADIENT,
                 Glass::Solid => ACCENT_DISABLED,
             },
-            flags: 0,
+            // Use the gradient colour (only the transparent gradient reads it).
+            flags: if glass == Glass::Clear { 2 } else { 0 },
             // ABGR, as the API wants it.
             gradient: (a << 24) | (b << 16) | (g << 8) | r,
             animation: 0,
@@ -134,13 +142,14 @@ impl Backdrop {
             data: &mut policy as *mut _ as *mut c_void,
             size: std::mem::size_of::<AccentPolicy>(),
         };
-        let corners = if radius >= 6.0 {
-            DWMWCP_ROUND
+        let (corners, corner) = if radius >= 6.0 {
+            (DWMWCP_ROUND, 8.0)
         } else if radius >= 2.0 {
-            DWMWCP_ROUNDSMALL
+            (DWMWCP_ROUNDSMALL, 4.0)
         } else {
-            DWMWCP_DONOTROUND
+            (DWMWCP_DONOTROUND, 0.0)
         };
+        self.corner.set(corner);
         unsafe {
             if let Some(f) = set_composition() {
                 let _ = f(self.hwnd, &mut data);
@@ -183,9 +192,8 @@ impl Backdrop {
         if shape != self.shape {
             self.shape = shape;
             unsafe {
-                let rgn = shape.map(|(s, rad)| {
-                    CreateRoundRectRgn(s.left, s.top, s.right + 1, s.bottom + 1, rad * 2, rad * 2)
-                });
+                let rgn = shape
+                    .map(|(s, rad)| CreateRoundRectRgn(s.left, s.top, s.right + 1, s.bottom + 1, rad * 2, rad * 2));
                 // The window owns the region from here on.
                 SetWindowRgn(self.hwnd, rgn, true);
             }
@@ -199,7 +207,10 @@ impl Backdrop {
     /// that side moved since the last frame. The blur and the panel are two
     /// windows, so one can reach the screen a frame before the other; pulled
     /// in, the blur stays inside the panel either way instead of showing
-    /// past its edge. Call it after the panel's frame is presented. Returns
+    /// past its edge, and is cut to rounded corners of its own (DWM doesn't
+    /// keep a window's corners round while it is resized every frame, so
+    /// square ones would show inside the panel's round ones). Call it after
+    /// the panel's frame is presented. Returns
     /// true while the blur is pulled in: draw one more frame, so it ends up
     /// exactly at `r`.
     pub fn track(&mut self, r: RECT, shape: Option<(RECT, i32)>, content: HWND) -> bool {
@@ -214,12 +225,25 @@ impl Backdrop {
             self.hide_blur();
             return true;
         }
-        // The cut-out shape is relative to the window, which moved with `inner`.
-        let shape = shape.map(|(s, rad)| {
-            (RECT { left: s.left - dl, top: s.top - dt, right: s.right - dl, bottom: s.bottom - dt }, rad)
-        });
+        let moving = inner != r;
+        let shape = match shape {
+            // The cut-out shape is relative to the window, which moved with `inner`.
+            Some((s, rad)) => {
+                Some((RECT { left: s.left - dl, top: s.top - dt, right: s.right - dl, bottom: s.bottom - dt }, rad))
+            }
+            None if moving => {
+                let dpi = match unsafe { GetDpiForWindow(self.hwnd) } {
+                    0 => 96,
+                    d => d,
+                };
+                let rad = (self.corner.get() * dpi as f32 / 96.0).round() as i32;
+                let size = RECT { left: 0, top: 0, right: inner.right - inner.left, bottom: inner.bottom - inner.top };
+                (rad > 0).then_some((size, rad))
+            }
+            None => None,
+        };
         self.place_shaped(inner, shape, content);
-        inner != r
+        moving
     }
 
     /// Hides the blur while the panel at `r` is shown without it, keeping
