@@ -52,6 +52,7 @@ enum Unit {
     Percent,
     Count,
     Seconds,
+    Degrees,
 }
 
 enum Ctl {
@@ -68,8 +69,8 @@ enum Ctl {
     /// Segmented buttons: (config value, label).
     Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
-    /// One option of a list shown a row each (the themes): the value it sets.
-    Pick(&'static str),
+    /// The themes, as a grid of samples to click.
+    Gallery,
     /// Tiles to drag between lanes (which widgets show, where and in what order).
     Board(Board),
     Note,
@@ -95,6 +96,7 @@ fn heading(key: &'static str, title: &'static str) -> Row {
 fn row_h(r: &Row) -> f32 {
     match r.ctl {
         Ctl::Heading => HEAD_H,
+        Ctl::Gallery => BOARD_HEAD + gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP + 16.0,
         Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
         Ctl::Note => ROW_H,
         _ if r.desc.is_empty() => COMPACT_H,
@@ -120,6 +122,23 @@ const LANE_LABEL: f32 = 70.0;
 const TILE_W: f32 = 66.0;
 const TILE_H: f32 = 42.0;
 const TILE_GAP: f32 = 6.0;
+
+/// The theme gallery: columns of samples, each a preview over its name.
+const SWATCH_COLS: usize = 5;
+const SWATCH_PREVIEW: f32 = 50.0;
+const SWATCH_H: f32 = SWATCH_PREVIEW + 24.0;
+const SWATCH_GAP: f32 = 10.0;
+
+fn gallery_rows() -> usize {
+    theme::THEMES.len().div_ceil(SWATCH_COLS)
+}
+
+/// Sample `k` of a gallery whose samples fill `area`: (x, y, w).
+fn swatch_rect(area: (f32, f32, f32, f32), k: usize) -> (f32, f32, f32) {
+    let w = (area.2 - (SWATCH_COLS - 1) as f32 * SWATCH_GAP) / SWATCH_COLS as f32;
+    let (col, line) = (k % SWATCH_COLS, k / SWATCH_COLS);
+    (area.0 + col as f32 * (w + SWATCH_GAP), area.1 + line as f32 * (SWATCH_H + SWATCH_GAP), w)
+}
 
 /// A set of things arranged by dragging tiles between lanes: shown lanes
 /// (each saved as a comma-separated config value) and a last lane holding
@@ -301,6 +320,21 @@ fn draw_tile(p: &Painter, f: &Fonts, item: &str, label: &str, x: f32, y: f32, bg
     p.text(label, &f.small, x, y + 24.0, TILE_W, 16.0, Align::Center, Color::white(0.8 * a));
 }
 
+/// A fully saturated colour at `hue` degrees round the colour wheel.
+fn hue_color(hue: f32) -> Color {
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = 1.0 - (h.rem_euclid(2.0) - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    Color(r, g, b, 1.0)
+}
+
 const GOOD: Color = Color(0.42, 0.84, 0.52, 1.0);
 const BAD: Color = Color(1.0, 0.46, 0.42, 1.0);
 const WARN: Color = Color(0.98, 0.76, 0.36, 1.0);
@@ -335,33 +369,50 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(30.0, 240.0, 10.0, Unit::Fps),
             ),
         ],
-        1 => {
-            let mut v = vec![heading("h_theme", "Theme")];
-            v.extend(theme::THEMES.iter().map(|t| row("theme", t.name, t.about, Pick(t.key))));
-            v.extend([
-                heading("h_glass", "Glass"),
-                row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
-                row(
-                    "taskbar_corners",
-                    "Corners",
-                    "Taskbar, Start menu, panels and the lip.",
-                    Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
-                ),
-                row(
-                    "taskbar_opacity",
-                    "Tint",
-                    "How strong the glass's tint is.",
-                    slider(0.0, 1.0, 0.05, Unit::Percent),
-                ),
-                row(
-                    "start_opacity",
-                    "Start menu tint",
-                    "The same, for the Start menu.",
-                    slider(0.0, 1.0, 0.05, Unit::Percent),
-                ),
-            ]);
-            v
-        }
+        // Everything about the look, on one page: the theme (the title and
+        // description show the one picked), its colour, and the glass.
+        1 => vec![
+            row("theme", "Theme", "", Gallery),
+            heading("h_colour", "Colour"),
+            row(
+                "theme_color",
+                "Based on",
+                "The theme's own colours, your Windows accent, none, or your own.",
+                Choice(&[("theme", "Theme"), ("accent", "Accent"), ("neutral", "None"), ("custom", "Custom")]),
+            ),
+            row(
+                "theme_hue",
+                "Custom colour",
+                "Drag to pick one (switches to Custom).",
+                slider(0.0, 360.0, 1.0, Unit::Degrees),
+            ),
+            row(
+                "theme_intensity",
+                "Colour intensity",
+                "0% = grey, 100% = as the theme was made, 200% = twice as strong.",
+                slider(0.0, 2.0, 0.05, Unit::Percent),
+            ),
+            heading("h_glass", "Glass"),
+            row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
+            row(
+                "taskbar_corners",
+                "Corners",
+                "Taskbar, Start menu, panels and the lip.",
+                Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
+            ),
+            row(
+                "taskbar_opacity",
+                "Tint",
+                "How strong the glass's tint is: taskbar, panels and the lip.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "start_opacity",
+                "Start menu tint",
+                "The same, for the Start menu.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+        ],
         2 => vec![
             row("notch", "Show the notch", "The island at the top of your main screen.", Toggle),
             row(
@@ -620,6 +671,7 @@ fn fmt(v: f32, unit: Unit) -> String {
         Unit::Percent => format!("{:.0}%", v * 100.0),
         Unit::Count => format!("{v:.0}"),
         Unit::Seconds => format!("{v:.0} s"),
+        Unit::Degrees => format!("{v:.0}\u{b0}"),
     }
 }
 
@@ -631,6 +683,8 @@ enum Hit {
     Reset(usize),
     /// A board tile: row, lane, slot.
     Tile(usize, usize, usize),
+    /// A theme in the gallery: row, theme.
+    Swatch(usize, usize),
 }
 
 /// The default for `key`, if the row should offer a reset button.
@@ -804,8 +858,13 @@ impl Settings {
                 (x1 - w, y + (h - 32.0) / 2.0, w, 32.0)
             }
             Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
-            // The whole row is the button.
-            Ctl::Pick(_) => (SIDEBAR + 24.0, y, self.content_w(), h),
+            // The samples, under the title.
+            Ctl::Gallery => (
+                SIDEBAR + 24.0 + 18.0,
+                y + BOARD_HEAD,
+                self.content_w() - 36.0,
+                gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP,
+            ),
             // The lanes, under the title.
             Ctl::Board(b) => (
                 SIDEBAR + 24.0 + 18.0,
@@ -893,6 +952,16 @@ impl Settings {
             }
         }
         for (i, r) in rows(self.section).iter().enumerate() {
+            if let Ctl::Gallery = r.ctl {
+                let area = self.ctl_rect(i, &r.ctl);
+                for k in 0..theme::THEMES.len() {
+                    let (sx, sy, sw) = swatch_rect(area, k);
+                    if lx >= sx && lx < sx + sw && ly >= sy && ly < sy + SWATCH_H && ly >= TOP - 8.0 {
+                        return Some(Hit::Swatch(i, k));
+                    }
+                }
+                continue;
+            }
             if let Ctl::Board(b) = r.ctl {
                 let area = self.ctl_rect(i, &r.ctl);
                 for (j, lane) in b.read(get).iter().enumerate() {
@@ -983,6 +1052,12 @@ impl Settings {
                 self.invalidate();
                 Some(Change::Set(r.key, d))
             }
+            Hit::Swatch(i, k) => {
+                let r = rows(self.section).into_iter().nth(i)?;
+                let value = theme::THEMES.get(k)?.key;
+                self.invalidate();
+                (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
+            }
             Hit::Tile(i, j, k) => {
                 let r = rows(self.section).into_iter().nth(i)?;
                 let Ctl::Board(b) = r.ctl else { return None };
@@ -1030,7 +1105,6 @@ impl Settings {
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
                     Ctl::Button(_) => Some(Change::Action(r.key)),
-                    Ctl::Pick(value) => (get(r.key) != value).then(|| Change::Set(r.key, value.to_string())),
                     _ => None,
                 }
             }
@@ -1069,6 +1143,10 @@ impl Settings {
         }
         self.invalidate();
         let r = rows(self.section).into_iter().nth(i)?;
+        if r.key == "theme_hue" {
+            // Picking a colour means using it.
+            return Some(Change::Many(vec![(r.key, format!("{v}")), ("theme_color", "custom".to_string())]));
+        }
         Some(Change::Set(r.key, format!("{v}")))
     }
 
@@ -1167,14 +1245,19 @@ impl Settings {
                         );
                         continue;
                     }
-                    let row_hover = matches!(r.ctl, Ctl::Pick(_)) && self.hovered == Some(Hit::Row(i));
-                    p.rrect(x0, y, cw, h, 8.0, Color::white(if row_hover { 0.075 } else { 0.045 }));
+                    p.rrect(x0, y, cw, h, 8.0, Color::white(0.045));
                     let text_w = match r.ctl {
-                        Ctl::Pick(_) => cw - 180.0,
-                        Ctl::Board(_) => cw - 36.0,
+                        Ctl::Board(_) | Ctl::Gallery => cw - 36.0,
                         _ => cw - 330.0,
                     };
-                    let desc = if r.key == "about" && build > 0 {
+                    // The gallery's title and description are the picked theme's.
+                    let picked = matches!(r.ctl, Ctl::Gallery)
+                        .then(|| theme::THEMES.iter().find(|t| t.key == get(r.key)))
+                        .flatten();
+                    let title = picked.map_or(r.title, |t| t.name);
+                    let desc = if let Some(t) = picked {
+                        t.about.to_string()
+                    } else if r.key == "about" && build > 0 {
                         format!("{} Build {build}.", r.desc)
                     } else if r.key == "screens_info" {
                         crate::mouseedge::info()
@@ -1199,7 +1282,7 @@ impl Settings {
                     let (desc, tone, mark) = note.unwrap_or((desc, Color::white(0.55), None));
                     if desc.is_empty() {
                         p.text(
-                            r.title,
+                            title,
                             &f.label,
                             x0 + 18.0,
                             y + (h - 20.0) / 2.0,
@@ -1209,7 +1292,7 @@ impl Settings {
                             Color::white(0.95),
                         );
                     } else {
-                        p.text(r.title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
+                        p.text(title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
                         let mut dx = x0 + 18.0;
                         if let Some(ok) = mark {
                             let (mx, my) = (dx + 5.0, y + 39.0);
@@ -1264,10 +1347,21 @@ impl Settings {
                             };
                             let t = ((v - min) / (max - min)).clamp(0.0, 1.0);
                             let ty = cy + ch / 2.0;
-                            p.rrect(cx, ty - 2.0, cwid, 4.0, 2.0, Color::white(0.18));
-                            p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, theme::accent());
                             let knob = if hovered || self.drag.is_some_and(|(d, _)| d == i) { 9.0 } else { 7.5 };
-                            p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
+                            if r.key == "theme_hue" {
+                                // The colour wheel, unrolled, with the knob in the colour picked.
+                                let stops: Vec<(f32, Color)> =
+                                    (0..=6).map(|k| (k as f32 / 6.0, hue_color(k as f32 * 60.0))).collect();
+                                if let Some(b) = p.linear(cx, ty, cx + cwid, ty, &stops) {
+                                    p.fill_rrect_with(cx, ty - 3.0, cwid, 6.0, 3.0, &b);
+                                }
+                                p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
+                                p.circle(cx + cwid * t, ty, knob - 2.5, hue_color(v));
+                            } else {
+                                p.rrect(cx, ty - 2.0, cwid, 4.0, 2.0, Color::white(0.18));
+                                p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, theme::accent());
+                                p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
+                            }
                             p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, h, Align::Right, Color::white(0.8));
                         }
                         Ctl::Text { .. } => {
@@ -1299,23 +1393,53 @@ impl Settings {
                             );
                             p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
                         }
-                        Ctl::Pick(value) => {
-                            let on = get(r.key) == value;
-                            let t = theme::THEMES.iter().find(|t| t.key == value).map(|t| theme::resolve(*t));
-                            let x1 = cx + cwid - 18.0;
-                            // A little sample of the glass, over a colourful backdrop.
-                            if let Some(t) = t {
-                                let (sx, sy, sw, sh) = (x1 - 142.0, y + (h - 36.0) / 2.0, 98.0, 36.0);
-                                theme::preview(&p, &t, sx, sy, sw, sh, 9.0);
-                            }
-                            // A radio button.
-                            let (rx, ry) = (x1 - 11.0, y + h / 2.0);
-                            if on {
-                                p.circle(rx, ry, 11.0, theme::accent());
-                                p.circle(rx, ry, 4.5, Color::white(1.0));
-                            } else {
-                                let a = if hovered { 0.75 } else { 0.5 };
-                                p.stroke_circle(rx, ry, 10.0, Color::white(a), 1.4);
+                        Ctl::Gallery => {
+                            let picked = get(r.key);
+                            for (k, t) in theme::THEMES.iter().enumerate() {
+                                let (sx, sy, sw) = swatch_rect((cx, cy, cwid, ch), k);
+                                let on = t.key == picked;
+                                let over = self.hovered == Some(Hit::Swatch(i, k));
+                                // A sample of the glass over a colourful backdrop,
+                                // in the colour settings below.
+                                theme::preview(&p, &theme::resolve(*t), sx, sy, sw, SWATCH_PREVIEW, 10.0);
+                                if on {
+                                    p.stroke_rrect(
+                                        sx - 3.0,
+                                        sy - 3.0,
+                                        sw + 6.0,
+                                        SWATCH_PREVIEW + 6.0,
+                                        13.0,
+                                        theme::accent(),
+                                        2.0,
+                                    );
+                                } else if over {
+                                    p.stroke_rrect(
+                                        sx - 2.5,
+                                        sy - 2.5,
+                                        sw + 5.0,
+                                        SWATCH_PREVIEW + 5.0,
+                                        12.5,
+                                        Color::white(0.35),
+                                        1.0,
+                                    );
+                                }
+                                let a = if on {
+                                    0.95
+                                } else if over {
+                                    0.85
+                                } else {
+                                    0.65
+                                };
+                                p.text(
+                                    t.name,
+                                    &f.small,
+                                    sx - 4.0,
+                                    sy + SWATCH_PREVIEW + 4.0,
+                                    sw + 8.0,
+                                    18.0,
+                                    Align::Center,
+                                    Color::white(a),
+                                );
                             }
                         }
                         Ctl::Board(b) => {

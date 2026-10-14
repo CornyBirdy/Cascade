@@ -12,6 +12,13 @@ const DEFAULT: &str = "\
 # colour), translucent, rose_pine, neon, obsidian (no blur) or clean_slate
 # (no blur).
 theme = acrylic
+# What the theme's colours are based on: theme (its own), accent (your Windows
+# accent colour), neutral (no colour) or custom (theme_hue, in degrees round
+# the colour wheel: 0 red, 120 green, 210 blue, 280 purple).
+theme_color = theme
+theme_hue = 210
+# How colourful the theme is: 0 = grey, 1 = as designed, 2 = twice as strong.
+theme_intensity = 1
 
 # ---- Notch ----
 notch = true
@@ -182,6 +189,9 @@ max_fps = 144
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
+    pub theme_color: String,
+    pub theme_hue: f32,
+    pub theme_intensity: f32,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -262,6 +272,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "acrylic".into(),
+            theme_color: "theme".into(),
+            theme_hue: 210.0,
+            theme_intensity: 1.0,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -465,6 +478,9 @@ impl Config {
             };
             match k {
                 "theme" if crate::theme::is_known(v) => c.theme = v.into(),
+                "theme_color" if crate::theme::SOURCES.contains(&v) => c.theme_color = v.into(),
+                "theme_hue" => set_f(&mut c.theme_hue, 0.0, 360.0),
+                "theme_intensity" => set_f(&mut c.theme_intensity, 0.0, 2.0),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -582,6 +598,9 @@ impl Config {
         let b = |v: bool| v.to_string();
         match key {
             "theme" => self.theme.clone(),
+            "theme_color" => self.theme_color.clone(),
+            "theme_hue" => self.theme_hue.to_string(),
+            "theme_intensity" => self.theme_intensity.to_string(),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),

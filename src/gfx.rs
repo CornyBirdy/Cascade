@@ -366,15 +366,26 @@ impl Painter<'_> {
 
     /// A gradient spreading out from (cx, cy) to `radius`.
     pub fn radial(&self, cx: f32, cy: f32, radius: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
+        self.elliptic(cx, cy, radius, radius, stops)
+    }
+
+    /// A gradient spreading out from (cx, cy) to an ellipse of radii `rx`, `ry`.
+    pub fn elliptic(&self, cx: f32, cy: f32, rx: f32, ry: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
         let collection = self.stops(stops)?;
         let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
             center: pt(cx, cy),
             gradientOriginOffset: pt(0.0, 0.0),
-            radiusX: radius,
-            radiusY: radius,
+            radiusX: rx,
+            radiusY: ry,
         };
         let b = unsafe { self.gfx.rt.CreateRadialGradientBrush(&props, None, &collection).ok()? };
         b.cast().ok()
+    }
+
+    /// Sets how opaque everything `brush` paints is, so one gradient can be
+    /// drawn at several strengths.
+    pub fn fade(&self, brush: &ID2D1Brush, opacity: f32) {
+        unsafe { brush.SetOpacity(opacity.clamp(0.0, 1.0)) };
     }
 
     pub fn fill_rrect_with(&self, x: f32, y: f32, w: f32, h: f32, r: f32, brush: &ID2D1Brush) {

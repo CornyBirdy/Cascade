@@ -1,18 +1,20 @@
 //! Screen brightness.
 //!
 //! * Watching: laptop panels report changes through a blocking WMI event
-//!   query. On desktops that query fails and the thread exits.
+//!   query (on desktops it fails and the thread exits), and through Windows'
+//!   own brightness power setting, which changes the moment the keys are
+//!   pressed while the WMI event can take a while to arrive.
 //! * Setting: laptop panels via WMI, external monitors via DDC/CI. Runs on a
 //!   worker thread because DDC/CI is slow (tens of ms per monitor).
 
 use std::sync::mpsc::{channel, Sender};
 
-use windows::core::{w, Result, BOOL, BSTR};
+use windows::core::{w, Result, BOOL, BSTR, GUID};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
     GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR,
 };
-use windows::Win32::Foundation::{LPARAM, RECT};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
@@ -74,6 +76,38 @@ unsafe fn watch() -> Result<()> {
             msg::post(msg::BRIGHTNESS, level.min(100) as usize, 0);
         }
     }
+}
+
+/// GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS: the current brightness of the
+/// built-in screen, as a percentage.
+const CURRENT_BRIGHTNESS: GUID = GUID::from_u128(0x8ffee2c6_2d01_46be_adb9_398addc5b4ff);
+const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
+
+/// Asks Windows to tell `hwnd` (with `WM_POWERBROADCAST`) whenever the
+/// brightness setting changes. Read the level with `power_setting_level`.
+pub fn listen(hwnd: HWND) {
+    use windows::Win32::System::Power::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let _ = RegisterPowerSettingNotification(HANDLE(hwnd.0), &CURRENT_BRIGHTNESS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+}
+
+/// The brightness in a `WM_POWERBROADCAST`, if that is what it is about.
+///
+/// # Safety
+/// `wp` and `lp` must be those of a `WM_POWERBROADCAST` message.
+pub unsafe fn power_setting_level(wp: WPARAM, lp: LPARAM) -> Option<u32> {
+    use windows::Win32::System::Power::POWERBROADCAST_SETTING;
+    if wp.0 as u32 != PBT_POWERSETTINGCHANGE || lp.0 == 0 {
+        return None;
+    }
+    let s = &*(lp.0 as *const POWERBROADCAST_SETTING);
+    if s.PowerSetting != CURRENT_BRIGHTNESS || s.DataLength < 4 {
+        return None;
+    }
+    let level = std::ptr::read_unaligned(s.Data.as_ptr() as *const u32);
+    Some(level.min(100))
 }
 
 // -------------------------------------------------------------- setting --

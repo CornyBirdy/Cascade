@@ -87,6 +87,7 @@ const TIMER_NOTIFS: usize = 18;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The Windows accent colour changed (Tinted Glass follows it).
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
+const WM_POWERBROADCAST: u32 = 0x0218;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
@@ -616,11 +617,13 @@ impl App {
     ) -> Result<Self> {
         let cfg = Config::load();
         theme::set(&cfg.theme);
+        theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
         let media_tx = media::spawn();
         brightness::spawn_watcher();
+        brightness::listen(hwnd);
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
         if cfg.weather {
@@ -651,7 +654,9 @@ impl App {
             fade: Spring::new(0.0, 260.0, 30.0),
             tab: Spring::new(0.0, 520.0, 42.0),
             tabs_fade: Spring::new(0.0, 260.0, 30.0),
-            level: Spring::new(vol.0, 500.0, 40.0),
+            // Stiff and close to critically damped, so the bar keeps up with
+            // a held volume key instead of trailing behind it.
+            level: Spring::new(vol.0, 1600.0, 78.0),
             bars: [Spring::new(0.0, 700.0, 30.0); BANDS],
             last_frame: Instant::now(),
             dirty: true,
@@ -1047,6 +1052,7 @@ impl App {
             PeekKind::Brightness => self.brightness as f32 / 100.0,
             PeekKind::Timer | PeekKind::Message => 0.0,
         };
+        let again = self.peek == Some(kind) && self.view == View::Peek;
         if self.peek != Some(kind) {
             self.level.snap(value);
         }
@@ -1059,12 +1065,21 @@ impl App {
             };
             SetTimer(Some(self.hwnd), TIMER_PEEK, ms, None);
             if self.flyout_hidden && matches!(kind, PeekKind::Volume | PeekKind::Brightness) {
-                // The flyout host can be created lazily on first use.
-                shell::set_flyout_hidden(true);
+                // The flyout host can be created lazily on first use. Looking
+                // for it walks Explorer's windows, so only once per pop-up;
+                // the timer catches one made after that.
+                if !again {
+                    shell::set_flyout_hidden(true);
+                }
                 SetTimer(Some(self.hwnd), TIMER_FLYOUT, 60, None);
             }
         }
-        self.retarget();
+        if again {
+            // Already open at the right size: only the level moves.
+            self.dirty = true;
+        } else {
+            self.retarget();
+        }
     }
 
     // ----------------------------------------------------------- events --
@@ -1142,7 +1157,7 @@ impl App {
             }
             WM_DWMCOLORIZATIONCOLORCHANGED if hwnd == self.hwnd => {
                 theme::refresh_accent();
-                if self.cfg.theme == "tinted" {
+                if theme::follows_accent(&self.cfg.theme) {
                     self.apply_dock();
                     self.restyle();
                 }
@@ -1194,8 +1209,13 @@ impl App {
             }
             WM_TIMER => self.on_timer(wp.0),
             msg::VOLUME => {
-                self.vol = (wp.0 as f32 / 1000.0, lp.0 != 0);
-                self.dock.dirty = true;
+                let vol = (wp.0 as f32 / 1000.0, lp.0 != 0);
+                // The taskbar's speaker only changes at a few levels: redraw
+                // the whole bar for those, not for every step of the volume.
+                if speaker_tier(vol.0, vol.1) != speaker_tier(self.vol.0, self.vol.1) {
+                    self.dock.dirty = true;
+                }
+                self.vol = vol;
                 let in_controls = self.expanded && self.mode == Mode::Controls;
                 if in_controls {
                     self.dirty = true;
@@ -1212,6 +1232,21 @@ impl App {
                 } else if self.cfg.brightness_osd {
                     self.show_peek(PeekKind::Brightness);
                 }
+            }
+            // Windows' brightness setting changes as soon as the keys are
+            // pressed, well before the WMI event comes in.
+            WM_POWERBROADCAST => {
+                if let Some(level) = unsafe { brightness::power_setting_level(wp, lp) } {
+                    let changed = level != self.brightness;
+                    self.brightness = level;
+                    let in_controls = self.expanded && self.mode == Mode::Controls;
+                    if in_controls {
+                        self.dirty = true;
+                    } else if changed && self.brightness_ok && self.cfg.brightness_osd {
+                        self.show_peek(PeekKind::Brightness);
+                    }
+                }
+                return Some(LRESULT(1));
             }
             msg::BRIGHTNESS_LEVEL => {
                 self.brightness = wp.0 as u32;
@@ -1806,6 +1841,7 @@ impl App {
         let old = self.cfg.clone();
         self.cfg = Config::load();
         theme::set(&self.cfg.theme);
+        theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -2607,7 +2643,7 @@ impl App {
             self.fade.step(dt);
             fast |= self.tab.step(dt);
             self.tabs_fade.step(dt);
-            self.level.step(dt);
+            fast |= self.level.step(dt);
             for b in &mut self.bars {
                 b.step(dt);
             }
@@ -2683,7 +2719,8 @@ impl App {
             let _ = self.launcher.render(&mut self.gfx, &mut self.dock, self.monitor, bottom, anchor);
         }
 
-        // Full rate while shapes morph; level bars and fades are fine at 60.
+        // Full rate while shapes morph or a level moves; the visualizer and
+        // fades are fine at 60.
         let fps = if fast { self.cfg.max_fps } else { 60 }.min(self.refresh_hz).max(15);
         Duration::from_secs_f64(1.0 / fps as f64).saturating_sub(now.elapsed())
     }
@@ -3416,6 +3453,20 @@ fn play(p: &Painter, x: f32, cy: f32, c: Color) {
 fn pause(p: &Painter, x: f32, cy: f32, c: Color) {
     p.rrect(x - 7.0, cy - 9.0, 5.0, 18.0, 1.5, c);
     p.rrect(x + 2.0, cy - 9.0, 5.0, 18.0, 1.5, c);
+}
+
+/// Which of the speaker icon's looks a volume gets (muted, silent, one wave,
+/// two waves): see `speaker`.
+fn speaker_tier(level: f32, muted: bool) -> u8 {
+    if muted {
+        0
+    } else if level <= 0.01 {
+        1
+    } else if level <= 0.45 {
+        2
+    } else {
+        3
+    }
 }
 
 pub(crate) fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: bool, c: Color) {

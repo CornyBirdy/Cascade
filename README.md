@@ -22,18 +22,24 @@ One theme styles everything Cascade draws: the notch's lip, the taskbar, the Sta
 
 | Theme | Look |
 |---|---|
-| **Acrylic** (default) | Frosted dark glass with a fine outline, like Windows 11. |
-| **Liquid Glass** | Apple-style: nearly clear glass with a thick rim that catches the light, with glints on its corners. |
-| **Windows Glass** | Aero, as in Windows 7: sky-blue glass, a glossy top and a dark-and-light edge. |
-| **Frosted Glass** | Milky, sand-blasted glass that glows softly at its edges. |
-| **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it), edged in a lighter shade of it. |
-| **Translucent** | Barely-there clear glass: no tint, no outline. |
-| **Rosé Pine** | Deep purple glass edged from iris to love, from the Rosé Pine palette. |
-| **Neon** | Near-black glass with a cyan-to-magenta glow round the edge. |
-| **Obsidian** | Polished solid black with a soft reflection and a lit rim. No blur. |
-| **Clean Slate** | Matte, flat slate grey. No blur, no shine. |
+| **Acrylic** (default) | Frosted dark glass with a fine edge, lit along the top, like Windows 11. |
+| **Liquid Glass** | Apple-style clear glass: light gathers in its thick edge, splits into colour (a cool fringe on top, a warm one below) and glints on the corners. |
+| **Windows Glass** | Aero, as in Windows 7: coloured glass with a glossy top, faint diagonal light streaks and a dark-and-light edge. |
+| **Frosted Glass** | Milky, sand-blasted glass that carries light to its edges, where it glows. |
+| **Tinted Glass** | Acrylic in your Windows accent colour (follows it when you change it), edged and softly lit in a lighter shade of it. |
+| **Translucent** | Barely-there clear glass: no tint, no outline, only a faint bend of light at its edge. |
+| **Rosé Pine** | Deep purple glass edged and lit from iris to love, from the Rosé Pine palette. |
+| **Neon** | Near-black glass whose cyan-to-magenta edge gives off light, glowing into the glass. |
+| **Obsidian** | Polished solid black: it reflects the room, with a bevelled, lit edge. No blur. |
+| **Clean Slate** | Matte, flat slate grey, softly lit from above. No blur, no shine. |
 
-Each theme is a material: the kind of glass (frosted acrylic, a clear blur, or none), how it's washed, and how its edge catches the light. Settings → Appearance shows a sample of each over a colourful backdrop. The glass stays on while panels slide and the notch opens, not just once they've settled. The **Blur**, **Corners** and **Tint** settings on the same page apply on top of any theme.
+Each theme is a material, not just a colour: the kind of glass (frosted acrylic, a clear blur, or none), how it's washed, how its edge is drawn, and how light passes through it. Thick glass bends light round its rounded edge, so it gathers in a band that fades smoothly into the glass; frosted glass glows at its edges; Aero has its gloss and streaks; polished stone reflects; matte slate is lit from above. Settings → Appearance shows a sample of each over a colourful backdrop: click one to use it. The glass stays on while panels slide and the notch opens, not just once they've settled.
+
+Everything about the look is on that one page:
+
+- **Colour → Based on:** the theme's own colours, your Windows accent, none (grey glass), or **Custom**, picked on the **Custom colour** slider. Windows Glass is blue only if you want it to be. A theme's other shades turn with it, so Rosé Pine and Neon keep their two-colour edges. (`theme_color = theme | accent | neutral | custom`, `theme_hue` in degrees.)
+- **Colour intensity:** from 0% (grey) through 100% (as the theme was made) to 200% (`theme_intensity`, 0 to 2).
+- **Glass:** **Blur**, **Corners**, **Tint** (taskbar, panels and the lip) and **Start menu tint**, on top of any theme.
 
 ## Taskbar
 
@@ -112,7 +118,7 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Window previews | Captured bitmaps | DWM live thumbnails (composited by Windows) |
 | Wi-Fi / Bluetooth | Queried on demand | Radio state-change events |
 | Fullscreen | — | App-bar `ABN_FULLSCREENAPP` notification |
-| Themes | — | A palette and a DWM blur style; nothing extra runs |
+| Themes | — | A DWM blur style and a few gradients per panel; nothing extra runs |
 | Visualizer | Runs whenever media plays | Runs only while the bars are on screen |
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
