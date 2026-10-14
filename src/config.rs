@@ -76,6 +76,9 @@ acrylic = true
 taskbar_opacity = 0.55
 show_search = true
 show_status = true
+# What clicking network / volume / battery does: notch (the notch's Controls)
+# or windows (Windows' quick settings).
+status_click = notch
 show_clock = true
 # App icons in the notification area (as set in Windows' taskbar settings).
 tray_icons = true
@@ -213,6 +216,7 @@ pub struct Config {
     pub taskbar_opacity: f32,
     pub show_search: bool,
     pub show_status: bool,
+    pub status_click: String,
     pub show_clock: bool,
     pub tray_icons: bool,
     pub alt_tab: bool,
@@ -292,6 +296,7 @@ impl Default for Config {
             taskbar_opacity: 0.55,
             show_search: true,
             show_status: true,
+            status_click: "notch".into(),
             show_clock: true,
             tray_icons: true,
             admin_helper: false,
@@ -515,6 +520,7 @@ impl Config {
                 "taskbar_opacity" => set_f(&mut c.taskbar_opacity, 0.0, 1.0),
                 "show_search" => set_b(&mut c.show_search),
                 "show_status" => set_b(&mut c.show_status),
+                "status_click" if matches!(v, "notch" | "windows") => c.status_click = v.into(),
                 "show_clock" => set_b(&mut c.show_clock),
                 "alt_tab" => set_b(&mut c.alt_tab),
                 "mouse_match" => set_b(&mut c.mouse_match),
@@ -625,6 +631,7 @@ impl Config {
             "taskbar_opacity" => self.taskbar_opacity.to_string(),
             "show_search" => b(self.show_search),
             "show_status" => b(self.show_status),
+            "status_click" => self.status_click.clone(),
             "show_clock" => b(self.show_clock),
             "alt_tab" => b(self.alt_tab),
             "mouse_match" => b(self.mouse_match),

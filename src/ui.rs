@@ -59,6 +59,9 @@ use crate::weather::{self, Weather};
 /// Width of the concave flares joining the notch to the screen edge.
 const EAR: f32 = 9.0;
 const PEEK_MS: u32 = 1600;
+/// How long the notch stays open from the status icons if the pointer never
+/// moves onto it.
+const PINNED_MS: u32 = 6000;
 
 // Notch timers.
 const TIMER_EXPAND: usize = 1;
@@ -188,6 +191,9 @@ struct App {
     mode: Mode,
     expanded: bool,
     expand_pending: bool,
+    /// Opened from the taskbar's status icons rather than by hovering: stays
+    /// open until a click elsewhere, or a while if the pointer never comes.
+    pinned: bool,
     tracking: bool,
     hovered: Option<Hot>,
     dragging: Option<Hot>,
@@ -653,6 +659,7 @@ impl App {
             mode: Mode::Media,
             expanded: false,
             expand_pending: false,
+            pinned: false,
             tracking: false,
             hovered: None,
             dragging: None,
@@ -977,6 +984,11 @@ impl App {
                 self.layer.release();
                 self.notch_backdrop.hide();
             }
+        }
+
+        if self.pinned && !self.expanded {
+            self.pinned = false;
+            crate::mousehook::set_rect(3, None);
         }
 
         let view = self.compute_view();
@@ -1831,6 +1843,10 @@ impl App {
     /// A click landed outside every open pop-up: close them.
     fn on_outside_click(&mut self) {
         let mut closed = false;
+        if self.pinned {
+            self.on_timer(TIMER_COLLAPSE);
+            closed = true;
+        }
         // While a right-click menu is up, its clicks are "outside" too.
         if self.launcher.open && !self.launcher_menu {
             self.launcher.hide();
@@ -2189,10 +2205,35 @@ impl App {
             DockHot::TrayIcon(i) => self.systray.click(i, false),
             DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
             DockHot::MusicToggle => self.toggle_play(),
-            DockHot::Status => shell::open("ms-actioncenter:controlcenter/&showFooter=true"),
+            DockHot::Status => self.on_status_click(),
             // Notifications live in the widgets panel now.
             DockHot::Clock => self.toggle_widgets(),
         }
+    }
+
+    /// The taskbar's network / volume / battery icons: the notch's Controls,
+    /// or Windows' quick settings when there's no notch to open.
+    fn on_status_click(&mut self) {
+        if self.just_closed() {
+            return; // that click already closed the notch
+        }
+        if self.cfg.status_click != "notch" || !self.shown {
+            shell::open("ms-actioncenter:controlcenter/&showFooter=true");
+            return;
+        }
+        self.expanded = true;
+        self.expand_pending = false;
+        self.pinned = true;
+        self.mode = Mode::Controls;
+        self.tab.snap(1.0);
+        self.hovered = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_EXPAND);
+            // Moving onto the notch cancels this; leaving it starts the usual
+            // collapse delay.
+            SetTimer(Some(self.hwnd), TIMER_COLLAPSE, PINNED_MS, None);
+        }
+        self.retarget();
     }
 
     /// Redraws the taskbar clock at the start of each minute (and not more).
@@ -2696,6 +2737,10 @@ impl App {
             Edge::Left => (POINT { x: area.left, y: centre - half }, pd, pa),
             Edge::Right => (POINT { x: area.right - pd, y: centre - half }, pd, pa),
         };
+        if self.pinned {
+            let r = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
+            crate::mousehook::set_rect(3, Some(r));
+        }
         let (ww, wh) = (pw as f32 / k, ph as f32 / k);
         let (tw, th, _) = self.size_of(self.view);
         // The body against its edge, and where the content starts: laid out at

@@ -456,7 +456,13 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(0.0, 32.0, 1.0, Unit::Px),
             ),
             row("show_search", "Search box", "Next to the Start button.", Toggle),
-            row("show_status", "Network, volume and battery", "Opens quick settings when clicked.", Toggle),
+            row("show_status", "Network, volume and battery", "Status icons by the clock.", Toggle),
+            row(
+                "status_click",
+                "Clicking them",
+                "The notch's Controls, or Windows' quick settings.",
+                Choice(&[("notch", "Notch"), ("windows", "Windows")]),
+            ),
             row("show_clock", "Clock", "Opens the widgets panel, with your notifications, when clicked.", Toggle),
             row(
                 "tray_icons",
