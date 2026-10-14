@@ -209,7 +209,7 @@ fn paint(ring: &mut Ring, force: bool) {
     let src = capture.pixels();
     // FNV-1a over the pixels: nothing to do if nothing behind changed.
     let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ ((cw as u64) << 32) ^ (ch as u64);
-    for px in src.chunks_exact(4) {
+    for px in src.as_chunks::<4>().0 {
         hash = (hash ^ u32::from_le_bytes([px[0], px[1], px[2], 0]) as u64).wrapping_mul(0x0100_0000_01b3);
     }
     if !force && hash == ring.seen {
