@@ -82,6 +82,8 @@ const TIMER_CLOCK: usize = 14;
 const TIMER_SCAN2: usize = 16;
 const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
+/// Refreshes clear glass's bent edges (see `lens`).
+const TIMER_LENS: usize = 19;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -628,6 +630,7 @@ impl App {
         theme::set(&cfg.theme);
         theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
         theme::set_edge(cfg.theme_edge);
+        theme::set_refraction(cfg.refraction);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
@@ -749,6 +752,7 @@ impl App {
         self.apply_flyout();
         self.apply_dock();
         self.retarget();
+        self.arm_lens();
         if std::env::args().any(|a| a == "--settings") {
             self.open_settings();
         }
@@ -1571,7 +1575,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if id != TIMER_TICK && id != TIMER_POMODORO && id != TIMER_STATS && id != TIMER_SWITCH {
+            if ![TIMER_TICK, TIMER_POMODORO, TIMER_STATS, TIMER_SWITCH, TIMER_LENS].contains(&id) {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -1593,6 +1597,7 @@ impl App {
                 self.retarget();
             }
             TIMER_TICK => self.dirty = true,
+            TIMER_LENS => crate::lens::refresh(),
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
@@ -1885,6 +1890,7 @@ impl App {
         theme::set(&self.cfg.theme);
         theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
         theme::set_edge(self.cfg.theme_edge);
+        theme::set_refraction(self.cfg.refraction);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -1908,8 +1914,21 @@ impl App {
         }
     }
 
+    /// Keeps clear glass's bent edges up to date with what's behind them, a
+    /// few times a second, while the theme bends light.
+    fn arm_lens(&mut self) {
+        unsafe {
+            if theme::refracts(self.cfg.acrylic) {
+                SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+            }
+        }
+    }
+
     /// Redraws every surface, e.g. after the theme changed.
     fn restyle(&mut self) {
+        self.arm_lens();
         self.dirty = true;
         self.dock.dirty = true;
         self.launcher.dirty = true;
@@ -3071,20 +3090,20 @@ impl App {
             p.rrect(x, y, w, h, t / 2.0, c);
         };
         if self.playing() && self.cfg.lip_visualizer {
-            // The line as bars moving with the music: the bass in the middle,
-            // the treble at the ends, each up to the lip's full thickness.
-            let c = self.accent().alpha(0.9 * alpha);
+            // Solid lines reaching out from the middle with the music, over a
+            // faint one the whole length: the whole mix, and the bass on top.
+            let c = self.accent();
             let levels = self.levels();
-            let n = (lw / 4.0).floor().max(1.0) as usize;
-            let slot = lw / n as f32;
-            let bw = (slot * 0.6).max(1.0);
-            let max_h = (depth - 1.0).max(t);
-            for i in 0..n {
-                let h = t.max(max_h * band_at(&levels, i, n)).min(max_h);
-                let u = a + inset + i as f32 * slot + (slot - bw) / 2.0;
-                let (x, y, w, hh) = edge.rect(base, u, (depth - h) / 2.0, bw, h);
-                p.rrect(x, y, w, hh, bw.min(h) / 2.0, c);
-            }
+            let all = levels.iter().sum::<f32>() / BANDS as f32;
+            let bass = levels[0].max(levels[1]);
+            let centred = |l: f32, c: Color| {
+                let l = l.clamp(t * 2.0, lw);
+                let (x, y, w, h) = edge.rect(base, a + inset + (lw - l) / 2.0, v, l, t);
+                p.rrect(x, y, w, h, t / 2.0, c);
+            };
+            line(lw, c.alpha(0.22 * alpha));
+            centred(lw * (all * 1.6).min(1.0), c.alpha(0.5 * alpha));
+            centred(lw * bass, c.alpha(0.95 * alpha));
         } else if self.playing() {
             line(lw, self.accent().alpha(0.9 * alpha));
         } else {
@@ -3536,27 +3555,30 @@ fn pause(p: &Painter, x: f32, cy: f32, c: Color) {
     p.rrect(x + 2.0, cy - 9.0, 5.0, 18.0, 1.5, c);
 }
 
-/// The visualizer's level for bar `i` of `n` in a row: the bass in the
-/// middle, the treble at the ends, blended between the bands.
-pub(crate) fn band_at(levels: &[f32; BANDS], i: usize, n: usize) -> f32 {
-    let u = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
-    let pos = (2.0 * u - 1.0).abs() * (BANDS - 1) as f32;
+/// The visualizer's level for bar `i` of `n` in a row, from the bass on the
+/// left to the treble on the right, blended between the bands.
+fn band_at(levels: &[f32; BANDS], i: usize, n: usize) -> f32 {
+    let pos = (if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 }) * (BANDS - 1) as f32;
     let k = (pos.floor() as usize).min(BANDS - 1);
     let next = levels[(k + 1).min(BANDS - 1)];
     (levels[k] + (next - levels[k]) * (pos - k as f32)).clamp(0.0, 1.0)
 }
 
-/// `n` bars across `w` from `x`, centred on `cy` and up to `max_h` tall,
-/// moving with the music (see `band_at`).
-pub(crate) fn spectrum(p: &Painter, levels: &[f32; BANDS], x: f32, cy: f32, w: f32, n: usize, max_h: f32, c: Color) {
+/// An equaliser: `n` bars across `w` from `x`, standing on a faint baseline
+/// at `base` and up to `max_h` tall, the bass on the left and the treble
+/// on the right.
+pub(crate) fn spectrum(p: &Painter, levels: &[f32; BANDS], x: f32, base: f32, w: f32, n: usize, max_h: f32, c: Color) {
     if n == 0 || w <= 0.0 {
         return;
     }
+    let line = p.px(1.0);
+    p.rrect(x, base - line, w, line, 0.0, c.alpha(0.3));
     let slot = w / n as f32;
-    let bar = (slot * 0.6).max(1.0);
+    let bar = (slot * 0.62).max(1.0);
     for i in 0..n {
-        let h = bar.max(max_h * band_at(levels, i, n)).min(max_h);
-        p.rrect(x + i as f32 * slot + (slot - bar) / 2.0, cy - h / 2.0, bar, h, bar / 2.0, c);
+        let h = (max_h * band_at(levels, i, n)).max(line * 2.0).min(max_h);
+        let r = (bar / 2.0).min(h / 2.0).min(1.5);
+        p.rrect(x + i as f32 * slot + (slot - bar) / 2.0, base - line - h, bar, h, r, c);
     }
 }
 

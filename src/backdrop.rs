@@ -19,6 +19,7 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::lens::{self, Lens};
 use crate::theme::Glass;
 
 #[repr(C)]
@@ -89,6 +90,8 @@ pub struct Backdrop {
     last: Option<RECT>,
     /// Radius of DWM's rounded corners at 100% scaling (0 = square).
     corner: Cell<f32>,
+    /// Bent light along the panel's edge instead of a blur (see `lens`).
+    lens: Cell<Option<Lens>>,
 }
 
 impl Backdrop {
@@ -115,8 +118,57 @@ impl Backdrop {
             // No DWM shadow/border lines of its own.
             let border = COLORREF(0xFFFFFFFE); // DWMWA_COLOR_NONE
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as *const _, 4);
-            Ok(Self { hwnd, rect: RECT::default(), shown: false, shape: None, last: None, corner: Cell::new(0.0) })
+            Ok(Self {
+                hwnd,
+                rect: RECT::default(),
+                shown: false,
+                shape: None,
+                last: None,
+                corner: Cell::new(0.0),
+                lens: Cell::new(None),
+            })
         }
+    }
+
+    /// Makes the window a ring of light bent round the panel's edge (see
+    /// `lens`) instead of a blur, or (`None`) a blur again. Call before
+    /// `style`.
+    pub fn set_lens(&self, lens: Option<Lens>) {
+        if lens == self.lens.get() {
+            return;
+        }
+        let was = self.lens.replace(lens);
+        unsafe {
+            let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            match (was, lens) {
+                (None, Some(_)) => {
+                    SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
+                }
+                (Some(_), None) => {
+                    lens::hide(self.hwnd);
+                    SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED.0) as i32);
+                }
+                _ => {}
+            }
+        }
+        // Drawn again at the next `place`.
+        self.rect_changed();
+    }
+
+    fn rect_changed(&self) {
+        // `place` skips a rect it already holds; a new lens must be drawn.
+        if let (Some(l), true) = (self.lens.get(), self.shown) {
+            lens::show(self.hwnd, self.rect, self.corner_px(), l);
+        }
+    }
+
+    /// DWM's corner radius in pixels at this window's scaling.
+    fn corner_px(&self) -> i32 {
+        let dpi = match unsafe { GetDpiForWindow(self.hwnd) } {
+            0 => 96,
+            d => d,
+        };
+        (self.corner.get() * dpi as f32 / 96.0).round() as i32
     }
 
     /// `glass` picks the kind of blur (see `theme`), `tint` is 0xAARRGGBB and
@@ -125,6 +177,8 @@ impl Backdrop {
         let (a, r, g, b) = (tint >> 24, (tint >> 16) & 0xFF, (tint >> 8) & 0xFF, tint & 0xFF);
         let mut policy = AccentPolicy {
             state: match glass {
+                // The ring draws everything itself.
+                _ if self.lens.get().is_some() => ACCENT_DISABLED,
                 Glass::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
                 Glass::Blur => ACCENT_ENABLE_BLURBEHIND,
                 // Fully see-through: the gradient colour, with its alpha of 0.
@@ -181,6 +235,7 @@ impl Backdrop {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
+        self.rect_changed();
     }
 
     /// Like `place`, but cut to a rounded rect `shape` (window-relative px,
@@ -232,11 +287,7 @@ impl Backdrop {
                 Some((RECT { left: s.left - dl, top: s.top - dt, right: s.right - dl, bottom: s.bottom - dt }, rad))
             }
             None if moving => {
-                let dpi = match unsafe { GetDpiForWindow(self.hwnd) } {
-                    0 => 96,
-                    d => d,
-                };
-                let rad = (self.corner.get() * dpi as f32 / 96.0).round() as i32;
+                let rad = self.corner_px();
                 let size = RECT { left: 0, top: 0, right: inner.right - inner.left, bottom: inner.bottom - inner.top };
                 (rad > 0).then_some((size, rad))
             }
@@ -261,6 +312,7 @@ impl Backdrop {
     fn hide_blur(&mut self) {
         if self.shown {
             self.shown = false;
+            lens::hide(self.hwnd);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }

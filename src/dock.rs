@@ -1447,11 +1447,11 @@ impl Dock {
                             None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
                         }
                         // Bars moving with the music, between the title and the button.
-                        let viz = if wd.bars.is_some() { 30.0 } else { 0.0 };
+                        let viz = if wd.bars.is_some() { 34.0 } else { 0.0 };
                         let tw = s.w - art - 8.0 - 34.0 - viz;
                         if let Some((levels, c)) = &wd.bars {
                             let x = s.x + s.w - 34.0 - viz;
-                            crate::ui::spectrum(&p, levels, x, mid_y, 24.0, 5, 16.0, c.alpha(0.95));
+                            crate::ui::spectrum(&p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
                         }
                         p.text(&m.title, &f.small, s.x + art + 12.0, mid_y - 16.0, tw, 16.0, Align::Left, white);
                         p.text(&m.artist, &f.small, s.x + art + 12.0, mid_y, tw, 16.0, Align::Left, grey);
