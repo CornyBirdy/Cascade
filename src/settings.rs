@@ -412,6 +412,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "The same, for the Start menu.",
                 slider(0.0, 1.0, 0.05, Unit::Percent),
             ),
+            row(
+                "theme_edge",
+                "Edge",
+                "How strongly the edge catches the light. 0% = no outline.",
+                slider(0.0, 2.0, 0.05, Unit::Percent),
+            ),
         ],
         2 => vec![
             row("notch", "Show the notch", "The island at the top of your main screen.", Toggle),
@@ -442,6 +448,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row("visualizer", "Music visualizer", "Bars that move with whatever is playing.", Toggle),
+            row(
+                "lip_visualizer",
+                "Visualizer on the lip",
+                "While music plays, the lip's coloured line moves with it.",
+                Toggle,
+            ),
             row("volume_osd", "Volume pop-up", "Show volume changes in the notch.", Toggle),
             row("brightness_osd", "Brightness pop-up", "Show brightness changes in the notch.", Toggle),
             row(
@@ -586,6 +598,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "Panel cards",
                 "Drag to put them in order. Click one to show or hide it.",
                 Board(self::Board::Panel),
+            ),
+            row(
+                "widget_visualizer",
+                "Music visualizer",
+                "Bars that move with the music, on the music widget and the panel's music card.",
+                Toggle,
             ),
             row(
                 "widgets_notifications",

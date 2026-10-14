@@ -12,6 +12,7 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::media::MediaInfo;
@@ -82,6 +83,8 @@ pub enum Action {
 
 /// What the cards show.
 pub struct Ctx<'a> {
+    /// The music visualizer's bands and colour, if the music card shows it.
+    pub bars: Option<([f32; BANDS], Color)>,
     pub sampler: &'a Sampler,
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
@@ -486,6 +489,10 @@ impl Widgets {
         match &ctx.art {
             Some(b) => p.image(b, x + 14.0, y + 14.0, art, art, 1.0),
             None => p.rrect(x + 14.0, y + 14.0, art, art, 10.0, Color::white(0.10)),
+        }
+        // Bars moving with the music, under the art.
+        if let Some((levels, c)) = &ctx.bars {
+            crate::ui::spectrum(p, levels, x + 14.0, y + 106.0, art, 9, 18.0, c.alpha(0.95));
         }
         let tx = x + 14.0 + art + 14.0;
         let tw = CARD_W - (tx - x) - 14.0;

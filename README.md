@@ -6,7 +6,7 @@ A tiny native notch, taskbar and Start menu for Windows. Rust and Win32 only: no
 
 The notch lives at the top centre of your main screen. Turn it off in the right-click menu if you don't want it.
 
-- **The lip (default):** at rest it's only a tiny strip of glass along the top edge, in the current theme. Push the pointer up into it and the full notch pulls down; move away and it tucks back up. While music plays the lip shows a thin line in the album art's colour, and while the focus timer runs, the timer's progress. Set its length and thickness in Settings → Notch (`lip_width`, `lip_height`, in pixels at 100% scaling).
+- **The lip (default):** at rest it's only a tiny strip of glass along the top edge, in the current theme. Push the pointer up into it and the full notch pulls down; move away and it tucks back up. While music plays the lip's line, in the album art's colour, moves with the music as a little visualizer (or stays a plain line: untick *Visualizer on the lip* in Settings → Notch), and while the focus timer runs, the timer's progress. Set its length and thickness in Settings → Notch (`lip_width`, `lip_height`, in pixels at 100% scaling).
 - **Any edge, anywhere along it:** put it on the top, bottom, left or right edge of the main screen, and slide it anywhere along that edge (Settings → Notch → Edge and Position; `notch_edge`, `notch_position` from 0 to 1). On a side edge it works like a sidebar: the lip stands upright, and the notch slides out of the edge like a drawer, rounded on its free side, with its contents the right way up. It keeps clear of taskbars, and near a corner it grows away from the corner.
 - **The classic notch:** set Style to *Notch* (`notch_style = notch`) for the black notch that's always there. While music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
 - **Hover to open.** Click a tab in the tab bar along the bottom (or scroll, or swipe sideways on a touchpad) to switch between three modes:
@@ -39,7 +39,7 @@ Everything about the look is on that one page:
 
 - **Colour → Based on:** the theme's own colours, your Windows accent, none (grey glass), or **Custom**, picked on the **Custom colour** slider. Windows Glass is blue only if you want it to be. A theme's other shades turn with it, so Rosé Pine and Neon keep their two-colour edges. (`theme_color = theme | accent | neutral | custom`, `theme_hue` in degrees.)
 - **Colour intensity:** from 0% (grey) through 100% (as the theme was made) to 200% (`theme_intensity`, 0 to 2).
-- **Glass:** **Blur**, **Corners**, **Tint** (taskbar, panels and the lip) and **Start menu tint**, on top of any theme.
+- **Glass:** **Blur**, **Corners**, **Tint** (taskbar, panels and the lip), **Start menu tint**, and **Edge**: how strongly the glass's edge catches the light, from 0% (no outline at all) to 200% (`theme_edge`), on top of any theme.
 
 ## Taskbar
 
@@ -58,9 +58,9 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
 ## Widgets
 
-- **On the taskbar:** the weather, what's playing (with a play / pause button), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
-- **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (dismiss one with its ×, or *Clear all*), what's playing (art, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
-- **Customising it** (Settings → Widgets): the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
+- **On the taskbar:** the weather, what's playing (with a play / pause button and a little visualizer), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
+- **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (dismiss one with its ×, or *Clear all*), what's playing (art, a visualizer under it, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
+- **Customising it** (Settings → Widgets): the music visualizer on the music widget and card on or off (`widget_visualizer`), the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
 - **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 

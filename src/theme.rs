@@ -152,9 +152,9 @@ pub const THEMES: [Theme; 10] = [
         tint: (0.10, 0.11, 0.14),
         tint_scale: 0.25,
         solid: (0.17, 0.18, 0.21),
-        film: (white(0.06), white(0.02)),
-        rim: Rim::Specular(1.0),
-        light: Light { lens: (16.0, 0.18), dispersion: 0.25, depth: 0.14, ..DARK },
+        film: (white(0.05), white(0.02)),
+        rim: Rim::Specular(0.55),
+        light: Light { lens: (6.0, 0.10), dispersion: 0.12, ..DARK },
         accent: Color(0.04, 0.52, 1.0, 1.0),
     },
     Theme {
@@ -180,8 +180,8 @@ pub const THEMES: [Theme; 10] = [
         tint_scale: 1.0,
         solid: (0.25, 0.26, 0.28),
         film: (white(0.11), white(0.06)),
-        rim: Rim::Line(white(0.24)),
-        light: Light { glow: (12.0, 0.13), ..DARK },
+        rim: Rim::Line(white(0.16)),
+        light: Light { glow: (10.0, 0.09), ..DARK },
         accent: Color(0.42, 0.70, 1.0, 1.0),
     },
     Theme {
@@ -194,8 +194,8 @@ pub const THEMES: [Theme; 10] = [
         tint_scale: 1.0,
         solid: (0.13, 0.13, 0.14),
         film: (white(0.05), white(0.01)),
-        rim: Rim::Gradient(white(0.4), white(0.1)),
-        light: Light { glow: (8.0, 0.08), ..DARK },
+        rim: Rim::Gradient(white(0.3), white(0.08)),
+        light: Light { glow: (6.0, 0.06), ..DARK },
         accent: WIN_BLUE,
     },
     Theme {
@@ -208,7 +208,7 @@ pub const THEMES: [Theme; 10] = [
         solid: (0.12, 0.12, 0.13),
         film: (white(0.012), white(0.012)),
         rim: Rim::None,
-        light: Light { lens: (7.0, 0.07), depth: 0.06, ..DARK },
+        light: Light { lens: (5.0, 0.05), ..DARK },
         accent: WIN_BLUE,
     },
     Theme {
@@ -220,8 +220,8 @@ pub const THEMES: [Theme; 10] = [
         tint_scale: 1.0,
         solid: (0.122, 0.114, 0.180),
         film: (Color(0.77, 0.65, 0.91, 0.05), Color(0.92, 0.44, 0.57, 0.025)),
-        rim: Rim::Gradient(Color(0.769, 0.655, 0.906, 0.75), Color(0.922, 0.435, 0.573, 0.6)),
-        light: Light { glow: (10.0, 0.10), ..DARK },
+        rim: Rim::Gradient(Color(0.769, 0.655, 0.906, 0.5), Color(0.922, 0.435, 0.573, 0.4)),
+        light: Light { glow: (8.0, 0.07), ..DARK },
         accent: LOVE,
     },
     Theme {
@@ -246,8 +246,8 @@ pub const THEMES: [Theme; 10] = [
         tint_scale: 1.0,
         solid: (0.035, 0.035, 0.04),
         film: (white(0.02), white(0.0)),
-        rim: Rim::Specular(0.45),
-        light: Light { lens: (4.0, 0.10), sheen: 0.10, ..DARK },
+        rim: Rim::Specular(0.35),
+        light: Light { lens: (3.0, 0.07), sheen: 0.10, ..DARK },
         accent: Color(0.98, 0.55, 0.20, 1.0),
     },
     Theme {
@@ -298,6 +298,39 @@ static SOURCE: AtomicU8 = AtomicU8::new(0);
 static HUE: AtomicU32 = AtomicU32::new(0x4352_0000); // 210.0
 /// `theme_intensity` (1 = the theme as designed), as f32 bits.
 static INTENSITY: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+
+/// `theme_edge` (1 = as designed), as f32 bits.
+static EDGE: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+
+/// How strongly every theme's edge catches the light: its outline and the
+/// light gathered and glowing along it (0 = none, 1 = as designed, 2 =
+/// twice as strong).
+pub fn set_edge(k: f32) {
+    EDGE.store(k.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+}
+
+/// `t` with its edge scaled by the Edge setting.
+fn edged(mut t: Theme) -> Theme {
+    let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
+    if (k - 1.0).abs() < 1e-3 {
+        return t;
+    }
+    let c = |c: Color| Color(c.0, c.1, c.2, (c.3 * k).min(1.0));
+    t.rim = match t.rim {
+        Rim::None => Rim::None,
+        Rim::Line(a) => Rim::Line(c(a)),
+        Rim::Lit(a, b) => Rim::Lit(c(a), c(b)),
+        Rim::Specular(s) => Rim::Specular(s * k),
+        Rim::Double(a, b) => Rim::Double(c(a), c(b)),
+        Rim::Gradient(a, b) => Rim::Gradient(c(a), c(b)),
+    };
+    let l = &mut t.light;
+    l.lens.1 *= k;
+    l.dispersion *= k;
+    l.glow.1 *= k;
+    l.depth *= k;
+    t
+}
 
 /// Sets what every theme's colours are based on: `source` is one of
 /// `SOURCES` (the theme's own colours, the Windows accent, none, or `hue`),
@@ -468,8 +501,8 @@ pub fn resolve(mut t: Theme) -> Theme {
         t.solid = (r * 0.3 + 0.04, g * 0.3 + 0.04, b * 0.3 + 0.04);
         t.film = (Color(r, g, b, 0.08), Color(r, g, b, 0.01));
         t.rim = Rim::Gradient(
-            Color(mix(r, 1.0, 0.6), mix(g, 1.0, 0.6), mix(b, 1.0, 0.6), 0.55),
-            Color(mix(r, 1.0, 0.2), mix(g, 1.0, 0.2), mix(b, 1.0, 0.2), 0.2),
+            Color(mix(r, 1.0, 0.6), mix(g, 1.0, 0.6), mix(b, 1.0, 0.6), 0.4),
+            Color(mix(r, 1.0, 0.2), mix(g, 1.0, 0.2), mix(b, 1.0, 0.2), 0.12),
         );
         t.accent = Color(mix(r, 1.0, 0.3), mix(g, 1.0, 0.3), mix(b, 1.0, 0.3), 1.0);
     }
@@ -479,7 +512,7 @@ pub fn resolve(mut t: Theme) -> Theme {
     t.film = (c.color(t.film.0), c.color(t.film.1));
     t.rim = c.rim(t.rim);
     t.accent = c.color(t.accent);
-    t
+    edged(t)
 }
 
 pub fn accent() -> Color {

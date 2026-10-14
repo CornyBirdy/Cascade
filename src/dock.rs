@@ -21,6 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, Tr
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
 use crate::config::{self, Config};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
@@ -154,6 +155,8 @@ pub struct WidgetData<'a> {
     pub stats: &'a Stats,
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
+    /// The music visualizer's bands and colour, if the music widget shows it.
+    pub bars: Option<([f32; BANDS], Color)>,
 }
 
 /// Things on the taskbar you can point at.
@@ -1181,6 +1184,12 @@ impl Dock {
 
     // ------------------------------------------------------------- frames --
 
+    /// Whether the taskbar is on screen (not turned off or hidden for a
+    /// fullscreen app).
+    pub fn visible(&self) -> bool {
+        self.shown && self.window_visible
+    }
+
     pub fn wants_frame(&self) -> bool {
         self.shown
             && self.window_visible
@@ -1437,7 +1446,13 @@ impl Dock {
                             Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
                             None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
                         }
-                        let tw = s.w - art - 8.0 - 34.0;
+                        // Bars moving with the music, between the title and the button.
+                        let viz = if wd.bars.is_some() { 30.0 } else { 0.0 };
+                        let tw = s.w - art - 8.0 - 34.0 - viz;
+                        if let Some((levels, c)) = &wd.bars {
+                            let x = s.x + s.w - 34.0 - viz;
+                            crate::ui::spectrum(&p, levels, x, mid_y, 24.0, 5, 16.0, c.alpha(0.95));
+                        }
                         p.text(&m.title, &f.small, s.x + art + 12.0, mid_y - 16.0, tw, 16.0, Align::Left, white);
                         p.text(&m.artist, &f.small, s.x + art + 12.0, mid_y, tw, 16.0, Align::Left, grey);
                         // Play / pause.
