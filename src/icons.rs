@@ -83,7 +83,9 @@ unsafe fn small_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Option<Vec<
             return None;
         }
         let mut icon = HICON::default();
-        SHDefExtractIconW(&HSTRING::from(file.as_str()), index, 0, Some(&mut icon as *mut _), None, largest).ok()?;
+        SHDefExtractIconW(&HSTRING::from(file.as_str()), index, 0, Some(&mut icon as *mut _), None, largest)
+            .ok()
+            .ok()?;
         let result = wic.CreateBitmapFromHICON(icon).and_then(|bmp| to_pixels(wic, &bmp));
         let _ = DestroyIcon(icon);
         return result.ok();
