@@ -171,7 +171,8 @@ fn largest_icon(path: &str, index: i32) -> Option<u32> {
         return None;
     }
     let table = read(pe + 24 + opt_len as u64, sections * 40)?;
-    let file_at = table.chunks_exact(40).find_map(|s| {
+    let file_at = table.as_chunks::<40>().0.iter().find_map(|s| {
+        let s = s.as_slice();
         let (va, size, raw) = (u32_at(s, 12)?, u32_at(s, 8)?.max(u32_at(s, 16)?), u32_at(s, 20)?);
         (res_rva >= va && res_rva - va < size).then(|| (res_rva - va + raw) as u64)
     })?;
