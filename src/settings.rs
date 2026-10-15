@@ -2,6 +2,8 @@
 //! Direct2D like the rest of Cascade; only the text boxes are native EDIT
 //! controls. Every change is written to config.ini and applied at once.
 
+use std::cell::RefCell;
+
 use windows::core::{w, Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE};
@@ -13,8 +15,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::Config;
-use std::cell::RefCell;
-
 use crate::gfx::{Align, Color, Fonts, Gfx, Measure, Painter};
 use crate::theme;
 use crate::weather::Lookup;
