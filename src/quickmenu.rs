@@ -481,7 +481,7 @@ mod tests {
         let mut m = Nav { sel: Some(0), ..Nav::default() };
         m.step_sel(-1);
         // Wraps round to the last row, Desktop.
-        assert_eq!(m.rows()[m.sel.unwrap()], DESKTOP);
+        assert!(m.rows()[m.sel.unwrap()] == DESKTOP);
         assert!(matches!(m.on_key(b'U' as u16), Key::Nothing));
         assert!(m.power_open);
         assert!(matches!(m.on_key(b'R' as u16), Key::Run(Action::Power(Power::Restart))));
