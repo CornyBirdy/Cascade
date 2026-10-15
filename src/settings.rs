@@ -1282,7 +1282,7 @@ impl Settings {
     pub fn commit_edit(&self, edit: HWND) -> Option<Change> {
         let (_, key, loaded) = self.edits.iter().find(|(h, _, _)| *h == edit)?;
         let text = edit_text(edit).trim().to_string();
-        (text != loaded.trim()).then_some(Change::Set(*key, text))
+        (text != loaded.trim()).then_some(Change::Set(key, text))
     }
 
     /// All text boxes' values (when the window closes).
