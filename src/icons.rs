@@ -129,6 +129,15 @@ unsafe fn icon_locations(item: &IShellItem) -> Vec<(String, i32)> {
 /// `index` in an .exe, .dll or .ico file. `index` counts icons as
 /// ExtractIcon does: from 0 in resource order, or minus a resource id.
 fn largest_icon(path: &str, index: i32) -> Option<u32> {
+    largest_in(path, index).or_else(|| {
+        // Windows' own DLLs keep their icons in SystemResources\<name>.mun.
+        let name = path.rsplit(['\\', '/']).next()?;
+        let windir = std::env::var("WINDIR").ok()?;
+        largest_in(&format!(r"{windir}\SystemResources\{name}.mun"), index)
+    })
+}
+
+fn largest_in(path: &str, index: i32) -> Option<u32> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let mut read = |at: u64, len: usize| -> Option<Vec<u8>> {
@@ -171,12 +180,14 @@ fn largest_icon(path: &str, index: i32) -> Option<u32> {
         return None;
     }
     let table = read(pe + 24 + opt_len as u64, sections * 40)?;
-    let file_at = table.as_chunks::<40>().0.iter().find_map(|s| {
+    // (file offset, bytes of it stored in the file) for the resources.
+    let (file_at, stored) = table.as_chunks::<40>().0.iter().find_map(|s| {
         let s = s.as_slice();
-        let (va, size, raw) = (u32_at(s, 12)?, u32_at(s, 8)?.max(u32_at(s, 16)?), u32_at(s, 20)?);
-        (res_rva >= va && res_rva - va < size).then(|| (res_rva - va + raw) as u64)
+        let (va, size, raw_len, raw) = (u32_at(s, 12)?, u32_at(s, 8)?, u32_at(s, 16)?, u32_at(s, 20)?);
+        let into = res_rva.checked_sub(va)?;
+        (into < size.max(raw_len)).then(|| ((raw + into) as u64, raw_len.saturating_sub(into)))
     })?;
-    let res = read(file_at, res_len as usize)?;
+    let res = read(file_at, res_len.min(stored) as usize)?;
     // A resource directory's entries, named ones first: (name or id, offset).
     let entries = |at: usize| -> Option<Vec<(u32, u32)>> {
         let n = u16_at(&res, at + 12)? as usize + u16_at(&res, at + 14)? as usize;
@@ -294,6 +305,7 @@ mod tests {
     #[test]
     fn reads_icon_sizes_from_a_dll() {
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        // Its icons live in SystemResources\shell32.dll.mun on current Windows.
         assert_eq!(largest_icon(&format!(r"{windir}\System32\shell32.dll"), 0), Some(256));
         assert_eq!(largest_icon(&format!(r"{windir}\System32\shell32.dll"), 100_000), None);
     }
