@@ -17,7 +17,9 @@ use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -27,9 +29,9 @@ use crate::config::{self, Config};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::media::MediaInfo;
-use crate::sysmon::{self, Stats};
 use crate::shell;
 use crate::spring::Spring;
+use crate::sysmon::{self, Stats};
 use crate::systray::Systray;
 use crate::theme;
 use crate::weather::Weather;
@@ -38,7 +40,10 @@ use crate::weather::Weather;
 const TIP_ROOM: f32 = 40.0;
 const GAP: f32 = 4.0;
 const SEARCH_W: f32 = 112.0;
-const WEATHER_W: f32 = 106.0;
+/// The weather widget's icon, left of its text.
+const WEATHER_ICON_W: f32 = 36.0;
+/// Longest the weather widget's text gets before it's cut short.
+const WEATHER_TEXT_MAX: f32 = 120.0;
 const CLOCK_W: f32 = 78.0;
 const TRAY_W: f32 = 28.0;
 const TRAY_ICON_W: f32 = 28.0;
@@ -47,7 +52,16 @@ const STATUS_ICON: f32 = 24.0;
 const ISLAND_GAP: f32 = 8.0;
 const CHIP_STAT_W: f32 = 48.0;
 const CHIP_NET_W: f32 = 84.0;
-const CHIP_MUSIC_W: f32 = 196.0;
+/// The music widget's album art and the space around it, left of the text.
+const MUSIC_LEAD: f32 = 40.0;
+/// The play/pause button, right of the text.
+const MUSIC_BUTTON: f32 = 34.0;
+/// The visualizer's bars, between the text and the button.
+const MUSIC_BARS: f32 = 34.0;
+/// Shortest and longest the music widget's title gets (it fits the song
+/// between these; longer ones are cut short).
+const MUSIC_TEXT_MIN: f32 = 48.0;
+const MUSIC_TEXT_MAX: f32 = 170.0;
 const WIDGETS_BTN_W: f32 = 28.0;
 /// Space between widgets on the same side.
 const ITEM_GAP: f32 = 2.0;
@@ -246,6 +260,8 @@ pub struct Dock {
     autohide: bool,
     hide_taskbar: bool,
     pub reveal: Spring,
+    /// The music widget's width, easing to fit each song.
+    music_w: Spring,
     reserved: bool,
     reserve_slot: Option<RECT>,
 
@@ -453,11 +469,12 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
     }
 }
 
-/// How wide a widget is, or None if it has nothing to show right now.
-fn chip_width(c: Chip, has_media: bool, has_weather: bool) -> Option<f32> {
+/// How wide a widget is, or None if it has nothing to show right now. The
+/// music and weather widgets fit what they show (`music` and `weather`).
+fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>) -> Option<f32> {
     match c {
-        Chip::Weather => has_weather.then_some(WEATHER_W),
-        Chip::Music => has_media.then_some(CHIP_MUSIC_W),
+        Chip::Weather => weather,
+        Chip::Music => music,
         Chip::Net => Some(CHIP_NET_W),
         Chip::Widgets => Some(WIDGETS_BTN_W),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
@@ -484,6 +501,7 @@ impl Dock {
             autohide: false,
             hide_taskbar: false,
             reveal: Spring::new(0.0, 300.0, 30.0),
+            music_w: Spring::new(0.0, 300.0, 34.0),
             reserved: false,
             reserve_slot: None,
             full: true,
@@ -643,7 +661,8 @@ impl Dock {
 
         if self.enabled && !self.autohide {
             let px = self.reserve_px(k);
-            self.reserve_slot = Some(shell::reserve_bottom(self.hwnd, monitor, px, &mut self.reserved, self.reserve_slot));
+            self.reserve_slot =
+                Some(shell::reserve_bottom(self.hwnd, monitor, px, &mut self.reserved, self.reserve_slot));
         } else if self.reserved {
             shell::unregister_appbar(self.hwnd);
             self.reserved = false;
@@ -866,8 +885,8 @@ impl Dock {
         status: &Status,
         tray: &[usize],
         overflow: bool,
-        has_media: bool,
-        has_weather: bool,
+        music: Option<f32>,
+        weather: Option<f32>,
     ) -> Geo {
         let b = self.button();
         let pad = self.edge();
@@ -889,7 +908,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, has_media, has_weather) {
+            if let Some(w) = chip_width(c, music, weather) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -935,7 +954,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, has_media, has_weather) {
+            if let Some(w) = chip_width(c, music, weather) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1195,12 +1214,14 @@ impl Dock {
             && self.window_visible
             && (self.dirty
                 || !self.reveal.settled()
+                || !self.music_w.settled()
                 || self.apps.iter().any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled()))
     }
 
     /// Steps springs; returns true while the size or position is changing.
     pub fn step(&mut self, dt: f32) -> bool {
         let mut moving = self.reveal.step(dt);
+        moving |= self.music_w.step(dt);
         let centres: Vec<f32> = self.geo.apps.iter().map(|s| s.centre()).collect();
         for (i, a) in self.apps.iter_mut().enumerate() {
             let target = match (self.hover_x, self.magnify > 0.0, centres.get(i)) {
@@ -1272,8 +1293,29 @@ impl Dock {
         let hidden_px = (14.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
-        let has_weather = self.show_weather && weather.is_some();
-        self.geo = self.layout(ww, wh, status, &inline, overflow, wd.media.is_some(), has_weather);
+        // The music and weather widgets fit their text.
+        let small = &gfx.fonts.small;
+        let music_w = wd.media.map(|m| {
+            let text = gfx.measure(&m.title, small).max(gfx.measure(&m.artist, small));
+            let bars = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
+            let w = MUSIC_LEAD + text.clamp(MUSIC_TEXT_MIN, MUSIC_TEXT_MAX).ceil() + bars + MUSIC_BUTTON;
+            if self.music_w.value < 1.0 {
+                // Appearing: at its size straight away.
+                self.music_w.snap(w);
+            }
+            self.music_w.set(w);
+            self.music_w.value
+        });
+        if music_w.is_none() {
+            self.music_w.snap(0.0);
+        }
+        let weather_w = weather.filter(|_| self.show_weather).map(|wx| {
+            let unit = if wx.fahrenheit { "F" } else { "C" };
+            let temp = gfx.measure(&format!("{:.0}\u{b0}{unit}", wx.temp), &gfx.fonts.label);
+            let text = temp.max(gfx.measure(wx.describe(), small)).min(WEATHER_TEXT_MAX);
+            (WEATHER_ICON_W + text + 10.0).ceil()
+        });
+        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w);
         let g = &self.geo;
 
         // Blur behind each island, just under this window (placed once the
@@ -1344,7 +1386,11 @@ impl Dock {
                 let cx = s.centre();
                 let running = !a.windows.is_empty();
                 let active = a.windows.contains(&self.foreground);
-                let bg = if active { Some(Color::white(if self.hovered == Some(Hot::App(i)) { 0.11 } else { 0.07 })) } else { hover_bg(Hot::App(i)) };
+                let bg = if active {
+                    Some(Color::white(if self.hovered == Some(Hot::App(i)) { 0.11 } else { 0.07 }))
+                } else {
+                    hover_bg(Hot::App(i))
+                };
                 if let Some(c) = bg {
                     p.rrect(s.x, by, s.w, b, 5.0, c.alpha(presence));
                 }
@@ -1353,7 +1399,14 @@ impl Dock {
                 match app_icons.get(i).cloned().flatten() {
                     // Always pixel for pixel, so it's sharp.
                     Some(bmp) => p.icon(&bmp, cx, iy + size / 2.0, presence),
-                    None => p.rrect(cx - size * 0.4, iy + size * 0.1, size * 0.8, size * 0.8, size * 0.2, Color::white(0.15 * presence)),
+                    None => p.rrect(
+                        cx - size * 0.4,
+                        iy + size * 0.1,
+                        size * 0.8,
+                        size * 0.8,
+                        size * 0.2,
+                        Color::white(0.15 * presence),
+                    ),
                 }
                 if running {
                     let (w, c) = if active { (16.0, theme::accent()) } else { (6.0, Color::white(0.55)) };
@@ -1399,24 +1452,40 @@ impl Dock {
                     Chip::Widgets => Hot::Widgets,
                     c => Hot::Chip(c),
                 };
-                let hover = hover_bg(hot).or_else(|| if chip == Chip::Music { hover_bg(Hot::MusicToggle) } else { None });
+                let hover =
+                    hover_bg(hot).or_else(|| if chip == Chip::Music { hover_bg(Hot::MusicToggle) } else { None });
                 if let Some(c) = hover {
                     p.rrect(s.x, by, s.w, b, 5.0, c);
                 }
                 let st = wd.stats;
                 let grey = Color::white(0.55);
                 let white = Color::white(0.95);
-                let two = |top: &str, bottom: &str, top_c: Color, bottom_c: Color, font_b: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat| {
-                    p.text(top, &f.small, s.x, mid_y - 16.0, s.w, 16.0, Align::Center, top_c);
-                    p.text(bottom, font_b, s.x, mid_y, s.w, 16.0, Align::Center, bottom_c);
-                };
+                let two =
+                    |top: &str,
+                     bottom: &str,
+                     top_c: Color,
+                     bottom_c: Color,
+                     font_b: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat| {
+                        p.text(top, &f.small, s.x, mid_y - 16.0, s.w, 16.0, Align::Center, top_c);
+                        p.text(bottom, font_b, s.x, mid_y, s.w, 16.0, Align::Center, bottom_c);
+                    };
                 match chip {
                     Chip::Weather => {
                         let Some(wx) = weather else { continue };
                         crate::ui::weather_icon(&p, s.x + 18.0, mid_y, 24.0, wx.code, wx.day, 1.0);
                         let unit = if wx.fahrenheit { "F" } else { "C" };
-                        p.text(&format!("{:.0}\u{b0}{unit}", wx.temp), &f.label, s.x + 36.0, mid_y - 17.0, s.w - 38.0, 17.0, Align::Left, white);
-                        p.text(wx.describe(), &f.small, s.x + 36.0, mid_y, s.w - 38.0, 15.0, Align::Left, Color::white(0.6));
+                        let (tx, tw) = (s.x + WEATHER_ICON_W, s.w - WEATHER_ICON_W - 2.0);
+                        p.text(
+                            &format!("{:.0}\u{b0}{unit}", wx.temp),
+                            &f.label,
+                            tx,
+                            mid_y - 17.0,
+                            tw,
+                            17.0,
+                            Align::Left,
+                            white,
+                        );
+                        p.text(wx.describe(), &f.small, tx, mid_y, tw, 15.0, Align::Left, Color::white(0.6));
                     }
                     Chip::Widgets => {
                         let c = Color::white(0.85);
@@ -1447,14 +1516,14 @@ impl Dock {
                             None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
                         }
                         // Bars moving with the music, between the title and the button.
-                        let viz = if wd.bars.is_some() { 34.0 } else { 0.0 };
-                        let tw = s.w - art - 8.0 - 34.0 - viz;
+                        let viz = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
+                        let tw = s.w - MUSIC_LEAD - MUSIC_BUTTON - viz;
                         if let Some((levels, c)) = &wd.bars {
-                            let x = s.x + s.w - 34.0 - viz;
+                            let x = s.x + s.w - MUSIC_BUTTON - viz + 2.0;
                             crate::ui::spectrum(&p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
                         }
-                        p.text(&m.title, &f.small, s.x + art + 12.0, mid_y - 16.0, tw, 16.0, Align::Left, white);
-                        p.text(&m.artist, &f.small, s.x + art + 12.0, mid_y, tw, 16.0, Align::Left, grey);
+                        p.text(&m.title, &f.small, s.x + MUSIC_LEAD, mid_y - 16.0, tw, 16.0, Align::Left, white);
+                        p.text(&m.artist, &f.small, s.x + MUSIC_LEAD, mid_y, tw, 16.0, Align::Left, grey);
                         // Play / pause.
                         let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
                         if self.hovered == Some(Hot::MusicToggle) {
@@ -1507,7 +1576,13 @@ impl Dock {
                     let (bx, ty) = (p.snap_line(x - 8.0, sw), p.snap_line(cy - 4.5, sw));
                     p.stroke_rrect(bx, ty, 15.0, 9.0, 2.0, white, sw);
                     p.rrect(bx + 15.5, p.snap(cy - 1.5), 1.5, 3.0, 0.7, white);
-                    let c = if charging { Color(0.45, 0.9, 0.5, 1.0) } else if pct <= 20 { Color(1.0, 0.4, 0.35, 1.0) } else { white };
+                    let c = if charging {
+                        Color(0.45, 0.9, 0.5, 1.0)
+                    } else if pct <= 20 {
+                        Color(1.0, 0.4, 0.35, 1.0)
+                    } else {
+                        white
+                    };
                     p.rrect(bx + 1.5, ty + 1.5, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
                 }
             }

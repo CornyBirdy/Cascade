@@ -16,7 +16,9 @@
 //! Alt+Tab swallows a release, which risks leaving Windows thinking Alt is
 //! still held, so: nothing is swallowed unless the replacement was accepted,
 //! and shortly afterwards the key state is checked and a release sent if it's
-//! still down.
+//! still down (and checked again until it's up). Nothing is swallowed either
+//! while a program with admin rights is in front and Cascade has none:
+//! Windows quietly drops the keys Cascade sends it then, replacement and all.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
@@ -32,6 +34,10 @@ static MAIN_SEEN: AtomicBool = AtomicBool::new(false);
 /// Tick count of the latest Win key-down (repeats included).
 static LAST_WIN: AtomicU32 = AtomicU32::new(0);
 static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// Checks left before `fix_stuck` stops trying.
+static CHECKS: AtomicU32 = AtomicU32::new(0);
+/// How many times a stuck key is checked (and released) after a swallowed release.
+const MAX_CHECKS: u32 = 4;
 
 /// Sent to the admin helper's window to check the keys afterwards.
 pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
@@ -51,6 +57,11 @@ fn on_lone_win() {
 
 /// Asks the owner of this hook to call `fix_stuck` in a moment.
 fn request_check() {
+    CHECKS.store(MAX_CHECKS, Ordering::Relaxed);
+    schedule_check();
+}
+
+fn schedule_check() {
     if IN_HELPER.load(Ordering::Relaxed) {
         let h = HWND(HELPER_WINDOW.load(Ordering::Relaxed) as *mut _);
         unsafe {
@@ -100,16 +111,19 @@ static TAB_CANCEL: AtomicBool = AtomicBool::new(false);
 const MASK_KEY: u16 = 0xE8;
 
 fn key(vk: u16, up: bool) -> INPUT {
+    // The Win keys and right Alt are extended keys: sent with their scan
+    // code and that flag, their release looks just like the real one to
+    // everything that reads the keyboard.
+    let extended = vk == VK_LWIN.0 || vk == VK_RWIN.0 || vk == VK_RMENU.0;
+    let scan = if vk == MASK_KEY { 0 } else { (unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) }) as u16 };
+    let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: 0,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                time: 0,
-                dwExtraInfo: 0,
-            },
+            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 },
         },
     }
 }
@@ -127,12 +141,21 @@ pub fn fix_stuck() {
     }
     if !inputs.is_empty() {
         unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        // Check again that it took.
+        let left = CHECKS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
+        if left.unwrap_or(0) > 1 {
+            schedule_check();
+        }
     }
 }
 
 /// Mask tap and the key's release as one batch, in that order. True if
 /// Windows accepted all of it (so the real release can be swallowed).
 unsafe fn masked_release(vk: u16) -> bool {
+    if crate::helper::foreground_above_us() {
+        // Windows would drop it: let the real release through instead.
+        return false;
+    }
     let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
 }

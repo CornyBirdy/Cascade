@@ -8,13 +8,14 @@
 //!
 //! Windows can't do this for us, so a panel's backdrop window (see
 //! `backdrop`) becomes a layered window holding only a ring along the
-//! panel's edge. Its pixels are what's on the screen just behind and around
-//! the panel, read with a plain screen copy and warped: each pixel in the
-//! ring shows the screen from further out along the edge's normal, the
-//! more so the nearer it is to the edge, and red, green and blue each a
-//! little differently. Layered windows (Cascade's own panels, and the ring
-//! itself) aren't part of a screen copy, so it sees only what's behind.
-//! The middle of the panel stays truly see-through.
+//! panel's edge. Its pixels are what's on the screen just around the
+//! panel, read with a plain screen copy and folded in over the edge: each
+//! pixel in the ring shows the screen from just outside the edge, from
+//! further out the nearer it is to the edge, and red, green and blue each
+//! a little differently. Since Windows 8 a screen copy includes layered
+//! windows too (the panel itself, and the ring), so the ring only ever
+//! reads what's outside the panel, never what's under it. The middle of
+//! the panel stays truly see-through.
 //!
 //! What's behind can change at any time, so the rings are refreshed a few
 //! times a second while one is on screen (`refresh`), and only redrawn when
@@ -192,7 +193,8 @@ fn paint(ring: &mut Ring, force: bool) {
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     let band = (ring.lens.band * scale).min(w.min(h) as f32 / 2.0).max(1.0);
     let bend = band * ring.lens.bend;
-    let margin = bend.ceil() as i32 + 2;
+    let split = ring.lens.split;
+    let margin = (bend * (1.0 + split)).ceil() as i32 + 3;
     let (cw, ch) = (w + 2 * margin, h + 2 * margin);
     let (cx, cy) = (ring.rect.left - margin, ring.rect.top - margin);
 
@@ -207,10 +209,21 @@ fn paint(ring: &mut Ring, force: bool) {
         ReleaseDC(None, screen);
     }
     let src = capture.pixels();
-    // FNV-1a over the pixels: nothing to do if nothing behind changed.
+    // FNV-1a over the pixels around the panel (all the ring reads): nothing
+    // to do if they didn't change. What's inside is the panel and the ring
+    // themselves, which change with every frame drawn.
     let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ ((cw as u64) << 32) ^ (ch as u64);
-    for px in src.as_chunks::<4>().0 {
-        hash = (hash ^ u32::from_le_bytes([px[0], px[1], px[2], 0]) as u64).wrapping_mul(0x0100_0000_01b3);
+    let row = |y: i32| &src[(y * cw * 4) as usize..((y + 1) * cw * 4) as usize];
+    for y in 0..ch {
+        let r = row(y);
+        let outer = y < margin || y >= ch - margin;
+        let m = (margin * 4) as usize;
+        let parts: [&[u8]; 2] = if outer { [r, &[]] } else { [&r[..m], &r[r.len() - m..]] };
+        for part in parts {
+            for px in part.as_chunks::<4>().0 {
+                hash = (hash ^ u32::from_le_bytes([px[0], px[1], px[2], 0]) as u64).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
     }
     if !force && hash == ring.seen {
         return;
@@ -244,7 +257,6 @@ fn paint(ring: &mut Ring, force: bool) {
     // Rows clear of the curved corners and the top and bottom bands only
     // have a band at each end.
     let reach = (band + r).ceil() as i32 + 1;
-    let split = ring.lens.split;
     for y in 0..h {
         let mid = y >= reach && y < h - reach;
         let spans: [(i32, i32); 2] = if mid { [(0, reach.min(w)), ((w - reach).max(0), w)] } else { [(0, w), (w, w)] };
@@ -260,15 +272,21 @@ fn paint(ring: &mut Ring, force: bool) {
                 }
                 // 1 at the edge, 0 where the glass is flat again.
                 let t = (1.0 - inside.max(0.0) / band).clamp(0.0, 1.0);
-                let shift = bend * t * t;
+                // How far outside the edge this pixel's light comes from:
+                // furthest at the edge, right at it where the glass is flat.
+                let out = bend * t * t;
+                // Out to the edge first, then a pixel clear of it.
+                let to_edge = inside.max(0.0) + 1.0;
                 // Each colour from a little further along the bend than the next.
                 let (sx, sy) = (fx + margin as f32, fy + margin as f32);
                 let at = |k: f32, channel: usize| {
-                    sample(src, stride, valid, sx + nx * shift * k, sy + ny * shift * k, channel)
+                    let d = to_edge + out * k;
+                    sample(src, stride, valid, sx + nx * d, sy + ny * d, channel)
                 };
                 let (red, green, blue) = (at(1.0 + split, 2), at(1.0, 1), at(1.0 - split, 0));
-                // A touch of light along the lit (upper) part of the curve.
-                let glint = 255.0 * 0.10 * t * t * t * (0.55 - 0.45 * ny);
+                // Light caught in the curve, most along its lit (upper) part:
+                // what shows where the edge is over a plain background.
+                let glint = 255.0 * 0.16 * t * t * t * (0.55 - 0.45 * ny);
                 let cover = (inside + 0.5).clamp(0.0, 1.0);
                 // Fade into the flat glass, where the ring shows what's behind as it is.
                 let fade = ((band - inside) / (band * 0.25)).clamp(0.0, 1.0);

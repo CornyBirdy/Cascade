@@ -29,32 +29,32 @@ use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::audio::{self, Visualizer, Volume, BANDS};
+use crate::backdrop::{self, Backdrop};
 use crate::brightness;
 use crate::config::{self, Config};
-use crate::backdrop::{self, Backdrop};
 use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
+use crate::helper;
 use crate::icons::{self, IconResult};
 use crate::keyhook;
 use crate::launcher::{self, AppEntry, Launcher};
 use crate::media::{self, Art, MediaCmd, MediaInfo};
+use crate::mouseedge;
 use crate::msg;
+use crate::notifications::{self, NotifCmd};
 use crate::pomodoro::Pomodoro;
 use crate::preview::{self, Preview};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
-use crate::mouseedge;
-use crate::switcher::Switcher;
-use crate::notifications::{self, NotifCmd};
-use crate::systray::{self, Flyout, Systray};
-use crate::sysmon::Sampler;
-use crate::widgets::{self, Widgets};
-use crate::helper;
 use crate::spring::Spring;
+use crate::switcher::Switcher;
+use crate::sysmon::Sampler;
+use crate::systray::{self, Flyout, Systray};
 use crate::theme;
 use crate::update;
 use crate::weather::{self, Weather};
+use crate::widgets::{self, Widgets};
 
 /// Width of the concave flares joining the notch to the screen edge.
 const EAR: f32 = 9.0;
@@ -325,7 +325,8 @@ pub fn run() -> Result<()> {
         let flyout = (flyout_hwnd, Backdrop::create(instance)?);
         let widgets_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         let widgets = (widgets_hwnd, Backdrop::create(instance)?);
-        let switcher_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
+        let switcher_hwnd =
+            create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
         let switcher = (switcher_hwnd, Backdrop::create(instance)?);
         let notch_backdrop = Backdrop::create(instance)?;
 
@@ -1054,8 +1055,7 @@ impl App {
         let chip = [&self.cfg.taskbar_left, &self.cfg.taskbar_right]
             .iter()
             .any(|l| l.split(',').any(|c| c.trim().eq_ignore_ascii_case("music")));
-        let widget_bars =
-            playing && self.cfg.widget_visualizer && (self.widgets.open || (chip && self.dock.visible()));
+        let widget_bars = playing && self.cfg.widget_visualizer && (self.widgets.open || (chip && self.dock.visible()));
         self.dock_bars = chip && self.dock.visible();
         if widget_bars != self.widget_bars {
             // Draw them in, or take them away.
@@ -1673,11 +1673,7 @@ impl App {
         }
         // Windows' menu came up over ours (the Win key reached both): take the
         // foreground back, which closes theirs and leaves ours alone.
-        if event == EVENT_SYSTEM_FOREGROUND
-            && self.cfg.launcher
-            && self.launcher.open
-            && shell::is_start_menu(hwnd)
-        {
+        if event == EVENT_SYSTEM_FOREGROUND && self.cfg.launcher && self.launcher.open && shell::is_start_menu(hwnd) {
             config::log("start: the Windows Start menu opened over Cascade's; closing it");
             launcher::force_foreground(self.launcher.hwnd);
             return;
@@ -2478,6 +2474,20 @@ impl App {
                         self.notifs.items.clear();
                         let _ = self.notif_tx.send(NotifCmd::Clear);
                     }
+                    Some(widgets::Action::OpenNotification(id)) => {
+                        // Like clicking it in Windows' own list: open the app
+                        // and the notification goes away.
+                        let aumid = self.notifs.items.iter().find(|n| n.id == id).map(|n| n.aumid.clone());
+                        self.widgets.hide();
+                        match aumid.filter(|a| !a.is_empty()) {
+                            Some(a) => {
+                                shell::open(&format!("shell:AppsFolder\\{a}"));
+                                self.notifs.items.retain(|n| n.id != id);
+                                let _ = self.notif_tx.send(NotifCmd::Remove(id));
+                            }
+                            None => shell::open("ms-actioncenter:"),
+                        }
+                    }
                     Some(widgets::Action::RemoveNotification(id)) => {
                         // Gone right away; the next read confirms it.
                         self.notifs.items.retain(|n| n.id != id);
@@ -2733,12 +2743,8 @@ impl App {
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
-            let status = dock::Status {
-                wifi: self.radios.wifi,
-                volume: self.vol.0,
-                muted: self.vol.1,
-                battery: battery(),
-            };
+            let status =
+                dock::Status { wifi: self.radios.wifi, volume: self.vol.0, muted: self.vol.1, battery: battery() };
             self.sync_art();
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());

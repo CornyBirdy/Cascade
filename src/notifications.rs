@@ -19,6 +19,9 @@ pub enum NotifCmd {
 
 pub struct Notif {
     pub id: u32,
+    /// The sending app's AppUserModelID, to open it when the notification is
+    /// clicked (empty if Windows didn't say).
+    pub aumid: String,
     pub app: String,
     pub title: String,
     pub body: String,
@@ -115,10 +118,12 @@ fn read(l: &UserNotificationListener, asked: &mut bool) -> Result<Snapshot> {
 
 fn describe(n: &UserNotification) -> Option<Notif> {
     let id = n.Id().ok()?;
-    let app = n
-        .AppInfo()
-        .and_then(|a| a.DisplayInfo())
-        .and_then(|d| d.DisplayName())
+    let info = n.AppInfo().ok();
+    let aumid = info.as_ref().and_then(|a| a.AppUserModelId().ok()).map(|s| s.to_string()).unwrap_or_default();
+    let app = info
+        .as_ref()
+        .and_then(|a| a.DisplayInfo().ok())
+        .and_then(|d| d.DisplayName().ok())
         .map(|s| s.to_string())
         .unwrap_or_default();
     let binding =
@@ -135,5 +140,5 @@ fn describe(n: &UserNotification) -> Option<Notif> {
     }
     let title = lines.first().cloned().unwrap_or_else(|| app.clone());
     let body = lines.get(1..).map(|l| l.join(" ")).unwrap_or_default();
-    Some(Notif { id, app, title, body })
+    Some(Notif { id, aumid, app, title, body })
 }

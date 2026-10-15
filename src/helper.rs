@@ -10,11 +10,11 @@
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess, OpenProcessToken,
-    WaitForSingleObject, INFINITE,
+    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess, OpenProcess,
+    OpenProcessToken, WaitForSingleObject, INFINITE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -43,10 +43,40 @@ pub fn running() -> bool {
 
 /// Whether this process runs with admin rights.
 fn is_elevated() -> bool {
+    token_elevated(unsafe { GetCurrentProcess() }).unwrap_or(false)
+}
+
+/// Whether the window in front belongs to a program with admin rights while
+/// this one has none. Keys this process injects don't reach it then
+/// (Windows drops them without saying so).
+pub fn foreground_above_us() -> bool {
+    use std::sync::OnceLock;
+    static ME: OnceLock<bool> = OnceLock::new();
+    if *ME.get_or_init(is_elevated) {
+        return false;
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut pid = 0u32;
+        if fg.is_invalid() || GetWindowThreadProcessId(fg, Some(&mut pid)) == 0 || pid == 0 {
+            return false;
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            // Not even that much access: protected or elevated.
+            return true;
+        };
+        let elevated = token_elevated(process).unwrap_or(true);
+        let _ = CloseHandle(process);
+        elevated
+    }
+}
+
+/// Whether `process` runs with admin rights (None if it can't be read).
+fn token_elevated(process: HANDLE) -> Option<bool> {
     unsafe {
         let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+            return None;
         }
         let mut e = TOKEN_ELEVATION::default();
         let mut len = 0u32;
@@ -59,7 +89,7 @@ fn is_elevated() -> bool {
         )
         .is_ok();
         let _ = CloseHandle(token);
-        ok && e.TokenIsElevated != 0
+        ok.then_some(e.TokenIsElevated != 0)
     }
 }
 
@@ -151,20 +181,9 @@ pub fn run() {
         };
         RegisterClassExW(&wc);
         // A normal (never shown) window, so Cascade can find it by class.
-        let Ok(hwnd) = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            CLASS,
-            w!(""),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(instance),
-            None,
-        ) else {
+        let Ok(hwnd) =
+            CreateWindowExW(WS_EX_TOOLWINDOW, CLASS, w!(""), WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)
+        else {
             return;
         };
         // Let Cascade (not elevated) post these two messages to us.

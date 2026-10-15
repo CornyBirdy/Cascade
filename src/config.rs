@@ -42,10 +42,14 @@ notch_edge = top
 notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
-# Grow the notch with album art / timer while music or a focus timer runs.
+# While music or a focus timer plays, show it on the closed notch: the notch
+# style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
+# Moving bars beside the album art when the notch grows for music, and on the
+# open notch's Media tab.
 visualizer = true
-# While music plays, the lip's coloured line moves with the music.
+# Lip style (or a notch on a side edge): the lit line pulses with the music
+# instead of staying still. Needs live_activity.
 lip_visualizer = true
 # Bars that move with the music on the taskbar's music widget and the widgets
 # panel's music card.
