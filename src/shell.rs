@@ -9,7 +9,8 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY, VK_LWIN,
 };
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -688,6 +689,34 @@ pub fn open(target: &str) {
     unsafe {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }
+}
+
+/// Starts `file` with `args`, as admin if `admin` (Windows asks first).
+/// False only if there's no such program, so the caller can try another.
+pub fn launch(file: &str, args: &str, admin: bool) -> bool {
+    let verb = if admin { w!("runas") } else { w!("open") };
+    let r = unsafe { ShellExecuteW(None, verb, &HSTRING::from(file), &HSTRING::from(args), None, SW_SHOWNORMAL) };
+    // At most 32 is an error; 2 and 3 are "not found" (a cancelled admin
+    // prompt counts as found, so it isn't asked for twice).
+    let code = r.0 as isize;
+    code > 32 || !(code == 2 || code == 3)
+}
+
+/// Presses Win+`vk` for Windows (Win+D shows the desktop, Win+S search).
+pub fn win_combo(vk: u16) {
+    let key = |vk: u16, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }
+                    | if vk == VK_LWIN.0 { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) },
+                ..Default::default()
+            },
+        },
+    };
+    let inputs = [key(VK_LWIN.0, false), key(vk, false), key(vk, true), key(VK_LWIN.0, true)];
+    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 }
 
 pub fn open_file(path: &std::path::Path) {

@@ -1,6 +1,11 @@
-//! Global keyboard hook: opens the Cascade launcher on a lone Win key press
-//! and drives the Alt+Tab switcher. Win+anything (Win+E, Win+R, Win+Shift+S...)
-//! is left completely alone.
+//! Global keyboard hook: opens the Cascade launcher on a lone Win key press,
+//! drives the Alt+Tab switcher, and takes the Win+key shortcuts Cascade has
+//! its own menus for (Win+X, Win+N, Win+A, each only when turned on). Every
+//! other Win+key (Win+E, Win+R, Win+Shift+S...) is left completely alone.
+//!
+//! A shortcut's key press and release are kept from Windows, so it never
+//! sees the combination; a mask key tap (see below) stops the Win release
+//! that follows from opening its Start menu.
 //!
 //! The Windows Start menu only opens when Win is released with no other key
 //! pressed since it went down. So as soon as Win goes down, one unassigned
@@ -16,7 +21,9 @@
 //! Alt+Tab swallows a release, which risks leaving Windows thinking Alt is
 //! still held, so: nothing is swallowed unless the replacement was accepted,
 //! and shortly afterwards the key state is checked and a release sent if it's
-//! still down.
+//! still down (and checked again until it's up). Nothing is swallowed either
+//! while a program with admin rights is in front and Cascade has none:
+//! Windows quietly drops the keys Cascade sends it then, replacement and all.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
@@ -32,6 +39,10 @@ static MAIN_SEEN: AtomicBool = AtomicBool::new(false);
 /// Tick count of the latest Win key-down (repeats included).
 static LAST_WIN: AtomicU32 = AtomicU32::new(0);
 static HELPER_WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// Checks left before `fix_stuck` stops trying.
+static CHECKS: AtomicU32 = AtomicU32::new(0);
+/// How many times a stuck key is checked (and released) after a swallowed release.
+const MAX_CHECKS: u32 = 4;
 
 /// Sent to the admin helper's window to check the keys afterwards.
 pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
@@ -51,6 +62,11 @@ fn on_lone_win() {
 
 /// Asks the owner of this hook to call `fix_stuck` in a moment.
 fn request_check() {
+    CHECKS.store(MAX_CHECKS, Ordering::Relaxed);
+    schedule_check();
+}
+
+fn schedule_check() {
     if IN_HELPER.load(Ordering::Relaxed) {
         let h = HWND(HELPER_WINDOW.load(Ordering::Relaxed) as *mut _);
         unsafe {
@@ -86,6 +102,10 @@ pub fn set_helper_mode(hwnd: HWND) {
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 static WIN_ON: AtomicBool = AtomicBool::new(false);
+/// The Win+letter shortcuts Cascade takes: bit n is the letter 'A' + n.
+static SHORTCUTS: AtomicU32 = AtomicU32::new(0);
+/// Shortcut keys whose press was kept from Windows, so their release is too.
+static HELD_SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 static TAB_ON: AtomicBool = AtomicBool::new(false);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
@@ -100,16 +120,19 @@ static TAB_CANCEL: AtomicBool = AtomicBool::new(false);
 const MASK_KEY: u16 = 0xE8;
 
 fn key(vk: u16, up: bool) -> INPUT {
+    // The Win keys and right Alt are extended keys: sent with their scan
+    // code and that flag, their release looks just like the real one to
+    // everything that reads the keyboard.
+    let extended = vk == VK_LWIN.0 || vk == VK_RWIN.0 || vk == VK_RMENU.0;
+    let scan = if vk == MASK_KEY { 0 } else { (unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) }) as u16 };
+    let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: 0,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                time: 0,
-                dwExtraInfo: 0,
-            },
+            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 },
         },
     }
 }
@@ -127,12 +150,23 @@ pub fn fix_stuck() {
     }
     if !inputs.is_empty() {
         unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        // Check again that it took.
+        // The hook and these checks all run on the one thread.
+        let left = CHECKS.load(Ordering::Relaxed);
+        CHECKS.store(left.saturating_sub(1), Ordering::Relaxed);
+        if left > 1 {
+            schedule_check();
+        }
     }
 }
 
 /// Mask tap and the key's release as one batch, in that order. True if
 /// Windows accepted all of it (so the real release can be swallowed).
 unsafe fn masked_release(vk: u16) -> bool {
+    if crate::helper::foreground_above_us() {
+        // Windows would drop it: let the real release through instead.
+        return false;
+    }
     let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
 }
@@ -208,6 +242,30 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
 
+            // Win+letter shortcuts.
+            if (b'A' as u16..=b'Z' as u16).contains(&vk) {
+                let bit = 1u32 << (vk - b'A' as u16);
+                let win_held = WIN_DOWN.load(Ordering::Relaxed)
+                    || [VK_LWIN, VK_RWIN].iter().any(|k| GetAsyncKeyState(k.0 as i32) as u16 & 0x8000 != 0);
+                let plain = !ALT_DOWN.load(Ordering::Relaxed)
+                    && !CTRL_DOWN.load(Ordering::Relaxed)
+                    && !SHIFT_DOWN.load(Ordering::Relaxed);
+                if down && win_held && plain && SHORTCUTS.load(Ordering::Relaxed) & bit != 0 && handled_here() {
+                    COMBO.store(true, Ordering::Relaxed);
+                    // Held down, the key repeats: act on the first press only.
+                    if HELD_SHORTCUTS.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                        // To Windows it's a combination now, so letting Win go
+                        // won't open its Start menu.
+                        mask_tap();
+                        notify(msg::SHORTCUT, vk as usize);
+                    }
+                    return LRESULT(1);
+                }
+                if up && HELD_SHORTCUTS.fetch_and(!bit, Ordering::Relaxed) & bit != 0 {
+                    return LRESULT(1);
+                }
+            }
+
             // Win key.
             if WIN_ON.load(Ordering::Relaxed) {
                 if is_win && down {
@@ -247,24 +305,37 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     CallNextHookEx(None, code, wp, lp)
 }
 
-/// Turns the Win-key launcher and the Alt+Tab switcher on or off, installing
-/// or removing the hook as needed. Must be called on the UI thread (the hook
-/// runs on the thread that installed it, through its message loop).
-pub fn configure(win: bool, tab: bool) {
+/// The Win+letter shortcuts Cascade takes with `cfg`, for `configure`.
+pub fn shortcuts(cfg: &crate::config::Config) -> u32 {
+    let bit = |c: u8, on: bool| if on { 1u32 << (c - b'A') } else { 0 };
+    bit(b'X', cfg.shortcut_win_x)
+        // The widgets panel opens from Cascade's taskbar, and Controls are in the notch.
+        | bit(b'N', cfg.shortcut_win_n && cfg.dock)
+        | bit(b'A', cfg.shortcut_win_a && cfg.notch)
+}
+
+/// Turns the Win-key launcher, the Alt+Tab switcher and the Win+key
+/// `shortcuts` (see `shortcuts`) on or off, installing or removing the hook
+/// as needed. Must be called on the UI thread (the hook runs on the thread
+/// that installed it, through its message loop).
+pub fn configure(win: bool, tab: bool, shortcuts: u32) {
     WIN_ON.store(win, Ordering::Relaxed);
     TAB_ON.store(tab, Ordering::Relaxed);
+    SHORTCUTS.store(shortcuts, Ordering::Relaxed);
+    let wanted = win || tab || shortcuts != 0;
     let current = HOOK.load(Ordering::Relaxed);
     unsafe {
-        if (win || tab) && current == 0 {
+        if wanted && current == 0 {
             if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
                 HOOK.store(h.0 as isize, Ordering::Relaxed);
             }
-        } else if !(win || tab) && current != 0 {
+        } else if !wanted && current != 0 {
             let _ = UnhookWindowsHookEx(HHOOK(current as *mut _));
             HOOK.store(0, Ordering::Relaxed);
             WIN_DOWN.store(false, Ordering::Relaxed);
             ALT_DOWN.store(false, Ordering::Relaxed);
             TAB_ACTIVE.store(false, Ordering::Relaxed);
+            HELD_SHORTCUTS.store(0, Ordering::Relaxed);
         }
     }
 }

@@ -67,6 +67,7 @@ enum Target {
     Next,
     Gear,
     NotifClear,
+    NotifOpen(u32),
     NotifRemove(u32),
     NotifSettings,
 }
@@ -77,6 +78,8 @@ pub enum Action {
     Next,
     Customise,
     ClearNotifications,
+    /// A notification was clicked: open its app.
+    OpenNotification(u32),
     RemoveNotification(u32),
     NotificationSettings,
 }
@@ -317,6 +320,7 @@ impl Widgets {
             Target::Next => Action::Next,
             Target::Gear => Action::Customise,
             Target::NotifClear => Action::ClearNotifications,
+            Target::NotifOpen(id) => Action::OpenNotification(id),
             Target::NotifRemove(id) => Action::RemoveNotification(id),
             Target::NotifSettings => Action::NotificationSettings,
         })
@@ -459,22 +463,27 @@ impl Widgets {
                 let tw = CARD_W - 28.0 - 30.0;
                 for (i, item) in n.items.iter().take(NOTIF_MAX).enumerate() {
                     let ry = top + i as f32 * NOTIF_ROW;
-                    if i > 0 {
+                    let open = Target::NotifOpen(item.id);
+                    let remove = Target::NotifRemove(item.id);
+                    if matches!(self.hovered, Some(t) if t == open || t == remove) {
+                        p.rrect(x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0, 8.0, Color::white(0.06));
+                    } else if i > 0 {
                         p.rrect(x + 14.0, ry, CARD_W - 28.0, 1.0, 0.0, Color::white(0.06));
                     }
                     p.text(&item.app, &f.small, x + 14.0, ry + 4.0, tw, 15.0, Align::Left, Color::white(0.5));
                     p.text(&item.title, &f.label, x + 14.0, ry + 18.0, tw, 16.0, Align::Left, Color::white(0.95));
                     p.text(&item.body, &f.small, x + 14.0, ry + 34.0, tw, 15.0, Align::Left, Color::white(0.65));
-                    // Dismiss.
-                    let t = Target::NotifRemove(item.id);
+                    // Dismiss (before the row, so it wins the click).
                     let (cx, cy) = (x + CARD_W - 26.0, ry + NOTIF_ROW / 2.0);
-                    if self.hovered == Some(t) {
+                    if self.hovered == Some(remove) {
                         p.circle(cx, cy, 11.0, Color::white(0.10));
                     }
                     let c = Color::white(0.7);
                     p.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, c, 1.3);
                     p.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, c, 1.3);
-                    self.hits.push((t, cx - 12.0, cy - 12.0, 24.0, 24.0));
+                    self.hits.push((remove, cx - 12.0, cy - 12.0, 24.0, 24.0));
+                    // The rest of the row opens it.
+                    self.hits.push((open, x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0));
                 }
             }
         }

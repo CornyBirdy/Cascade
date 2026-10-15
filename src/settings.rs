@@ -2,6 +2,8 @@
 //! Direct2D like the rest of Cascade; only the text boxes are native EDIT
 //! controls. Every change is written to config.ini and applied at once.
 
+use std::cell::RefCell;
+
 use windows::core::{w, Result, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE};
@@ -13,7 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::Config;
-use crate::gfx::{Align, Color, Fonts, Gfx, Painter};
+use crate::gfx::{Align, Color, Fonts, Gfx, Measure, Painter};
 use crate::theme;
 use crate::weather::Lookup;
 
@@ -27,14 +29,20 @@ const HEAD_H: f32 = 38.0;
 const COMPACT_H: f32 = 44.0;
 const TOP: f32 = 84.0;
 const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
+/// Narrowest a segmented button gets (they widen to fit their labels).
 const CHOICE_W: f32 = 84.0;
+/// Each extra line of a wrapped description.
+const LINE_H: f32 = 15.0;
+/// Most lines a description wraps to.
+const MAX_LINES: usize = 3;
 
-pub const SECTIONS: [&str; 10] = [
+pub const SECTIONS: [&str; 11] = [
     "General",
     "Appearance",
     "Notch",
     "Taskbar",
     "Start menu",
+    "Shortcuts",
     "Widgets",
     "Screens",
     "Focus & weather",
@@ -447,19 +455,26 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("lip_width", "Lip length", "How long the resting lip is.", slider(40.0, 400.0, 2.0, Unit::Px)),
             row("lip_height", "Lip thickness", "Push the pointer into it to open.", slider(2.0, 16.0, 1.0, Unit::Px)),
+            heading("h_music", "While music or the focus timer plays"),
             row(
                 "live_activity",
                 "Live activity",
-                "Music or the focus timer grows the notch or lights the lip.",
+                "Show it on the closed notch: the Notch style grows to show album art or the timer, the Lip lights a coloured line. Off: the closed notch stays plain.",
                 Toggle,
             ),
-            row("visualizer", "Music visualizer", "Bars that move with whatever is playing.", Toggle),
+            row(
+                "visualizer",
+                "Bars in the notch",
+                "Moving bars beside the album art when the notch grows for music, and on the open notch's Media tab.",
+                Toggle,
+            ),
             row(
                 "lip_visualizer",
-                "Visualizer on the lip",
-                "While music plays, the lip's coloured line moves with it.",
+                "Moving lip line",
+                "Lip style (or a notch on a side edge): the coloured line pulses with the music instead of staying still. Needs Live activity.",
                 Toggle,
             ),
+            heading("h_more", "Pop-ups, size and hover"),
             row("volume_osd", "Volume pop-up", "Show volume changes in the notch.", Toggle),
             row("brightness_osd", "Brightness pop-up", "Show brightness changes in the notch.", Toggle),
             row(
@@ -591,6 +606,33 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_place_network", "Network", "", Toggle),
         ],
         5 => vec![
+            heading("h_menus", "Windows' shortcut menus, in Cascade's look"),
+            row(
+                "shortcut_win_x",
+                "Win+X",
+                "The quick links menu (Device Manager, Terminal, Task Manager, shut down...) above Start. Right-clicking Start opens it too.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_n",
+                "Win+N",
+                "The widgets panel, with your notifications and the calendar. Needs Cascade's taskbar.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_a",
+                "Win+A",
+                "The notch's Controls (Wi-Fi, Bluetooth, volume, brightness) instead of Windows' quick settings.",
+                Toggle,
+            ),
+            row(
+                "shortcuts_note",
+                "Turned off",
+                "The key opens Windows' own menu, as usual. Other Win+key shortcuts are never touched.",
+                Note,
+            ),
+        ],
+        6 => vec![
             heading("h_bar", "Taskbar"),
             row(
                 "taskbar_board",
@@ -625,7 +667,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(1.0, 10.0, 1.0, Unit::Seconds),
             ),
         ],
-        6 => vec![
+        7 => vec![
             row(
                 "mouse_match",
                 "Match the pointer across screens",
@@ -646,7 +688,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("screens_info", "Detected", "", Note),
         ],
-        7 => vec![
+        8 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
             row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
@@ -671,7 +713,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
         ],
-        8 => vec![
+        9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
@@ -755,6 +797,18 @@ pub struct Settings {
     edits: Vec<(HWND, usize, String)>,
     font: HFONT,
     pub brush: HBRUSH,
+    measure: Option<Measure>,
+    /// The current section's rows sized to their text.
+    fit: RefCell<Fit>,
+}
+
+/// Row heights (descriptions wrap onto more lines) and segmented-button
+/// widths, measured for one section.
+#[derive(Default)]
+struct Fit {
+    section: Option<usize>,
+    heights: Vec<f32>,
+    segs: Vec<f32>,
 }
 
 fn edit_text(h: HWND) -> String {
@@ -799,6 +853,8 @@ impl Settings {
                 edits: Vec::new(),
                 font: HFONT::default(),
                 brush: CreateSolidBrush(COLORREF(0x002B2B2B)),
+                measure: Measure::new().ok(),
+                fit: RefCell::default(),
             };
             s.apply_dpi(None);
             let _ = ShowWindow(hwnd, SW_SHOW);
@@ -865,20 +921,151 @@ impl Settings {
     }
 
     fn row_y(&self, i: usize) -> f32 {
-        TOP + row_offset(self.section, i) - self.scroll
+        TOP + self.offset(i) - self.scroll
+    }
+
+    /// Height of row `i` of the current section.
+    fn row_h(&self, i: usize) -> f32 {
+        let fit = self.fit.borrow();
+        match fit.heights.get(i) {
+            Some(&h) if fit.section == Some(self.section) => h,
+            _ => rows(self.section).get(i).map_or(ROW_H, row_h),
+        }
+    }
+
+    /// Distance from the top of the first row to the top of row `i`.
+    fn offset(&self, i: usize) -> f32 {
+        let fit = self.fit.borrow();
+        if fit.section == Some(self.section) {
+            return fit.heights.iter().take(i).map(|h| h + ROW_GAP).sum();
+        }
+        row_offset(self.section, i)
+    }
+
+    /// Width of each segment of row `i`'s segmented buttons.
+    fn seg_w(&self, i: usize) -> f32 {
+        let fit = self.fit.borrow();
+        match fit.segs.get(i) {
+            Some(&w) if fit.section == Some(self.section) => w,
+            _ => CHOICE_W,
+        }
+    }
+
+    /// Room for row `i`'s title and description: up to its control (and the
+    /// reset button beside it).
+    fn text_w(&self, i: usize, r: &Row) -> f32 {
+        let cw = self.content_w();
+        match r.ctl {
+            Ctl::Board(_) | Ctl::Gallery | Ctl::Note | Ctl::Heading => cw - 36.0,
+            _ => {
+                let (rx, ..) = self.reset_rect(i, &r.ctl);
+                rx - 8.0 - (SIDEBAR + 24.0 + 18.0)
+            }
+        }
+    }
+
+    /// A row's description as shown: live text for some rows, and for the
+    /// weather location a note (with its colour and a tick or cross).
+    fn desc(&self, r: &Row, get: &dyn Fn(&str) -> String, build: u32) -> (String, Color, Option<bool>) {
+        let picked =
+            matches!(r.ctl, Ctl::Gallery).then(|| theme::THEMES.iter().find(|t| t.key == get(r.key))).flatten();
+        let desc = if let Some(t) = picked {
+            t.about.to_string()
+        } else if r.key == "about" && build > 0 {
+            format!("{} Build {build}.", r.desc)
+        } else if r.key == "screens_info" {
+            crate::mouseedge::info()
+        } else if r.key == "resources" {
+            crate::usage::summary()
+        } else if r.key == "admin_helper" && get(r.key) == "true" {
+            // Live status, so it's clear whether it's working.
+            if crate::helper::running() {
+                "Running.".to_string()
+            } else {
+                "Not running. Details in cascade.log in the data folder.".to_string()
+            }
+        } else {
+            r.desc.to_string()
+        };
+        // Live feedback on the location: found (and where), or not.
+        let note =
+            if r.key == "weather_location" { location_note(&get(r.key), get("weather") == "true") } else { None };
+        note.unwrap_or((desc, Color::white(0.55), None))
+    }
+
+    /// Sizes the current section's rows to their text: segmented buttons
+    /// wide enough for their labels, descriptions wrapped instead of cut
+    /// off. Returns whether anything moved.
+    fn refit(&self, get: &dyn Fn(&str) -> String, build: u32) -> bool {
+        let Some(m) = &self.measure else { return false };
+        let rows = rows(self.section);
+        let segs: Vec<f32> = rows
+            .iter()
+            .map(|r| match r.ctl {
+                Ctl::Choice(opts) => {
+                    opts.iter().map(|(_, l)| (m.width(l, &m.body) + 28.0).ceil()).fold(CHOICE_W, f32::max)
+                }
+                _ => 0.0,
+            })
+            .collect();
+        let before = std::mem::replace(
+            &mut *self.fit.borrow_mut(),
+            Fit { section: Some(self.section), heights: rows.iter().map(row_h).collect(), segs },
+        );
+        let heights: Vec<f32> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let base = row_h(r);
+                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Heading) {
+                    return base;
+                }
+                let (desc, _, mark) = self.desc(r, get, build);
+                if desc.is_empty() {
+                    return base;
+                }
+                let w = self.text_w(i, r) - if mark.is_some() { 15.0 } else { 0.0 };
+                let lines = m.lines(&desc, &m.small, w).min(MAX_LINES);
+                base + (lines - 1) as f32 * LINE_H
+            })
+            .collect();
+        let mut fit = self.fit.borrow_mut();
+        fit.heights = heights;
+        before.section != fit.section || before.heights != fit.heights || before.segs != fit.segs
+    }
+
+    /// Moves the text boxes onto their rows (after rows above changed height).
+    fn place_edits(&self) {
+        let k = self.k;
+        let pad = (6.0 * k) as i32;
+        for &(e, i, _) in &self.edits {
+            let Some(r) = rows(self.section).into_iter().nth(i) else { continue };
+            let (x, y, w, h) = self.ctl_rect(i, &r.ctl);
+            unsafe {
+                let _ = SetWindowPos(
+                    e,
+                    None,
+                    (x * k) as i32 + pad,
+                    (y * k) as i32 + pad,
+                    (w * k) as i32 - pad * 2,
+                    (h * k) as i32 - pad * 2,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
     }
 
     /// Control rect (x, y, w, h) of row `i`.
     fn ctl_rect(&self, i: usize, ctl: &Ctl) -> (f32, f32, f32, f32) {
         let x1 = SIDEBAR + 24.0 + self.content_w() - 18.0;
         let y = self.row_y(i);
-        let h = rows(self.section).get(i).map_or(ROW_H, row_h);
+        let h = self.row_h(i);
         match ctl {
             Ctl::Toggle => (x1 - 44.0, y + (h - 22.0) / 2.0, 44.0, 22.0),
             Ctl::Slider { .. } => (x1 - 170.0, y + 14.0, 170.0, h - 28.0),
             Ctl::Text { .. } => (x1 - 250.0, y + (h - 30.0) / 2.0, 250.0, 30.0),
             Ctl::Choice(opts) => {
-                let w = opts.len() as f32 * CHOICE_W;
+                let w = opts.len() as f32 * self.seg_w(i);
                 (x1 - w, y + (h - 32.0) / 2.0, w, 32.0)
             }
             Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
@@ -907,12 +1094,12 @@ impl Settings {
             Ctl::Slider { .. } => cx - 112.0,
             _ => cx - 36.0,
         };
-        let h = rows(self.section).get(i).map_or(ROW_H, row_h);
-        (x, self.row_y(i) + (h - 26.0) / 2.0, 26.0)
+        (x, self.row_y(i) + (self.row_h(i) - 26.0) / 2.0, 26.0)
     }
 
     /// Creates the text boxes for the current section.
     pub fn sync_edits(&mut self, get: &dyn Fn(&str) -> String) {
+        self.refit(get, crate::update::current());
         unsafe {
             for (h, _, _) in self.edits.drain(..) {
                 let _ = DestroyWindow(h);
@@ -1124,7 +1311,7 @@ impl Settings {
                     }
                     Ctl::Choice(opts) => {
                         let (cx, ..) = self.ctl_rect(i, &r.ctl);
-                        let j = ((x as f32 / self.k - cx) / CHOICE_W).floor().clamp(0.0, opts.len() as f32 - 1.0);
+                        let j = ((x as f32 / self.k - cx) / self.seg_w(i)).floor().clamp(0.0, opts.len() as f32 - 1.0);
                         let value = opts[j as usize].0;
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
@@ -1175,7 +1362,7 @@ impl Settings {
     }
 
     pub fn on_wheel(&mut self, delta: i16, get: &dyn Fn(&str) -> String) {
-        let content = TOP + row_offset(self.section, usize::MAX) + 16.0;
+        let content = TOP + self.offset(usize::MAX) + 16.0;
         let max = (content - CH).max(0.0);
         let before = self.scroll;
         self.scroll = (self.scroll - delta as f32 / 120.0 * 60.0).clamp(0.0, max);
@@ -1189,6 +1376,9 @@ impl Settings {
         let mut ps = PAINTSTRUCT::default();
         let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
         let (pw, ph) = ((CW * self.k) as i32, (CH * self.k) as i32);
+        if self.refit(get, build) {
+            self.place_edits();
+        }
         let r = (|| {
             gfx.begin_dc(hdc, pw, ph, self.k, BG)?;
             {
@@ -1252,7 +1442,7 @@ impl Settings {
                 );
                 for (i, r) in rows(self.section).iter().enumerate() {
                     let y = self.row_y(i);
-                    let h = row_h(r);
+                    let h = self.row_h(i);
                     if y + h < 0.0 || y > CH {
                         continue;
                     }
@@ -1270,40 +1460,13 @@ impl Settings {
                         continue;
                     }
                     p.rrect(x0, y, cw, h, 8.0, Color::white(0.045));
-                    let text_w = match r.ctl {
-                        Ctl::Board(_) | Ctl::Gallery => cw - 36.0,
-                        _ => cw - 330.0,
-                    };
+                    let text_w = self.text_w(i, r);
                     // The gallery's title and description are the picked theme's.
                     let picked = matches!(r.ctl, Ctl::Gallery)
                         .then(|| theme::THEMES.iter().find(|t| t.key == get(r.key)))
                         .flatten();
                     let title = picked.map_or(r.title, |t| t.name);
-                    let desc = if let Some(t) = picked {
-                        t.about.to_string()
-                    } else if r.key == "about" && build > 0 {
-                        format!("{} Build {build}.", r.desc)
-                    } else if r.key == "screens_info" {
-                        crate::mouseedge::info()
-                    } else if r.key == "resources" {
-                        crate::usage::summary()
-                    } else if r.key == "admin_helper" && get(r.key) == "true" {
-                        // Live status, so it's clear whether it's working.
-                        if crate::helper::running() {
-                            "Running.".to_string()
-                        } else {
-                            "Not running. Details in cascade.log in the data folder.".to_string()
-                        }
-                    } else {
-                        r.desc.to_string()
-                    };
-                    // Live feedback on the location: found (and where), or not.
-                    let note = if r.key == "weather_location" {
-                        location_note(&get(r.key), get("weather") == "true")
-                    } else {
-                        None
-                    };
-                    let (desc, tone, mark) = note.unwrap_or((desc, Color::white(0.55), None));
+                    let (desc, tone, mark) = self.desc(r, get, build);
                     if desc.is_empty() {
                         p.text(
                             title,
@@ -1329,7 +1492,14 @@ impl Settings {
                             }
                             dx += 15.0;
                         }
-                        p.text(&desc, &f.small, dx, y + 30.0, text_w - (dx - x0 - 18.0), 18.0, Align::Left, tone);
+                        let dw = text_w - (dx - x0 - 18.0);
+                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery) {
+                            p.text(&desc, &f.small, dx, y + 30.0, dw, 18.0, Align::Left, tone);
+                        } else {
+                            // Wrapped onto as many lines as the row was sized for.
+                            let lines = ((h - row_h(r)) / LINE_H).round() as usize + 1;
+                            p.text_wrap(&desc, &f.small, dx, y + 31.0, dw, lines as f32 * LINE_H + 2.0, tone);
+                        }
                     }
                     let (cx, cy, cwid, ch) = self.ctl_rect(i, &r.ctl);
                     let hovered = self.hovered == Some(Hit::Row(i));
@@ -1396,14 +1566,15 @@ impl Settings {
                             let current = get(r.key);
                             p.rrect(cx, cy, cwid, ch, 6.0, Color::white(0.06));
                             p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 6.0, Color::white(0.10), 1.0);
+                            let seg = self.seg_w(i);
                             for (j, (value, label)) in opts.iter().enumerate() {
-                                let sx = cx + j as f32 * CHOICE_W;
+                                let sx = cx + j as f32 * seg;
                                 let on = current == *value;
                                 if on {
-                                    p.rrect(sx + 3.0, cy + 3.0, CHOICE_W - 6.0, ch - 6.0, 4.0, theme::accent());
+                                    p.rrect(sx + 3.0, cy + 3.0, seg - 6.0, ch - 6.0, 4.0, theme::accent());
                                 }
                                 let c = Color::white(if on { 1.0 } else { 0.75 });
-                                p.text(label, &f.body, sx, cy, CHOICE_W, ch, Align::Center, c);
+                                p.text(label, &f.body, sx, cy, seg, ch, Align::Center, c);
                             }
                         }
                         Ctl::Button(label) => {

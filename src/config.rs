@@ -42,10 +42,14 @@ notch_edge = top
 notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
-# Grow the notch with album art / timer while music or a focus timer runs.
+# While music or a focus timer plays, show it on the closed notch: the notch
+# style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
+# Moving bars beside the album art when the notch grows for music, and on the
+# open notch's Media tab.
 visualizer = true
-# While music plays, the lip's coloured line moves with the music.
+# Lip style (or a notch on a side edge): the lit line pulses with the music
+# instead of staying still. Needs live_activity.
 lip_visualizer = true
 # Bars that move with the music on the taskbar's music widget and the widgets
 # panel's music card.
@@ -138,6 +142,16 @@ stats_seconds = 2
 launcher = true
 # Open the launcher with a lone Win key press (Win+E etc. still work).
 launcher_win_key = true
+# ---- Shortcuts ----
+# Cascade's own, themed versions of Windows' shortcut menus, in place of
+# Windows' (the key does nothing different when turned off).
+# Win+X (and right-clicking Start): the quick links menu, above Start.
+shortcut_win_x = true
+# Win+N: the widgets panel with your notifications and the calendar (needs
+# Cascade's taskbar).
+shortcut_win_n = true
+# Win+A: the notch's Controls instead of Windows' quick settings.
+shortcut_win_a = false
 # Where the Start menu opens: auto (follows the taskbar), center or left.
 start_position = auto
 start_height = 620
@@ -256,6 +270,9 @@ pub struct Config {
     pub stats_seconds: u32,
     pub launcher: bool,
     pub launcher_win_key: bool,
+    pub shortcut_win_x: bool,
+    pub shortcut_win_n: bool,
+    pub shortcut_win_a: bool,
     pub admin_helper: bool,
     pub start_position: String,
     pub start_height: f32,
@@ -357,6 +374,9 @@ impl Default for Config {
             stats_seconds: 2,
             launcher: true,
             launcher_win_key: true,
+            shortcut_win_x: true,
+            shortcut_win_n: true,
+            shortcut_win_a: false,
             focus_minutes: 25,
             break_minutes: 5,
             weather: true,
@@ -573,6 +593,9 @@ impl Config {
                 "stats_seconds" => set_u(&mut c.stats_seconds, 1.0, 10.0),
                 "launcher" => set_b(&mut c.launcher),
                 "launcher_win_key" => set_b(&mut c.launcher_win_key),
+                "shortcut_win_x" => set_b(&mut c.shortcut_win_x),
+                "shortcut_win_n" => set_b(&mut c.shortcut_win_n),
+                "shortcut_win_a" => set_b(&mut c.shortcut_win_a),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "weather" => set_b(&mut c.weather),
@@ -692,6 +715,9 @@ impl Config {
             "stats_seconds" => self.stats_seconds.to_string(),
             "launcher" => b(self.launcher),
             "launcher_win_key" => b(self.launcher_win_key),
+            "shortcut_win_x" => b(self.shortcut_win_x),
+            "shortcut_win_n" => b(self.shortcut_win_n),
+            "shortcut_win_a" => b(self.shortcut_win_a),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
             "weather" => b(self.weather),

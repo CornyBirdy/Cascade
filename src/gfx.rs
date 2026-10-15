@@ -139,6 +139,62 @@ fn text_format(dw: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -> Re
     }
 }
 
+fn text_width(dw: &IDWriteFactory, text: &str, font: &IDWriteTextFormat) -> f32 {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let Ok(layout) = dw.CreateTextLayout(&wide, font, 10_000.0, 100.0) else { return 0.0 };
+        let mut m = DWRITE_TEXT_METRICS::default();
+        if layout.GetMetrics(&mut m).is_ok() {
+            m.widthIncludingTrailingWhitespace
+        } else {
+            0.0
+        }
+    }
+}
+
+/// `text` laid out `w` wide, wrapping between words, top-aligned.
+fn wrapped(dw: &IDWriteFactory, text: &str, font: &IDWriteTextFormat, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let layout = dw.CreateTextLayout(&wide, font, w.max(1.0), h.max(1.0)).ok()?;
+        layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP).ok()?;
+        layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR).ok()?;
+        layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING).ok()?;
+        Some(layout)
+    }
+}
+
+/// Text measuring outside a frame, for laying things out before they're drawn.
+pub struct Measure {
+    dw: IDWriteFactory,
+    pub body: IDWriteTextFormat,
+    pub small: IDWriteTextFormat,
+}
+
+impl Measure {
+    pub fn new() -> Result<Self> {
+        unsafe {
+            let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let body = text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+            let small = text_format(&dw, 11.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+            Ok(Self { dw, body, small })
+        }
+    }
+
+    pub fn width(&self, text: &str, font: &IDWriteTextFormat) -> f32 {
+        text_width(&self.dw, text, font)
+    }
+
+    /// How many lines `text` takes wrapped to `w` (at least one).
+    pub fn lines(&self, text: &str, font: &IDWriteTextFormat, w: f32) -> usize {
+        let mut m = DWRITE_TEXT_METRICS::default();
+        match wrapped(&self.dw, text, font, w, 10_000.0) {
+            Some(l) if unsafe { l.GetMetrics(&mut m) }.is_ok() => (m.lineCount as usize).max(1),
+            _ => 1,
+        }
+    }
+}
+
 impl Gfx {
     pub fn new() -> Result<Self> {
         unsafe {
@@ -200,16 +256,7 @@ impl Gfx {
 
     /// Width of `text` in layout units.
     pub fn measure(&self, text: &str, font: &IDWriteTextFormat) -> f32 {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            let Ok(layout) = self.dw.CreateTextLayout(&wide, font, 10_000.0, 100.0) else { return 0.0 };
-            let mut m = DWRITE_TEXT_METRICS::default();
-            if layout.GetMetrics(&mut m).is_ok() {
-                m.widthIncludingTrailingWhitespace
-            } else {
-                0.0
-            }
-        }
+        text_width(&self.dw, text, font)
     }
 
     pub fn painter(&self) -> Painter<'_> {
@@ -456,6 +503,21 @@ impl Painter<'_> {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+        }
+    }
+
+    /// Left-aligned text wrapped between words to `w`, from the top of the
+    /// box; what doesn't fit in `h` ends in an ellipsis.
+    pub fn text_wrap(&self, s: &str, font: &IDWriteTextFormat, x: f32, y: f32, w: f32, h: f32, c: Color) {
+        if s.is_empty() || w <= 0.0 {
+            return;
+        }
+        let (x, y) = (self.snap(x), self.snap(y));
+        let Some(layout) = wrapped(&self.gfx.dw, s, font, w, h) else { return };
+        unsafe {
+            self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            self.gfx.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            self.gfx.rt.PopAxisAlignedClip();
         }
     }
 

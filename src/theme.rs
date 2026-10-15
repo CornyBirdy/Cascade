@@ -158,8 +158,10 @@ pub const THEMES: [Theme; 10] = [
         tint_scale: 0.25,
         solid: (0.17, 0.18, 0.21),
         film: (white(0.05), white(0.02)),
-        rim: Rim::Specular(0.55),
-        light: Light { lens: (6.0, 0.10), dispersion: 0.12, ..DARK },
+        // A soft edge: only drawn with Refraction off (the bent light shows
+        // the edge otherwise), and then a hint, not a white outline.
+        rim: Rim::Specular(0.26),
+        light: Light { lens: (6.0, 0.06), dispersion: 0.07, ..DARK },
         refract: Some(Lens { band: 18.0, bend: 0.75, split: 0.12 }),
         accent: Color(0.04, 0.52, 1.0, 1.0),
     },

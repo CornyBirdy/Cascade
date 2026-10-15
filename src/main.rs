@@ -21,6 +21,7 @@ mod mouseedge;
 mod mousehook;
 mod notifications;
 mod pomodoro;
+mod quickmenu;
 mod preview;
 mod radios;
 mod settings;
@@ -64,6 +65,8 @@ pub mod msg {
     pub const SWITCH: u32 = WM_APP + 20;
     /// The notifications widget's list (a boxed `notifications::Snapshot`).
     pub const NOTIFS: u32 = WM_APP + 21;
+    /// A Win+key shortcut Cascade handles (wParam: the key, e.g. 'X').
+    pub const SHORTCUT: u32 = WM_APP + 22;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
