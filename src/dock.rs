@@ -1640,6 +1640,11 @@ impl Dock {
         }
     }
 
+    /// Screen x of the Start button's left edge.
+    pub fn start_x(&self) -> i32 {
+        self.screen.left + (self.geo.start.x * self.k) as i32
+    }
+
     /// Screen x of the ^ button's centre.
     pub fn tray_button_x(&self) -> i32 {
         let c = self.geo.tray.map(|t| t.centre()).unwrap_or(0.0);

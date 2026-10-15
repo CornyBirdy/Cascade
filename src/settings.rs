@@ -36,12 +36,13 @@ const LINE_H: f32 = 15.0;
 /// Most lines a description wraps to.
 const MAX_LINES: usize = 3;
 
-pub const SECTIONS: [&str; 10] = [
+pub const SECTIONS: [&str; 11] = [
     "General",
     "Appearance",
     "Notch",
     "Taskbar",
     "Start menu",
+    "Shortcuts",
     "Widgets",
     "Screens",
     "Focus & weather",
@@ -605,6 +606,33 @@ fn rows(section: usize) -> Vec<Row> {
             row("start_place_network", "Network", "", Toggle),
         ],
         5 => vec![
+            heading("h_menus", "Windows' shortcut menus, in Cascade's look"),
+            row(
+                "shortcut_win_x",
+                "Win+X",
+                "The quick links menu (Device Manager, Terminal, Task Manager, shut down...) above Start. Right-clicking Start opens it too.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_n",
+                "Win+N",
+                "The widgets panel, with your notifications and the calendar. Needs Cascade's taskbar.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_a",
+                "Win+A",
+                "The notch's Controls (Wi-Fi, Bluetooth, volume, brightness) instead of Windows' quick settings.",
+                Toggle,
+            ),
+            row(
+                "shortcuts_note",
+                "Turned off",
+                "The key opens Windows' own menu, as usual. Other Win+key shortcuts are never touched.",
+                Note,
+            ),
+        ],
+        6 => vec![
             heading("h_bar", "Taskbar"),
             row(
                 "taskbar_board",
@@ -639,7 +667,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(1.0, 10.0, 1.0, Unit::Seconds),
             ),
         ],
-        6 => vec![
+        7 => vec![
             row(
                 "mouse_match",
                 "Match the pointer across screens",
@@ -660,7 +688,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("screens_info", "Detected", "", Note),
         ],
-        7 => vec![
+        8 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
             row("weather", "Show weather", "On the taskbar, and in the notch when nothing plays.", Toggle),
@@ -685,7 +713,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
         ],
-        8 => vec![
+        9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),

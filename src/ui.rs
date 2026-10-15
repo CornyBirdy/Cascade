@@ -44,6 +44,7 @@ use crate::msg;
 use crate::notifications::{self, NotifCmd};
 use crate::pomodoro::Pomodoro;
 use crate::preview::{self, Preview};
+use crate::quickmenu::{self, QuickMenu};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
@@ -249,6 +250,8 @@ struct App {
     systray: Systray,
     switcher: Switcher,
     flyout: Flyout,
+    /// The Win+X menu.
+    quick: QuickMenu,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
     /// System stats, sampled only while a stats widget is on screen.
@@ -328,6 +331,8 @@ pub fn run() -> Result<()> {
         let switcher_hwnd =
             create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
         let switcher = (switcher_hwnd, Backdrop::create(instance)?);
+        let quick_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
+        let quick = (quick_hwnd, Backdrop::create(instance)?);
         let notch_backdrop = Backdrop::create(instance)?;
 
         let app = App::new(
@@ -341,6 +346,7 @@ pub fn run() -> Result<()> {
             flyout,
             widgets,
             switcher,
+            quick,
             instance,
         )?;
         APP.with(|c| *c.borrow_mut() = Some(app));
@@ -456,6 +462,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::OPEN_LAUNCHER => {
             with_app(|a| a.toggle_launcher());
+            return LRESULT(0);
+        }
+        msg::SHORTCUT => {
+            with_app(|a| a.on_shortcut(wp.0 as u8));
             return LRESULT(0);
         }
         msg::OPEN_SETTINGS => {
@@ -625,6 +635,7 @@ impl App {
         (flyout_hwnd, flyout_backdrop): (HWND, Backdrop),
         (widgets_hwnd, widgets_backdrop): (HWND, Backdrop),
         (switcher_hwnd, switcher_backdrop): (HWND, Backdrop),
+        (quick_hwnd, quick_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -720,6 +731,7 @@ impl App {
             systray: Systray::default(),
             switcher: Switcher::new(switcher_hwnd, switcher_backdrop),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
+            quick: QuickMenu::new(quick_hwnd, quick_backdrop),
             tray_rect: RECT::default(),
             outside_close: None,
             shell_msg: unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) },
@@ -767,7 +779,7 @@ impl App {
     }
 
     fn shutdown(&mut self) {
-        keyhook::configure(false, false);
+        keyhook::configure(false, false, 0);
         self.settings = None;
         self.visualizer.set(false);
         weather::stop();
@@ -877,7 +889,14 @@ impl App {
             }
             self.shell_hooked = false;
         }
-        keyhook::configure(self.cfg.launcher && self.cfg.launcher_win_key, self.cfg.alt_tab);
+        keyhook::configure(
+            self.cfg.launcher && self.cfg.launcher_win_key,
+            self.cfg.alt_tab,
+            keyhook::shortcuts(&self.cfg),
+        );
+        if !self.cfg.shortcut_win_x {
+            self.quick.hide();
+        }
         if !self.cfg.alt_tab {
             self.switcher.hide();
         }
@@ -888,6 +907,7 @@ impl App {
         self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.quick.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.notch_blur = theme::style_backdrop(
@@ -1138,6 +1158,9 @@ impl App {
         }
         if hwnd == self.flyout.hwnd {
             return self.handle_flyout(m, wp, lp);
+        }
+        if hwnd == self.quick.hwnd {
+            return self.handle_quick(m, wp, lp);
         }
         if hwnd == self.widgets.hwnd {
             return self.handle_widgets(m, wp, lp);
@@ -1783,6 +1806,14 @@ impl App {
                 self.systray.click(i, true);
                 return RightClick::Nothing;
             }
+            // Right-clicking Start opens the Win+X menu, as in Windows.
+            if self.dock.hovered == Some(dock::Hot::Start) && self.cfg.shortcut_win_x {
+                self.open_quick(false);
+                return RightClick::Nothing;
+            }
+        }
+        if hwnd == self.quick.hwnd {
+            return RightClick::Nothing;
         }
         if hwnd == self.launcher.hwnd {
             let mut p = POINT::default();
@@ -1948,6 +1979,10 @@ impl App {
         }
         if self.flyout.open {
             self.flyout.hide();
+            closed = true;
+        }
+        if self.quick.open {
+            self.quick.hide();
             closed = true;
         }
         if self.widgets.open {
@@ -2315,6 +2350,14 @@ impl App {
             shell::open("ms-actioncenter:controlcenter/&showFooter=true");
             return;
         }
+        self.open_controls();
+    }
+
+    /// Opens the notch on its Controls.
+    fn open_controls(&mut self) {
+        if !self.shown {
+            return;
+        }
         self.expanded = true;
         self.expand_pending = false;
         self.pinned = true;
@@ -2583,6 +2626,84 @@ impl App {
         Some(LRESULT(0))
     }
 
+    /// A Win+key shortcut Cascade took from Windows (see `keyhook`).
+    fn on_shortcut(&mut self, key: u8) {
+        match key {
+            b'X' if self.quick.open => self.quick.hide(),
+            b'X' => self.open_quick(true),
+            b'N' => self.toggle_widgets(),
+            b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
+            b'A' => self.open_controls(),
+            _ => {}
+        }
+    }
+
+    /// The Win+X menu, above the Start button (or at the bottom left of the
+    /// screen without Cascade's taskbar). `keyboard`: opened with Win+X.
+    fn open_quick(&mut self, keyboard: bool) {
+        self.preview.hide();
+        self.launcher.hide();
+        self.flyout.hide();
+        self.widgets.hide();
+        let gap = (8.0 * self.dpi) as i32;
+        let (left, bottom) = if self.cfg.dock && self.dock.visible() {
+            (self.dock.start_x(), self.dock.panel_top() - gap)
+        } else {
+            let work = shell::work_area();
+            (work.left + gap, work.bottom - gap)
+        };
+        let laptop = battery().is_some();
+        self.quick.show(left, bottom, self.monitor, laptop, keyboard, self.dpi);
+    }
+
+    fn run_quick(&mut self, action: quickmenu::Action) {
+        use quickmenu::Action;
+        self.quick.hide();
+        match action {
+            Action::Open(target) => shell::open(target),
+            Action::Terminal { admin } => {
+                if !shell::launch("wt.exe", "", admin) {
+                    shell::launch("powershell.exe", "", admin);
+                }
+            }
+            Action::Search if self.cfg.launcher => self.open_launcher(),
+            Action::Search => shell::win_combo(b'S' as u16),
+            Action::Run => shell::open("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}"),
+            Action::Desktop => shell::win_combo(b'D' as u16),
+            Action::Power(p) => shell::power(p),
+        }
+    }
+
+    fn handle_quick(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match m {
+            WM_ACTIVATE => {
+                // Clicking anywhere else closes it.
+                if wp.0 & 0xFFFF == 0 {
+                    self.quick.hide();
+                }
+                return None;
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                self.quick.on_move(x, y);
+            }
+            WM_MOUSELEAVE => self.quick.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(a) = self.quick.on_click(x, y) {
+                    self.run_quick(a);
+                }
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => match self.quick.on_key(wp.0 as u16) {
+                quickmenu::Key::Close => self.quick.hide(),
+                quickmenu::Key::Run(a) => self.run_quick(a),
+                quickmenu::Key::Nothing => {}
+            },
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+
     /// Opens (after a short hover) or retargets the preview for the hovered app.
     fn schedule_preview(&mut self) {
         let dock = self.dock.hwnd;
@@ -2700,6 +2821,7 @@ impl App {
             || self.dock.wants_frame()
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
+            || self.quick.wants_frame()
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
     }
@@ -2763,6 +2885,10 @@ impl App {
             fast |= self.flyout.step(dt);
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
         }
+        if self.quick.wants_frame() {
+            fast |= self.quick.step(dt);
+            let _ = self.quick.render(&mut self.gfx);
+        }
         if self.switcher.wants_frame() {
             fast |= self.switcher.animate(dt);
             let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
@@ -2790,7 +2916,7 @@ impl App {
         }
         // Keep an auto-hidden taskbar up while the menu or flyout is open,
         // and let it go again shortly after they close.
-        let hold = self.launcher.open || self.flyout.open || self.widgets.open;
+        let hold = self.launcher.open || self.flyout.open || self.widgets.open || self.quick.open;
         if hold != self.dock_held {
             self.dock_held = hold;
             if !hold {

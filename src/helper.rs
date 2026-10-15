@@ -192,14 +192,14 @@ pub fn run() {
         }
         keyhook::set_helper_mode(hwnd);
         let cfg = crate::config::Config::load();
-        keyhook::configure(cfg.launcher && cfg.launcher_win_key, cfg.alt_tab);
+        keyhook::configure(cfg.launcher && cfg.launcher_win_key, cfg.alt_tab, keyhook::shortcuts(&cfg));
         crate::config::log(&format!("helper: started (admin: {})", is_elevated()));
         let mut m = MSG::default();
         while GetMessageW(&mut m, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&m);
             DispatchMessageW(&m);
         }
-        keyhook::configure(false, false);
+        keyhook::configure(false, false, 0);
     }
 }
 

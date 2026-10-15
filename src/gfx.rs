@@ -516,7 +516,7 @@ impl Painter<'_> {
         let Some(layout) = wrapped(&self.gfx.dw, s, font, w, h) else { return };
         unsafe {
             self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
-            self.gfx.rt.DrawTextLayout(D2D_POINT_2F { x, y }, &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            self.gfx.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
             self.gfx.rt.PopAxisAlignedClip();
         }
     }
