@@ -2585,6 +2585,10 @@ impl App {
                 self.launcher.hide();
             }
             launcher::Action::Close => self.launcher.hide(),
+            launcher::Action::Copy(text) => {
+                clipboard::copy(&text);
+                self.launcher.hide();
+            }
             launcher::Action::Settings => {
                 self.launcher.hide();
                 self.open_settings();

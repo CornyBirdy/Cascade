@@ -77,7 +77,7 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 - **Left:** a slim icon rail with your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down, in a menu drawn by Cascade). The button at the top opens the full sidebar over the menu; it folds away when the pointer leaves. Untick **Compact sidebar** in Settings for the always-wide one.
 - **Middle:** pinned apps (the same as your taskbar's) and recently opened files. Turn both off and the column goes away, leaving All apps.
 - **Right:** every installed app A to Z, Store apps included. Scrolling is smooth, and click any letter heading to open a grid of letters and jump straight to one.
-- **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
+- **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it. It answers more than apps: sums (`12*4+3`, `2^10`, `sqrt(2)`; Enter copies the answer), unit conversions (`10 km to mi`, `180 lb in kg`, `25 c to f`, `1 gb in mb`; lengths, weights, volumes, speeds, data, time and temperature), quick commands (`lock`, `restart`, `shut down`, `bluetooth`, `display`, `task manager`...) and, last, a web search for what you typed (Google, Bing, DuckDuckGo or none, in Settings → Start menu; `start_web_search`).
 
 **Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, and whether to show the sidebar, recent files and the all-apps list. Its glass tint is in Settings → Appearance. Turn off the Win-key takeover or the whole Start menu there too.
 
@@ -148,6 +148,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 |---|---|
 | `src/ui.rs` | App core: windows, message loop, notch states, layout, input and drawing |
 | `src/launcher.rs` | Start menu: places, pinned, recent files, all apps, search, power |
+| `src/smart.rs` | Start search's sums, unit conversions, commands and web search |
 | `src/keyhook.rs` | Lone Win key → Start menu |
 | `src/settings.rs` | Settings window |
 | `src/dock.rs` | Taskbar: window tracking, layout, drawing, drag, launch/focus |

@@ -32,6 +32,7 @@ mod quickmenu;
 mod radios;
 mod settings;
 mod shell;
+mod smart;
 mod spring;
 mod switcher;
 mod sysmon;

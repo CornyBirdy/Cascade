@@ -195,6 +195,10 @@ start_place_music = true
 start_place_videos = true
 start_place_network = true
 start_show_all_apps = true
+# Typing in Start also answers sums (12*4), converts units (10 km to mi),
+# finds commands (lock, restart, bluetooth) and offers a web search with
+# google, bing, duckduckgo or none.
+start_web_search = google
 # Tint over the blur behind the Start menu (0 = clear glass, 1 = solid).
 start_opacity = 0.55
 # A small helper with admin rights, so the Win key works over apps run as
@@ -324,6 +328,7 @@ pub struct Config {
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
     pub start_places: [bool; 8],
     pub start_show_all_apps: bool,
+    pub start_web_search: String,
     pub start_opacity: f32,
     pub focus_minutes: u32,
     pub break_minutes: u32,
@@ -406,6 +411,7 @@ impl Default for Config {
             start_show_cascade: true,
             start_places: [true; 8],
             start_show_all_apps: true,
+            start_web_search: "google".into(),
             start_opacity: 0.55,
             alt_tab: true,
             mouse_match: false,
@@ -628,6 +634,9 @@ impl Config {
                     }
                 }
                 "start_show_all_apps" => set_b(&mut c.start_show_all_apps),
+                "start_web_search" if matches!(v, "google" | "bing" | "duckduckgo" | "none") => {
+                    c.start_web_search = v.into()
+                }
                 "start_opacity" => set_f(&mut c.start_opacity, 0.0, 1.0),
                 "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
                 "acrylic" => set_b(&mut c.acrylic),
@@ -759,6 +768,7 @@ impl Config {
             "start_show_cascade" => b(self.start_show_cascade),
             _ if place_index(key).is_some() => b(self.start_places[place_index(key).unwrap_or(0)]),
             "start_show_all_apps" => b(self.start_show_all_apps),
+            "start_web_search" => self.start_web_search.clone(),
             "start_opacity" => self.start_opacity.to_string(),
             "taskbar_corners" => self.taskbar_corners.clone(),
             "acrylic" => b(self.acrylic),

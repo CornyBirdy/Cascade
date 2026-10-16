@@ -607,6 +607,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("auto", "Auto"), ("center", "Centre"), ("left", "Left")]),
             ),
             row("start_height", "Height", "How tall the menu is.", slider(500.0, 800.0, 10.0, Unit::Px)),
+            row(
+                "start_web_search",
+                "Web search",
+                "Offered under your search. Sums, unit conversions and commands are answered either way.",
+                Choice(&[("google", "Google"), ("bing", "Bing"), ("duckduckgo", "DuckDuckGo"), ("none", "None")]),
+            ),
             heading("h_parts", "What it shows"),
             row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_columns", "Pinned columns", "Apps per row in Pinned.", slider(3.0, 6.0, 1.0, Unit::Count)),

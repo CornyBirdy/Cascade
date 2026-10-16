@@ -529,6 +529,19 @@ impl ClipMenu {
     }
 }
 
+/// Puts `text` on the clipboard (a search answer picked in Start).
+pub fn copy(text: &str) {
+    use windows::ApplicationModel::DataTransfer::DataPackage;
+    let set = || -> Result<()> {
+        let package = DataPackage::new()?;
+        package.SetText(&HSTRING::from(text))?;
+        Clipboard::SetContent(&package)?;
+        // Kept on the clipboard after Cascade quits, too.
+        Clipboard::Flush()
+    };
+    let _ = set();
+}
+
 /// Where the text cursor is in the window in front (screen px), if it says.
 pub fn caret() -> Option<POINT> {
     unsafe {

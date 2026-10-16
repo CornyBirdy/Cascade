@@ -24,6 +24,7 @@ use crate::dock::Dock;
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::msg;
 use crate::shell::Power;
+use crate::smart::{self, Answer};
 use crate::spring::Spring;
 use crate::theme;
 
@@ -92,6 +93,8 @@ const LETTERS: [char; 27] = [
 enum Row {
     Letter(char),
     App(usize),
+    /// A search answer (see `smart`), by its place in `Launcher::answers`.
+    Answer(usize),
 }
 
 // ------------------------------------------------------------- app list --
@@ -239,6 +242,8 @@ pub enum Target {
     /// The grid's backdrop (a click closes it).
     JumpBg,
     PowerItem(usize),
+    /// A search answer: a sum, conversion, command or web search.
+    Answer(usize),
     /// The power menu's backdrop (a click closes it).
     PowerBg,
     /// The sidebar's expand / collapse button.
@@ -249,6 +254,8 @@ pub enum Target {
 
 pub enum Action {
     Launch(String),
+    /// Put this text on the clipboard (a sum's answer).
+    Copy(String),
     Settings,
     Power(Power),
     Close,
@@ -362,6 +369,12 @@ pub struct Launcher {
     recent: Vec<RecentFile>,
     query: String,
     results: Vec<usize>,
+    /// What the search answers besides apps: the first `answers_top` go
+    /// above the apps, the rest below them.
+    answers: Vec<Answer>,
+    answers_top: usize,
+    /// The web search engine (`start_web_search`).
+    web: String,
     selected: usize,
     scroll: f32,
     /// Where the smooth scroll is heading.
@@ -429,6 +442,9 @@ impl Launcher {
             recent: Vec::new(),
             query: String::new(),
             results: Vec::new(),
+            answers: Vec::new(),
+            answers_top: 0,
+            web: "google".into(),
             selected: 0,
             scroll: 0.0,
             scroll_target: 0.0,
@@ -455,6 +471,7 @@ impl Launcher {
         self.opacity = cfg.start_opacity.clamp(0.0, 1.0);
         self.radius = cfg.corner_radius();
         self.geo = Geo::new(cfg);
+        self.web = cfg.start_web_search.clone();
         self.position = match cfg.start_position.as_str() {
             "center" => Position::Center,
             "left" => Position::Left,
@@ -567,6 +584,9 @@ impl Launcher {
             self.apps.iter().enumerate().filter_map(|(i, a)| score(&a.name, &self.query).map(|s| (s, i))).collect();
         scored.sort_by_key(|(s, i)| (*s, *i));
         self.results = scored.into_iter().map(|(_, i)| i).collect();
+        let (top, bottom) = if self.searching() { smart::answers(&self.query, &self.web) } else { Default::default() };
+        self.answers_top = top.len();
+        self.answers = top.into_iter().chain(bottom).collect();
         self.selected = 0;
         self.reset_scroll();
         // Results ripple in again.
@@ -618,7 +638,7 @@ impl Launcher {
     fn set_scroll(&mut self, y: f32) {
         let (top, bottom) = self.list_area();
         let rows =
-            if self.searching() { self.results.len() as f32 * RESULT_ROW } else { self.rows.len() as f32 * LIST_ROW };
+            if self.searching() { self.result_rows() as f32 * RESULT_ROW } else { self.rows.len() as f32 * LIST_ROW };
         let max = (rows - (bottom - top)).max(0.0);
         self.scroll_target = y.clamp(0.0, max);
         self.bar = 1.0;
@@ -627,6 +647,37 @@ impl Launcher {
 
     fn searching(&self) -> bool {
         !self.query.trim().is_empty()
+    }
+
+    /// Rows while searching: the answers above the apps, the apps, the rest.
+    fn result_rows(&self) -> usize {
+        self.answers.len() + self.results.len()
+    }
+
+    fn result_at(&self, r: usize) -> Option<Row> {
+        let top = self.answers_top;
+        if r < top {
+            return Some(Row::Answer(r));
+        }
+        match self.results.get(r - top) {
+            Some(&i) => Some(Row::App(i)),
+            None => (r - self.results.len() < self.answers.len()).then_some(Row::Answer(r - self.results.len())),
+        }
+    }
+
+    /// What picking answer `j` does.
+    fn answer_action(&self, j: usize) -> Option<Action> {
+        Some(match &self.answers.get(j)?.run {
+            smart::Run::Copy(text) => Action::Copy(text.clone()),
+            smart::Run::Open(target) => Action::Launch(target.clone()),
+            smart::Run::Power(p) => Action::Power(match *p {
+                "lock" => Power::Lock,
+                "sleep" => Power::Sleep,
+                "signout" => Power::SignOut,
+                "restart" => Power::Restart,
+                _ => Power::ShutDown,
+            }),
+        })
     }
 
     fn launch(&self, target: String) -> Action {
@@ -669,11 +720,14 @@ impl Launcher {
                 self.filter();
             }
             ENTER => {
-                let i = if self.searching() { self.results.get(self.selected).copied() } else { None };
-                return i.map(|i| self.launch(self.apps[i].target.clone()));
+                return match self.result_at(self.selected).filter(|_| self.searching()) {
+                    Some(Row::App(i)) => Some(self.launch(self.apps[i].target.clone())),
+                    Some(Row::Answer(j)) => self.answer_action(j),
+                    _ => None,
+                };
             }
             UP => self.selected = self.selected.saturating_sub(1),
-            DOWN => self.selected = (self.selected + 1).min(self.results.len().saturating_sub(1)),
+            DOWN => self.selected = (self.selected + 1).min(self.result_rows().saturating_sub(1)),
             _ => return None,
         }
         self.keep_selected_visible();
@@ -776,6 +830,7 @@ impl Launcher {
             }
             Target::Pinned(i) => self.pinned.get(i).map(|p| self.launch(p.0.clone())),
             Target::App(i) => self.apps.get(i).map(|a| self.launch(a.target.clone())),
+            Target::Answer(j) => self.answer_action(j),
             Target::Recent(i) => self.recent.get(i).map(|r| Action::Launch(r.path.clone())),
             Target::Place(i) => Some(Action::Launch(PLACES[i].1.to_string())),
             Target::Profile => Some(Action::Launch("ms-settings:yourinfo".into())),
@@ -881,7 +936,7 @@ impl Launcher {
         let first = (self.scroll / row_h) as usize;
         let count = ((list_bottom - top) / row_h) as usize + 2;
         let visible: Vec<(usize, Row)> = if searching {
-            self.results.iter().enumerate().skip(first).take(count).map(|(r, &i)| (r, Row::App(i))).collect()
+            (first..self.result_rows()).take(count).filter_map(|r| self.result_at(r).map(|row| (r, row))).collect()
         } else if g.show_all {
             self.rows.iter().copied().enumerate().skip(first).take(count).collect()
         } else {
@@ -894,7 +949,7 @@ impl Launcher {
         for &(_, row) in &visible {
             row_icons.push(match row {
                 Row::App(i) => dock.icon(self.icon_id(&self.apps[i].target), gfx, row_px),
-                Row::Letter(_) => None,
+                Row::Letter(_) | Row::Answer(_) => None,
             });
         }
         let (pinned_icons, recent_icons): (Vec<_>, Vec<_>) = if searching {
@@ -965,9 +1020,42 @@ impl Launcher {
                 p.text("Best matches", &f.label, g.mx + 4.0, TOP, 300.0, 22.0, Align::Left, Color::white(0.9));
                 p.clip(g.mx - 6.0, top, g.w - PAD - g.mx + 6.0, list_bottom - top);
                 for (vi, (&(row, item), icon)) in visible.iter().zip(&row_icons).enumerate() {
-                    let Row::App(i) = item else { continue };
                     let e = ease(vi);
                     let y = top + row as f32 * RESULT_ROW - self.scroll + (1.0 - e) * 14.0;
+                    let i = match item {
+                        Row::App(i) => i,
+                        Row::Answer(j) => {
+                            // A sum, conversion, command or web search.
+                            let Some(a) = self.answers.get(j) else { continue };
+                            let t = Target::Answer(j);
+                            let selected = row == self.selected;
+                            let (x, w) = (g.mx - 6.0, g.w - PAD - g.mx + 6.0);
+                            if self.hovered == Some(t) || selected {
+                                let fill = if selected { 0.10 } else { 0.06 };
+                                p.rrect(x, y + 2.0, w, RESULT_ROW - 4.0, 6.0, Color::white(fill * e));
+                            }
+                            if selected {
+                                p.rrect(x, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, theme::accent().alpha(e));
+                            }
+                            answer_glyph(&p, a.kind, g.mx + 23.0, y + RESULT_ROW / 2.0, Color::white(0.85 * e));
+                            let font = if a.kind == smart::Kind::Sum || a.kind == smart::Kind::Unit {
+                                &f.title
+                            } else {
+                                &f.body
+                            };
+                            let tw = g.w - g.mx - 90.0 - 120.0;
+                            p.text(&a.title, font, g.mx + 50.0, y, tw, RESULT_ROW, Align::Left, Color::white(0.95 * e));
+                            let dx = g.mx + 50.0 + tw;
+                            let c = Color::white(0.5 * e);
+                            p.text(&a.detail, &f.small, dx, y, g.w - PAD - dx - 6.0, RESULT_ROW, Align::Right, c);
+                            let (vy0, vy1) = (y.max(top), (y + RESULT_ROW).min(list_bottom));
+                            if vy1 > vy0 {
+                                self.hits.push((t, x, vy0, w, vy1 - vy0));
+                            }
+                            continue;
+                        }
+                        Row::Letter(_) => continue,
+                    };
                     let t = Target::App(i);
                     let selected = row == self.selected;
                     if self.hovered == Some(t) || selected {
@@ -1001,7 +1089,7 @@ impl Launcher {
                         self.hits.push((t, g.mx - 6.0, vy0, g.w - PAD - g.mx + 6.0, vy1 - vy0));
                     }
                 }
-                if self.results.is_empty() {
+                if self.result_rows() == 0 {
                     p.text(
                         "No apps found",
                         &f.body,
@@ -1014,7 +1102,7 @@ impl Launcher {
                     );
                 }
                 p.unclip();
-                draw_bar(self.results.len() as f32 * RESULT_ROW, g.w - 8.0);
+                draw_bar(self.result_rows() as f32 * RESULT_ROW, g.w - 8.0);
             } else {
                 // Pinned.
                 let grid_y = TOP + 28.0;
@@ -1127,6 +1215,7 @@ impl Launcher {
                                     self.hits.push((Target::Header(l), g.rx - 4.0, vy0, rw + 4.0, vy1 - vy0));
                                 }
                             }
+                            Row::Answer(_) => {}
                             Row::App(i) => {
                                 let t = Target::App(i);
                                 if self.hovered == Some(t) {
@@ -1349,6 +1438,43 @@ impl Launcher {
             self.dirty = true;
         }
         shown
+    }
+}
+
+/// The little picture beside a search answer, centred on (cx, cy).
+fn answer_glyph(p: &Painter, kind: smart::Kind, cx: f32, cy: f32, c: Color) {
+    match kind {
+        smart::Kind::Sum => {
+            // A calculator: its screen and keys.
+            p.stroke_rrect(cx - 8.0, cy - 10.0, 16.0, 20.0, 3.0, c, 1.4);
+            p.rrect(cx - 5.0, cy - 7.0, 10.0, 4.0, 1.0, c);
+            for (dx, dy) in [(-4.0, 1.0), (0.0, 1.0), (4.0, 1.0), (-4.0, 5.0), (0.0, 5.0), (4.0, 5.0)] {
+                p.circle(cx + dx, cy + dy, 1.2, c);
+            }
+        }
+        smart::Kind::Unit => {
+            // A ruler.
+            p.stroke_rrect(cx - 11.0, cy - 4.0, 22.0, 8.0, 1.5, c, 1.4);
+            for i in 0..5 {
+                let x = cx - 7.0 + i as f32 * 3.5;
+                p.line(x, cy - 4.0, x, cy - if i % 2 == 0 { 0.5 } else { 2.0 }, c, 1.2);
+            }
+        }
+        smart::Kind::Command => {
+            // A prompt: > and a line.
+            p.line(cx - 8.0, cy - 5.0, cx - 3.0, cy, c, 1.6);
+            p.line(cx - 3.0, cy, cx - 8.0, cy + 5.0, c, 1.6);
+            p.line(cx, cy + 5.0, cx + 8.0, cy + 5.0, c, 1.6);
+        }
+        smart::Kind::Web => {
+            // A globe.
+            p.stroke_circle(cx, cy, 9.0, c, 1.4);
+            p.line(cx - 9.0, cy, cx + 9.0, cy, c, 1.2);
+            p.line(cx, cy - 9.0, cx, cy + 9.0, c, 1.2);
+            // Its meridians, as two curves either side of the middle one.
+            p.arc(cx + 9.0, cy, 12.6, 2.5, 3.78, c, 1.2);
+            p.arc(cx - 9.0, cy, 12.6, -0.64, 0.64, c, 1.2);
+        }
     }
 }
 
