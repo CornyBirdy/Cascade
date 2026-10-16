@@ -424,13 +424,30 @@ impl Switcher {
                 let hov = it.hov.value.clamp(0.0, 1.0) * (1.0 - sel);
                 let fill = 0.05 + 0.07 * sel + 0.03 * hov;
                 p.rrect(cx, cy, CARD_W, CARD_H, r, Color::white(fill * a));
-                p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, CARD_H - 1.0, r, Color::white(0.07 * a * (1.0 - sel)), 1.0);
+                p.stroke_rrect(
+                    cx + 0.5,
+                    cy + 0.5,
+                    CARD_W - 1.0,
+                    CARD_H - 1.0,
+                    r,
+                    Color::white(0.07 * a * (1.0 - sel)),
+                    1.0,
+                );
                 match &icons[i] {
                     Some(bmp) => p.icon(bmp, cx + 22.0, cy + TITLE_H / 2.0, a),
                     None => p.rrect(cx + 14.0, cy + TITLE_H / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15 * a)),
                 }
                 let title = if it.title.is_empty() { "Window" } else { &it.title };
-                p.text(title, &f.label, cx + 40.0, cy + 4.0, CARD_W - 52.0, TITLE_H - 8.0, Align::Left, Color::white(0.93 * a));
+                p.text(
+                    title,
+                    &f.label,
+                    cx + 40.0,
+                    cy + 4.0,
+                    CARD_W - 52.0,
+                    TITLE_H - 8.0,
+                    Align::Left,
+                    Color::white(0.93 * a),
+                );
                 let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
                 p.hole(tx, ty, tw, th);
                 if it.thumb == 0 {

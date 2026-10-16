@@ -108,8 +108,15 @@ unsafe fn icon_pixels(h: HICON) -> Option<(u32, u32, Vec<u8>)> {
         return None;
     }
     let conv = wic.CreateFormatConverter().ok()?;
-    conv.Initialize(&bmp, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)
-        .ok()?;
+    conv.Initialize(
+        &bmp,
+        &GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        None,
+        0.0,
+        WICBitmapPaletteTypeCustom,
+    )
+    .ok()?;
     let mut px = vec![0u8; (width * height * 4) as usize];
     conv.CopyPixels(std::ptr::null(), width * 4, &mut px).ok()?;
     Some((width, height, px))
@@ -123,11 +130,8 @@ unsafe fn parse(cds: &COPYDATASTRUCT) -> Option<Event> {
     let mut d: TrayData = std::mem::zeroed();
     std::ptr::copy_nonoverlapping(cds.lpData as *const u8, &mut d as *mut TrayData as *mut u8, len);
     let n = d.nid;
-    let pixels = if n.flags & NIF_ICON != 0 && n.icon != 0 {
-        icon_pixels(HICON(n.icon as usize as *mut c_void))
-    } else {
-        None
-    };
+    let pixels =
+        if n.flags & NIF_ICON != 0 && n.icon != 0 { icon_pixels(HICON(n.icon as usize as *mut c_void)) } else { None };
     let hidden = (n.flags & NIF_STATE != 0 && n.state_mask & NIS_HIDDEN != 0).then_some(n.state & NIS_HIDDEN != 0);
     let guid = (n.flags & NIF_GUID != 0 && n.guid != GUID::zeroed()).then_some(n.guid);
     Some(Event {
@@ -313,7 +317,8 @@ fn read_settings() -> Option<Vec<(String, Option<u32>, bool)>> {
         let mut name = [0u16; 64];
         for i in 0.. {
             let mut len = name.len() as u32;
-            if RegEnumKeyExW(key, i, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS {
+            if RegEnumKeyExW(key, i, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS
+            {
                 break;
             }
             let sub = HSTRING::from_wide(&name[..len as usize]);
@@ -336,8 +341,15 @@ fn read_settings() -> Option<Vec<(String, Option<u32>, bool)>> {
             let dword = |value: PCWSTR| {
                 let mut v = 0u32;
                 let mut size = 4u32;
-                (RegGetValueW(key, &sub, value, RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut c_void), Some(&mut size))
-                    == ERROR_SUCCESS)
+                (RegGetValueW(
+                    key,
+                    &sub,
+                    value,
+                    RRF_RT_REG_DWORD,
+                    None,
+                    Some(&mut v as *mut u32 as *mut c_void),
+                    Some(&mut size),
+                ) == ERROR_SUCCESS)
                     .then_some(v)
             };
             out.push((path, dword(w!("UID")), dword(w!("IsPromoted")) == Some(1)));

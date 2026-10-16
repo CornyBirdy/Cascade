@@ -40,10 +40,6 @@ pub fn summary() -> String {
         if up < 1.0 {
             return memory;
         }
-        format!(
-            "{memory}, CPU {:.2}% of one core over {} ({used:.1} s used)",
-            used / up * 100.0,
-            duration(up as u64)
-        )
+        format!("{memory}, CPU {:.2}% of one core over {} ({used:.1} s used)", used / up * 100.0, duration(up as u64))
     }
 }
