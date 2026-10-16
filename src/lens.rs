@@ -19,7 +19,10 @@
 //!
 //! What's behind can change at any time, so the rings are refreshed a few
 //! times a second while one is on screen (`refresh`), and only redrawn when
-//! what's behind them did change.
+//! what's behind them did change. Only the strips just outside the panel
+//! are copied from the screen (all a ring reads), and a ring whose
+//! surroundings keep still is looked at less and less often, until they
+//! change or the panel moves.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -110,7 +113,16 @@ struct Ring {
     out: Option<Dib>,
     /// What the capture held last time, to skip redrawing an unchanged ring.
     seen: u64,
+    /// Refreshes in a row that found nothing changed, and how many more
+    /// ticks to wait before looking again (see `refresh`).
+    still: u32,
+    wait: u32,
 }
+
+/// After this many unchanged looks a ring is looked at only every
+/// `SLOW_EVERY` refreshes (a few times a second instead of 20).
+const STILL_AFTER: u32 = 10;
+const SLOW_EVERY: u32 = 6;
 
 thread_local! {
     static RINGS: RefCell<Vec<Ring>> = const { RefCell::new(Vec::new()) };
@@ -124,7 +136,7 @@ pub fn show(hwnd: HWND, rect: RECT, radius: i32, lens: Lens) {
         let i = match rings.iter().position(|r| r.hwnd == hwnd) {
             Some(i) => i,
             None => {
-                rings.push(Ring { hwnd, rect, radius, lens, capture: None, out: None, seen: 0 });
+                rings.push(Ring { hwnd, rect, radius, lens, capture: None, out: None, seen: 0, still: 0, wait: 0 });
                 rings.len() - 1
             }
         };
@@ -133,8 +145,18 @@ pub fn show(hwnd: HWND, rect: RECT, radius: i32, lens: Lens) {
         ring.rect = rect;
         ring.radius = radius;
         ring.lens = lens;
+        if moved {
+            // Back to looking every refresh while it's on the move.
+            ring.still = 0;
+            ring.wait = 0;
+        }
         paint(ring, moved);
     });
+}
+
+/// Whether any ring is on screen (the refresh timer only runs while one is).
+pub fn active() -> bool {
+    RINGS.with(|rings| !rings.borrow().is_empty())
 }
 
 /// Forgets the ring of `hwnd` (its window was hidden).
@@ -142,13 +164,28 @@ pub fn hide(hwnd: HWND) {
     RINGS.with(|rings| rings.borrow_mut().retain(|r| r.hwnd != hwnd));
 }
 
-/// Redraws every ring on screen whose background changed.
-pub fn refresh() {
+/// Redraws every ring on screen whose background changed. Rings that have
+/// kept still for a while are only looked at every few calls. False if
+/// there's no ring on screen.
+pub fn refresh() -> bool {
     RINGS.with(|rings| {
-        for ring in rings.borrow_mut().iter_mut() {
-            paint(ring, false);
+        let mut rings = rings.borrow_mut();
+        for ring in rings.iter_mut() {
+            if ring.wait > 0 {
+                ring.wait -= 1;
+                continue;
+            }
+            if paint(ring, false) {
+                ring.still = 0;
+            } else {
+                ring.still = ring.still.saturating_add(1);
+                if ring.still >= STILL_AFTER {
+                    ring.wait = SLOW_EVERY - 1;
+                }
+            }
         }
-    });
+        !rings.is_empty()
+    })
 }
 
 /// Signed distance from (x, y) to the edge of a w x h rounded rect with
@@ -184,10 +221,12 @@ fn sample(src: &[u8], stride: usize, valid: (f32, f32, f32, f32), x: f32, y: f32
     top + (bottom - top) * fy
 }
 
-fn paint(ring: &mut Ring, force: bool) {
+/// Reads what's around the ring and redraws it if that changed (or
+/// `force`). True if it was redrawn.
+fn paint(ring: &mut Ring, force: bool) -> bool {
     let (w, h) = (ring.rect.right - ring.rect.left, ring.rect.bottom - ring.rect.top);
     if w < 4 || h < 4 {
-        return;
+        return false;
     }
     let dpi = unsafe { GetDpiForWindow(ring.hwnd) };
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
@@ -198,14 +237,26 @@ fn paint(ring: &mut Ring, force: bool) {
     let (cw, ch) = (w + 2 * margin, h + 2 * margin);
     let (cx, cy) = (ring.rect.left - margin, ring.rect.top - margin);
 
-    // What's behind, and a little around it.
+    // What's just around it: the strips above, below and to either side.
+    // Every pixel the ring shows comes from there; the middle is never read,
+    // so it isn't copied (a screen copy costs the compositor a read back).
     if ring.capture.as_ref().is_none_or(|c| c.w != cw || c.h != ch) {
         ring.capture = Dib::new(cw, ch);
     }
-    let Some(capture) = ring.capture.as_mut() else { return };
+    let Some(capture) = ring.capture.as_mut() else { return false };
     unsafe {
         let screen = GetDC(None);
-        let _ = BitBlt(capture.dc, 0, 0, cw, ch, Some(screen), cx, cy, SRCCOPY);
+        let strips = [
+            (0, 0, cw, margin),
+            (0, ch - margin, cw, margin),
+            (0, margin, margin, ch - 2 * margin),
+            (cw - margin, margin, margin, ch - 2 * margin),
+        ];
+        for (x, y, sw, sh) in strips {
+            if sw > 0 && sh > 0 {
+                let _ = BitBlt(capture.dc, x, y, sw, sh, Some(screen), cx + x, cy + y, SRCCOPY);
+            }
+        }
         ReleaseDC(None, screen);
     }
     let src = capture.pixels();
@@ -226,7 +277,7 @@ fn paint(ring: &mut Ring, force: bool) {
         }
     }
     if !force && hash == ring.seen {
-        return;
+        return false;
     }
     ring.seen = hash;
 
@@ -249,7 +300,7 @@ fn paint(ring: &mut Ring, force: bool) {
     if ring.out.as_ref().is_none_or(|o| o.w != w || o.h != h) {
         ring.out = Dib::new(w, h);
     }
-    let Some(out) = ring.out.as_mut() else { return };
+    let Some(out) = ring.out.as_mut() else { return false };
     let dst = out.pixels();
     let stride = cw as usize * 4;
     let (fw, fh) = (w as f32, h as f32);
@@ -316,6 +367,7 @@ fn paint(ring: &mut Ring, force: bool) {
             ULW_ALPHA,
         );
     }
+    true
 }
 
 #[cfg(test)]

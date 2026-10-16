@@ -376,6 +376,9 @@ struct App {
     message_color: Color,
     /// Render times, logged with `perf_log`.
     perf: Perf,
+    /// Whether the theme bends light, and whether its refresh timer runs.
+    lens_wanted: bool,
+    lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
     update_available: Option<u32>,
@@ -890,6 +893,8 @@ impl App {
             message_color: theme::accent(),
             device: None,
             perf: Perf::new(cfg.perf_log),
+            lens_wanted: false,
+            lens_on: false,
             update_available: None,
             updating: false,
             cfg,
@@ -1883,7 +1888,15 @@ impl App {
                 self.retarget();
             }
             TIMER_TICK => self.dirty = true,
-            TIMER_LENS => crate::lens::refresh(),
+            TIMER_LENS => {
+                // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
+                if !crate::lens::refresh() {
+                    self.lens_on = false;
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                    }
+                }
+            }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
@@ -2219,13 +2232,19 @@ impl App {
     }
 
     /// Keeps clear glass's bent edges up to date with what's behind them, a
-    /// few times a second, while the theme bends light.
+    /// few times a second, while the theme bends light and a ring is on
+    /// screen (`frame` starts it again when one comes back).
     fn arm_lens(&mut self) {
-        unsafe {
-            if theme::refracts(self.cfg.acrylic) {
-                SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
-            } else {
-                let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+        self.lens_wanted = theme::refracts(self.cfg.acrylic);
+        let on = self.lens_wanted && crate::lens::active();
+        if on != self.lens_on {
+            self.lens_on = on;
+            unsafe {
+                if on {
+                    SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                }
             }
         }
     }
@@ -3416,6 +3435,10 @@ impl App {
             self.perf.end(Surface::Launcher, t);
         }
         self.perf.flush();
+        // A ring of bent light came on screen (or went): refresh it, or stop.
+        if self.lens_wanted && crate::lens::active() != self.lens_on {
+            self.arm_lens();
+        }
 
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.
