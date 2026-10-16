@@ -2224,6 +2224,7 @@ impl App {
 
     /// Redraws every surface, e.g. after the theme changed.
     fn restyle(&mut self) {
+        self.gfx.clear_cache();
         self.arm_lens();
         self.dirty = true;
         self.dock.dirty = true;

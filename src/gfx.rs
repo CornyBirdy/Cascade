@@ -123,6 +123,32 @@ pub struct Gfx {
     pub generation: u32,
     /// Pixels per layout unit of the frame being drawn.
     scale: std::cell::Cell<f32>,
+    /// Panels painted once and drawn from a bitmap since (see `Painter::cached`).
+    cache: std::cell::RefCell<PanelCache>,
+}
+
+/// One cached panel: its bitmap, how many pixels it holds, and when it was
+/// last drawn.
+struct Cached {
+    key: u64,
+    bitmap: ID2D1Bitmap,
+    pixels: u32,
+    used: u64,
+}
+
+/// Most panels and pixels kept (a few per surface; the Start menu and the
+/// widgets panel are the big ones).
+const CACHE_ITEMS: usize = 16;
+const CACHE_PIXELS: u32 = 6_000_000;
+
+#[derive(Default)]
+struct PanelCache {
+    items: Vec<Cached>,
+    /// Keys drawn once without caching: a panel is cached the second time
+    /// it's drawn the same, so one changing size every frame (the notch
+    /// opening) never makes a bitmap.
+    seen: Vec<u64>,
+    tick: u64,
 }
 
 fn text_format(dw: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
@@ -217,7 +243,16 @@ impl Gfx {
                 num: text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 label: text_format(&dw, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             };
-            Ok(Self { factory, dw, rt, brush, fonts, generation: 0, scale: std::cell::Cell::new(1.0) })
+            Ok(Self {
+                factory,
+                dw,
+                rt,
+                brush,
+                fonts,
+                generation: 0,
+                scale: std::cell::Cell::new(1.0),
+                cache: Default::default(),
+            })
         }
     }
 
@@ -288,7 +323,15 @@ impl Gfx {
     }
 
     pub fn painter(&self) -> Painter<'_> {
-        Painter { gfx: self }
+        Painter { gfx: self, rt: &self.rt }
+    }
+
+    /// Forgets the cached panels (see `Painter::cached`), e.g. after the
+    /// theme changed.
+    pub fn clear_cache(&self) {
+        let mut c = self.cache.borrow_mut();
+        c.items.clear();
+        c.seen.clear();
     }
 
     /// Ends the frame, recreating the render target if Direct2D lost it.
@@ -299,6 +342,8 @@ impl Gfx {
                     self.rt = Self::create_target(&self.factory)?;
                     self.brush = self.rt.CreateSolidColorBrush(&Color::white(1.0).d2d(), None)?;
                     self.generation += 1;
+                    // The cached panels belonged to the old target.
+                    self.clear_cache();
                 }
                 return Err(e);
             }
@@ -404,6 +449,8 @@ fn pt(x: f32, y: f32) -> windows_numerics::Vector2 {
 /// Immediate-mode drawing helpers for one frame.
 pub struct Painter<'a> {
     gfx: &'a Gfx,
+    /// What it draws on: the frame, or a cached panel's bitmap (see `cached`).
+    rt: &'a ID2D1RenderTarget,
 }
 
 impl Painter<'_> {
@@ -437,16 +484,16 @@ impl Painter<'_> {
     }
 
     pub fn fill_geometry(&self, g: &ID2D1PathGeometry, c: Color) {
-        unsafe { self.gfx.rt.FillGeometry(g, self.brush(c), None) };
+        unsafe { self.rt.FillGeometry(g, self.brush(c), None) };
     }
 
     pub fn stroke_geometry(&self, g: &ID2D1PathGeometry, c: Color, width: f32) {
-        unsafe { self.gfx.rt.DrawGeometry(g, self.brush(c), width, None) };
+        unsafe { self.rt.DrawGeometry(g, self.brush(c), width, None) };
     }
 
     pub fn rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.FillRoundedRectangle(&rr, self.brush(c)) };
+        unsafe { self.rt.FillRoundedRectangle(&rr, self.brush(c)) };
     }
 
     /// A rounded rect filled top to bottom with a gradient: `stops` are
@@ -454,7 +501,7 @@ impl Painter<'_> {
     pub fn gradient_rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, stops: &[(f32, Color)]) {
         let stops: Vec<D2D1_GRADIENT_STOP> =
             stops.iter().map(|&(position, c)| D2D1_GRADIENT_STOP { position, color: c.d2d() }).collect();
-        let rt = &self.gfx.rt;
+        let rt = self.rt;
         unsafe {
             let Ok(collection) = rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else {
                 return;
@@ -469,14 +516,14 @@ impl Painter<'_> {
     fn stops(&self, stops: &[(f32, Color)]) -> Option<ID2D1GradientStopCollection> {
         let stops: Vec<D2D1_GRADIENT_STOP> =
             stops.iter().map(|&(position, c)| D2D1_GRADIENT_STOP { position, color: c.d2d() }).collect();
-        unsafe { self.gfx.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok() }
+        unsafe { self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok() }
     }
 
     /// A gradient running from (x0, y0) to (x1, y1); `stops` as in `gradient_rrect`.
     pub fn linear(&self, x0: f32, y0: f32, x1: f32, y1: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
         let collection = self.stops(stops)?;
         let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(x0, y0), endPoint: pt(x1, y1) };
-        let b = unsafe { self.gfx.rt.CreateLinearGradientBrush(&props, None, &collection).ok()? };
+        let b = unsafe { self.rt.CreateLinearGradientBrush(&props, None, &collection).ok()? };
         b.cast().ok()
     }
 
@@ -494,7 +541,7 @@ impl Painter<'_> {
             radiusX: rx,
             radiusY: ry,
         };
-        let b = unsafe { self.gfx.rt.CreateRadialGradientBrush(&props, None, &collection).ok()? };
+        let b = unsafe { self.rt.CreateRadialGradientBrush(&props, None, &collection).ok()? };
         b.cast().ok()
     }
 
@@ -506,37 +553,35 @@ impl Painter<'_> {
 
     pub fn fill_rrect_with(&self, x: f32, y: f32, w: f32, h: f32, r: f32, brush: &ID2D1Brush) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.FillRoundedRectangle(&rr, brush) };
+        unsafe { self.rt.FillRoundedRectangle(&rr, brush) };
     }
 
     pub fn stroke_rrect_with(&self, x: f32, y: f32, w: f32, h: f32, r: f32, brush: &ID2D1Brush, width: f32) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.DrawRoundedRectangle(&rr, brush, width, None) };
+        unsafe { self.rt.DrawRoundedRectangle(&rr, brush, width, None) };
     }
 
     pub fn stroke_rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color, width: f32) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.DrawRoundedRectangle(&rr, self.brush(c), width, None) };
+        unsafe { self.rt.DrawRoundedRectangle(&rr, self.brush(c), width, None) };
     }
 
     pub fn circle(&self, cx: f32, cy: f32, r: f32, c: Color) {
         let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.FillEllipse(&e, self.brush(c)) };
+        unsafe { self.rt.FillEllipse(&e, self.brush(c)) };
     }
 
     pub fn stroke_circle(&self, cx: f32, cy: f32, r: f32, c: Color, width: f32) {
         let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: r, radiusY: r };
-        unsafe { self.gfx.rt.DrawEllipse(&e, self.brush(c), width, None) };
+        unsafe { self.rt.DrawEllipse(&e, self.brush(c), width, None) };
     }
 
     pub fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, c: Color, width: f32) {
-        unsafe { self.gfx.rt.DrawLine(pt(x0, y0), pt(x1, y1), self.brush(c), width, None) };
+        unsafe { self.rt.DrawLine(pt(x0, y0), pt(x1, y1), self.brush(c), width, None) };
     }
 
     pub fn image(&self, bmp: &ID2D1Bitmap, x: f32, y: f32, w: f32, h: f32, alpha: f32) {
-        unsafe {
-            self.gfx.rt.DrawBitmap(bmp, Some(&rect(x, y, w, h)), alpha, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
-        };
+        unsafe { self.rt.DrawBitmap(bmp, Some(&rect(x, y, w, h)), alpha, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
     }
 
     /// Draws a bitmap at its own pixel size, centred on (cx, cy) and snapped
@@ -564,7 +609,7 @@ impl Painter<'_> {
         };
         unsafe {
             let _ = font.SetTextAlignment(a);
-            self.gfx.rt.DrawText(
+            self.rt.DrawText(
                 &wide,
                 font,
                 &rect(x, y, w, h),
@@ -584,9 +629,9 @@ impl Painter<'_> {
         let (x, y) = (self.snap(x), self.snap(y));
         let Some(layout) = wrapped(&self.gfx.dw, s, font, w, h) else { return };
         unsafe {
-            self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
-            self.gfx.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
-            self.gfx.rt.PopAxisAlignedClip();
+            self.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            self.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            self.rt.PopAxisAlignedClip();
         }
     }
 
@@ -595,18 +640,18 @@ impl Painter<'_> {
     /// under the window shows through.
     pub fn hole(&self, x: f32, y: f32, w: f32, h: f32) {
         unsafe {
-            self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
-            self.gfx.rt.Clear(Some(&Color(0.0, 0.0, 0.0, 0.004).d2d()));
-            self.gfx.rt.PopAxisAlignedClip();
+            self.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            self.rt.Clear(Some(&Color(0.0, 0.0, 0.0, 0.004).d2d()));
+            self.rt.PopAxisAlignedClip();
         }
     }
 
     pub fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
-        unsafe { self.gfx.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        unsafe { self.rt.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
     }
 
     pub fn unclip(&self) {
-        unsafe { self.gfx.rt.PopAxisAlignedClip() };
+        unsafe { self.rt.PopAxisAlignedClip() };
     }
 
     /// Builds a path. `f` adds segments to an open sink.
@@ -701,9 +746,121 @@ impl Painter<'_> {
         }
     }
 
+    /// Draws a `w` x `h` panel at (x, y) that `draw` paints (given where, and
+    /// how opaque), from a bitmap of it when it was drawn the same (`key`, at
+    /// the same scale and offset within the pixel) the time before: steady
+    /// panels are painted once instead of every frame. `alpha` fades all of
+    /// it; cached, `draw` paints at full strength and the bitmap is faded.
+    pub fn cached(
+        &self,
+        key: u64,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        alpha: f32,
+        draw: impl Fn(&Painter, f32, f32, f32),
+    ) {
+        use std::hash::{Hash, Hasher};
+        let k = self.gfx.scale.get();
+        // From the pixel before (x, y), a pixel spare all round for smoothing.
+        let (px, py) = ((x * k).floor() - 1.0, (y * k).floor() - 1.0);
+        let (pw, ph) = (((x + w) * k - px).ceil() as u32 + 1, ((y + h) * k - py).ceil() as u32 + 1);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (key, k.to_bits(), (x * k - px).to_bits(), (y * k - py).to_bits(), pw, ph).hash(&mut hasher);
+        let key = hasher.finish();
+        if pw == 0 || ph == 0 || pw.saturating_mul(ph) > CACHE_PIXELS / 2 || alpha <= 0.0 {
+            draw(self, x, y, alpha);
+            return;
+        }
+        let found = {
+            let mut c = self.gfx.cache.borrow_mut();
+            c.tick += 1;
+            let tick = c.tick;
+            match c.items.iter().position(|i| i.key == key) {
+                Some(n) => {
+                    c.items[n].used = tick;
+                    Some(c.items[n].bitmap.clone())
+                }
+                None if c.seen.contains(&key) => None,
+                None => {
+                    // The first time: drawn as it is, and remembered.
+                    if c.seen.len() >= 32 {
+                        c.seen.remove(0);
+                    }
+                    c.seen.push(key);
+                    drop(c);
+                    draw(self, x, y, alpha);
+                    return;
+                }
+            }
+        };
+        let bitmap = match found {
+            Some(b) => b,
+            None => match self.paint_cached(px, py, pw, ph, k, |p| draw(p, x, y, 1.0)) {
+                Some(b) => {
+                    let mut c = self.gfx.cache.borrow_mut();
+                    c.seen.retain(|s| *s != key);
+                    let used = c.tick;
+                    c.items.push(Cached { key, bitmap: b.clone(), pixels: pw * ph, used });
+                    // Least recently drawn first out, to keep within the limits.
+                    while c.items.len() > CACHE_ITEMS || c.items.iter().map(|i| i.pixels).sum::<u32>() > CACHE_PIXELS {
+                        let Some(oldest) = c.items.iter().enumerate().min_by_key(|(_, i)| i.used).map(|(n, _)| n)
+                        else {
+                            break;
+                        };
+                        c.items.remove(oldest);
+                    }
+                    b
+                }
+                None => {
+                    draw(self, x, y, alpha);
+                    return;
+                }
+            },
+        };
+        let dest = rect(px / k, py / k, pw as f32 / k, ph as f32 / k);
+        unsafe {
+            // Pixel for pixel, so it matches drawing it directly.
+            self.rt.DrawBitmap(&bitmap, Some(&dest), alpha, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+        }
+    }
+
+    /// Paints `draw` (in the frame's coordinates) into a new `pw` x `ph`
+    /// bitmap whose top-left is pixel (px, py) of the frame.
+    fn paint_cached(
+        &self,
+        px: f32,
+        py: f32,
+        pw: u32,
+        ph: u32,
+        k: f32,
+        draw: impl FnOnce(&Painter),
+    ) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let dips = D2D_SIZE_F { width: pw as f32 / k, height: ph as f32 / k };
+            let pixels = D2D_SIZE_U { width: pw, height: ph };
+            let target = self
+                .rt
+                .CreateCompatibleRenderTarget(
+                    Some(&dips as *const _),
+                    Some(&pixels as *const _),
+                    None,
+                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                )
+                .ok()?;
+            target.BeginDraw();
+            target.SetTransform(&windows_numerics::Matrix3x2::translation(-px / k, -py / k));
+            target.Clear(Some(&Color(0.0, 0.0, 0.0, 0.0).d2d()));
+            draw(&Painter { gfx: self.gfx, rt: &target });
+            target.EndDraw(None, None).ok()?;
+            target.GetBitmap().ok()
+        }
+    }
+
     /// Moves everything drawn after it by (x, y); `translate(0.0, 0.0)` undoes it.
     pub fn translate(&self, x: f32, y: f32) {
-        unsafe { self.gfx.rt.SetTransform(&windows_numerics::Matrix3x2::translation(x, y)) };
+        unsafe { self.rt.SetTransform(&windows_numerics::Matrix3x2::translation(x, y)) };
     }
 }
 

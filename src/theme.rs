@@ -607,6 +607,10 @@ pub fn style_opaque(b: &Backdrop, radius: f32) {
 /// Paints a panel in the current theme: over a live blur (`blurred`) the
 /// theme's wash, otherwise a solid panel at `solid_alpha`; then the light
 /// in and on it, and its edge. `alpha` fades all of it.
+///
+/// It's painted once into a bitmap and drawn from that while it stays the
+/// same (see `Painter::cached`): the gradients and edge rings cost nothing
+/// on frames where only what's on the panel moves.
 pub fn panel(
     p: &Painter,
     x: f32,
@@ -619,7 +623,29 @@ pub fn panel(
     solid_alpha: f32,
     alpha: f32,
 ) {
-    paint(p, &current(), x, y, w, h, r, blurred, opacity, solid_alpha, alpha);
+    use std::hash::{Hash, Hasher};
+    let t = current();
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    (look(), w.to_bits(), h.to_bits(), r.to_bits(), blurred, opacity.to_bits(), solid_alpha.to_bits()).hash(&mut key);
+    p.cached(key.finish(), x, y, w, h, alpha, |p, x, y, a| {
+        paint(p, &t, x, y, w, h, r, blurred, opacity, solid_alpha, a)
+    });
+}
+
+/// Everything the current look depends on (the theme, its colour and edge
+/// settings, refraction and the Windows accent), for telling cached panels
+/// apart.
+fn look() -> u64 {
+    let parts = [
+        CURRENT.load(Ordering::Relaxed) as u64,
+        SYSTEM_ACCENT.load(Ordering::Relaxed) as u64,
+        SOURCE.load(Ordering::Relaxed) as u64,
+        HUE.load(Ordering::Relaxed) as u64,
+        INTENSITY.load(Ordering::Relaxed) as u64,
+        EDGE.load(Ordering::Relaxed) as u64,
+        REFRACT.load(Ordering::Relaxed) as u64,
+    ];
+    parts.iter().fold(0xcbf2_9ce4_8422_2325, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// `panel` in theme `t`.
