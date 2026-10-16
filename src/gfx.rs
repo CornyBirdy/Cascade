@@ -125,7 +125,14 @@ pub struct Gfx {
     scale: std::cell::Cell<f32>,
     /// Panels painted once and drawn from a bitmap since (see `Painter::cached`).
     cache: std::cell::RefCell<PanelCache>,
+    /// Laid-out text by (text, font, box, alignment) hash, with the text to
+    /// check it against (see `Painter::text`).
+    layouts: std::cell::RefCell<std::collections::HashMap<u64, (String, IDWriteTextLayout)>>,
 }
+
+/// Most laid-out strings kept before starting over (the Start menu's app
+/// list is the biggest user).
+const LAYOUTS: usize = 512;
 
 /// One cached panel: its bitmap, how many pixels it holds, and when it was
 /// last drawn.
@@ -252,6 +259,7 @@ impl Gfx {
                 generation: 0,
                 scale: std::cell::Cell::new(1.0),
                 cache: Default::default(),
+                layouts: Default::default(),
             })
         }
     }
@@ -601,23 +609,42 @@ impl Painter<'_> {
         }
         // Whole-pixel origin: grayscale text drawn between pixel rows is smeared.
         let (x, y) = (self.snap(x), self.snap(y));
+        let Some(layout) = self.layout(s, font, w, h, align) else { return };
+        unsafe {
+            self.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+
+    /// `s` laid out in a `w` x `h` box, made once and kept: laying text out
+    /// is most of the cost of drawing it, and the same strings are drawn
+    /// frame after frame (a scrolling app list, the labels of a panel).
+    fn layout(&self, s: &str, font: &IDWriteTextFormat, w: f32, h: f32, align: Align) -> Option<IDWriteTextLayout> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (s, font.as_raw() as usize, w.to_bits(), h.to_bits(), align as u8).hash(&mut hasher);
+        let key = hasher.finish();
+        let mut layouts = self.gfx.layouts.borrow_mut();
+        if let Some((text, l)) = layouts.get(&key) {
+            if text == s {
+                return Some(l.clone());
+            }
+        }
         let wide: Vec<u16> = s.encode_utf16().collect();
         let a = match align {
             Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
             Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
         };
-        unsafe {
-            let _ = font.SetTextAlignment(a);
-            self.rt.DrawText(
-                &wide,
-                font,
-                &rect(x, y, w, h),
-                self.brush(c),
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+        let layout = unsafe {
+            let l = self.gfx.dw.CreateTextLayout(&wide, font, w, h).ok()?;
+            l.SetTextAlignment(a).ok()?;
+            l
+        };
+        if layouts.len() >= LAYOUTS {
+            layouts.clear();
         }
+        layouts.insert(key, (s.to_string(), layout.clone()));
+        Some(layout)
     }
 
     /// Left-aligned text wrapped between words to `w`, from the top of the
