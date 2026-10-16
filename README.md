@@ -64,6 +64,7 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 - **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (click one to open the app it came from, dismiss one with its ×, or *Clear all*), what's playing (art, an equaliser under it, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
 - **Customising it** (Settings → Widgets): the music visualizer on the music widget and card on or off (`widget_visualizer`), the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
+- **NVIDIA cards, each on its own:** with an NVIDIA card (or two), the GPU widget shows a column per card with its load and temperature (*GPU 1 · 54°* over *37%*), and the panel gives each card a row with its name, video memory, power draw, load, temperature and a graph. The readings come from the driver's own `nvml.dll`, loaded only while a GPU reading is on screen; other cards keep the single Windows figure.
 - **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 
 ## Start menu
@@ -152,6 +153,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/usage.rs` | Cascade's own memory and CPU use, for Settings → About |
 | `src/helper.rs` | Optional admin helper for the Win key over admin apps |
 | `src/sysmon.rs` | CPU, memory, network, GPU and disk readings for the stats widgets |
+| `src/nvml.rs` | Each NVIDIA card's load, temperature, memory and power (the driver's NVML) |
 | `src/widgets.rs` | The widgets panel |
 | `src/quickmenu.rs` | The Win+X menu |
 | `src/preview.rs` | Window previews (DWM thumbnails) |

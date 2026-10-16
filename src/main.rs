@@ -20,6 +20,7 @@ mod media;
 mod mouseedge;
 mod mousehook;
 mod notifications;
+mod nvml;
 mod pomodoro;
 mod quickmenu;
 mod preview;

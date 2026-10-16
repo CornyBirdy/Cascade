@@ -30,6 +30,7 @@ use crate::config::{self, Config};
 use crate::gfx::{Align, Color, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::media::MediaInfo;
+use crate::nvml::Gpu;
 use crate::shell;
 use crate::spring::Spring;
 use crate::sysmon::{self, Stats};
@@ -52,6 +53,8 @@ const STATUS_ICON: f32 = 24.0;
 /// Space between floating islands.
 const ISLAND_GAP: f32 = 8.0;
 const CHIP_STAT_W: f32 = 48.0;
+/// Each NVIDIA card's column on the GPU widget (its load and temperature).
+const CHIP_GPU_W: f32 = 66.0;
 const CHIP_NET_W: f32 = 84.0;
 /// The music widget's album art and the space around it, left of the text.
 const MUSIC_LEAD: f32 = 40.0;
@@ -168,6 +171,8 @@ fn parse_chips(list: &str) -> Vec<Chip> {
 /// What the taskbar widgets show.
 pub struct WidgetData<'a> {
     pub stats: &'a Stats,
+    /// Each NVIDIA card's own readings (the GPU widget shows one column each).
+    pub gpus: &'a [Gpu],
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
     /// The music visualizer's bands and colour, if the music widget shows it.
@@ -481,13 +486,15 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
 }
 
 /// How wide a widget is, or None if it has nothing to show right now. The
-/// music and weather widgets fit what they show (`music` and `weather`).
-fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>) -> Option<f32> {
+/// music and weather widgets fit what they show (`music` and `weather`), and
+/// the GPU widget has a column for each of the `gpus` NVIDIA cards.
+fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize) -> Option<f32> {
     match c {
         Chip::Weather => weather,
         Chip::Music => music,
         Chip::Net => Some(CHIP_NET_W),
         Chip::Widgets => Some(WIDGETS_BTN_W),
+        Chip::Gpu if gpus > 0 => Some(CHIP_GPU_W * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
     }
 }
@@ -1008,6 +1015,7 @@ impl Dock {
         overflow: bool,
         music: Option<f32>,
         weather: Option<f32>,
+        gpus: usize,
     ) -> Geo {
         let b = self.button();
         let pad = self.edge();
@@ -1029,7 +1037,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, music, weather) {
+            if let Some(w) = chip_width(c, music, weather, gpus) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -1075,7 +1083,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, music, weather) {
+            if let Some(w) = chip_width(c, music, weather, gpus) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1436,7 +1444,7 @@ impl Dock {
             let text = temp.max(gfx.measure(wx.describe(), small)).min(WEATHER_TEXT_MAX);
             (WEATHER_ICON_W + text + 10.0).ceil()
         });
-        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w);
+        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len());
         let g = &self.geo;
 
         // Blur behind each island, just under this window (placed once the
@@ -1616,6 +1624,24 @@ impl Dock {
                     }
                     Chip::Cpu => two("CPU", &format!("{:.0}%", st.cpu), grey, white, &f.label),
                     Chip::Ram => two("RAM", &format!("{:.0}%", st.ram), grey, white, &f.label),
+                    // One column per NVIDIA card: its load, under its number and temperature.
+                    Chip::Gpu if !wd.gpus.is_empty() => {
+                        let n = wd.gpus.len();
+                        for (i, g) in wd.gpus.iter().enumerate() {
+                            let cx = s.x + i as f32 * CHIP_GPU_W;
+                            let name = if n > 1 { format!("GPU {}", i + 1) } else { "GPU".to_string() };
+                            let top = match g.temp {
+                                Some(t) => format!("{name} \u{b7} {t:.0}\u{b0}"),
+                                None => name,
+                            };
+                            let (load, c) = match g.load {
+                                Some(l) => (format!("{l:.0}%"), white),
+                                None => ("\u{2014}".to_string(), grey),
+                            };
+                            p.text(&top, &f.small, cx, mid_y - 16.0, CHIP_GPU_W, 16.0, Align::Center, grey);
+                            p.text(&load, &f.label, cx, mid_y, CHIP_GPU_W, 16.0, Align::Center, c);
+                        }
+                    }
                     Chip::Gpu => match st.gpu {
                         Some(g) => two("GPU", &format!("{g:.0}%"), grey, white, &f.label),
                         None => two("GPU", "\u{2014}", grey, grey, &f.label),

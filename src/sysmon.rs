@@ -1,5 +1,6 @@
 //! System numbers for the stats widgets: CPU, memory, network, and (through
-//! the performance counters) GPU and disk.
+//! the performance counters) GPU and disk. NVIDIA cards also get their own
+//! readings each (load, temperature, memory, power; see `nvml`).
 //!
 //! Nothing here runs by itself. The app samples on a timer only while a
 //! stats widget is on screen, and stops the timer (and drops the counters)
@@ -15,6 +16,8 @@ use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::System::Performance::*;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
+
+use crate::nvml::{Gpu, Nvml};
 
 /// Samples kept for the graphs.
 pub const HISTORY: usize = 60;
@@ -64,6 +67,8 @@ pub struct History {
     pub gpu: VecDeque<f32>,
     pub disk: VecDeque<f32>,
     pub down: VecDeque<f32>,
+    /// Each NVIDIA card's load, in `Sampler::gpus` order.
+    pub gpus: Vec<VecDeque<f32>>,
 }
 
 fn push(q: &mut VecDeque<f32>, v: f32) {
@@ -155,9 +160,12 @@ impl Drop for Pdh {
 pub struct Sampler {
     pub stats: Stats,
     pub hist: History,
+    /// Each NVIDIA card, with its own readings (empty without one).
+    pub gpus: Vec<Gpu>,
     cpu_prev: Option<(u64, u64, u64)>,
     net_prev: Option<(u64, u64, Instant)>,
     pdh: Option<Pdh>,
+    nvml: Nvml,
 }
 
 fn filetime(f: FILETIME) -> u64 {
@@ -166,7 +174,31 @@ fn filetime(f: FILETIME) -> u64 {
 
 impl Sampler {
     pub fn new() -> Self {
-        Self { stats: Stats::default(), hist: History::default(), cpu_prev: None, net_prev: None, pdh: None }
+        Self {
+            stats: Stats::default(),
+            hist: History::default(),
+            gpus: Vec::new(),
+            cpu_prev: None,
+            net_prev: None,
+            pdh: None,
+            nvml: Nvml::default(),
+        }
+    }
+
+    /// What the taskbar chips show (see `Stats::signature`), with each card's
+    /// load and temperature.
+    pub fn signature(&self) -> String {
+        let mut s = self.stats.signature();
+        for g in &self.gpus {
+            s += &format!("|{:?}/{:?}", g.load.map(|v| v.round() as i32), g.temp.map(|v| v.round() as i32));
+        }
+        s
+    }
+
+    fn drop_gpus(&mut self) {
+        self.nvml.close();
+        self.gpus.clear();
+        self.hist.gpus.clear();
     }
 
     /// Forgets the baselines (the next samples start fresh) and frees the counters.
@@ -176,6 +208,7 @@ impl Sampler {
         self.pdh = None;
         self.stats.gpu = None;
         self.stats.disk = None;
+        self.drop_gpus();
     }
 
     /// Takes one sample. `counters` also reads GPU and disk load, which costs
@@ -186,10 +219,11 @@ impl Sampler {
         self.network();
         if counters {
             self.counters();
-        } else if self.pdh.is_some() {
+        } else if self.pdh.is_some() || !self.gpus.is_empty() {
             self.pdh = None;
             self.stats.gpu = None;
             self.stats.disk = None;
+            self.drop_gpus();
         }
         let s = self.stats;
         push(&mut self.hist.cpu, s.cpu);
@@ -197,6 +231,10 @@ impl Sampler {
         push(&mut self.hist.gpu, s.gpu.unwrap_or(0.0));
         push(&mut self.hist.disk, s.disk.unwrap_or(0.0));
         push(&mut self.hist.down, s.down as f32);
+        self.hist.gpus.resize_with(self.gpus.len(), VecDeque::new);
+        for (q, g) in self.hist.gpus.iter_mut().zip(&self.gpus) {
+            push(q, g.load.unwrap_or(0.0));
+        }
     }
 
     fn cpu(&mut self) {
@@ -255,6 +293,11 @@ impl Sampler {
     }
 
     fn counters(&mut self) {
+        let gpus = self.nvml.read();
+        if gpus.len() != self.gpus.len() || gpus.iter().zip(&self.gpus).any(|(a, b)| a.name != b.name) {
+            self.hist.gpus.clear();
+        }
+        self.gpus = gpus;
         // The set of GPU engines changes as programs come and go: start the
         // query again now and then so new ones are picked up.
         if self.pdh.as_ref().is_some_and(|p| p.opened.elapsed() > Duration::from_secs(30)) {

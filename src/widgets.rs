@@ -182,7 +182,11 @@ fn card_height(card: Card, ctx: &Ctx) -> f32 {
         Card::Media => 128.0,
         Card::System => {
             let s = &ctx.sampler.stats;
-            let rows = 3 + s.gpu.is_some() as usize + s.disk.is_some() as usize;
+            let gpus = match ctx.sampler.gpus.len() {
+                0 => s.gpu.is_some() as usize,
+                n => n,
+            };
+            let rows = 3 + gpus + s.disk.is_some() as usize;
             34.0 + rows as f32 * 44.0 + 6.0
         }
         Card::Weather => 112.0,
@@ -560,9 +564,14 @@ fn system_card(p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
             Color(0.70, 0.55, 1.0, 1.0),
         ),
     ];
-    if let Some(g) = s.gpu {
-        rows.push(("GPU", format!("{g:.0}%"), &h.gpu, 100.0, GREEN));
+    // Each NVIDIA card on a row of its own (see `gpu_rows`), or Windows' figure.
+    let gpus = &ctx.sampler.gpus;
+    if gpus.is_empty() {
+        if let Some(g) = s.gpu {
+            rows.push(("GPU", format!("{g:.0}%"), &h.gpu, 100.0, GREEN));
+        }
     }
+    let gpu_at = rows.len();
     if let Some(d) = s.disk {
         rows.push(("Disk", format!("{d:.0}%"), &h.disk, 100.0, ORANGE));
     }
@@ -574,12 +583,41 @@ fn system_card(p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
         Color(0.40, 0.80, 0.90, 1.0),
     ));
     let w = CARD_W - 28.0;
+    let row_y = |i: usize| y + 34.0 + i as f32 * 44.0;
     for (i, (label, value, hist, max, color)) in rows.into_iter().enumerate() {
-        let ry = y + 34.0 + i as f32 * 44.0;
+        // The cards' rows go in after CPU and memory.
+        let i = if i >= gpu_at { i + gpus.len() } else { i };
+        let ry = row_y(i);
         p.text(label, &f.small, x + 14.0, ry, 120.0, 16.0, Align::Left, Color::white(0.6));
         p.text(&value, &f.label, x + 14.0, ry, w, 16.0, Align::Right, Color::white(0.95));
         spark(p, hist, x + 14.0, ry + 20.0, w, 20.0, max, color);
     }
+    let empty = VecDeque::new();
+    for (i, g) in gpus.iter().enumerate() {
+        let ry = row_y(gpu_at + i);
+        let (left, right) = gpu_row(g);
+        p.text(&left, &f.small, x + 14.0, ry, w - 76.0, 16.0, Align::Left, Color::white(0.6));
+        p.text(&right, &f.label, x + 14.0, ry, w, 16.0, Align::Right, Color::white(0.95));
+        let hist = ctx.sampler.hist.gpus.get(i).unwrap_or(&empty);
+        spark(p, hist, x + 14.0, ry + 20.0, w, 20.0, 100.0, GREEN);
+    }
+}
+
+/// A card's row: its name with memory, power and clock on the left, its load
+/// and temperature on the right.
+fn gpu_row(g: &crate::nvml::Gpu) -> (String, String) {
+    let mut left = g.name.clone();
+    if let (Some(u), Some(t)) = (g.vram_used, g.vram_total) {
+        left += &format!("   {u:.1} / {t:.0} GB");
+    }
+    if let Some(pw) = g.power {
+        left += &format!("   {pw:.0} W");
+    }
+    let mut right = g.load.map_or_else(|| "\u{2014}".to_string(), |l| format!("{l:.0}%"));
+    if let Some(t) = g.temp {
+        right += &format!("  {t:.0}\u{b0}C");
+    }
+    (left, right)
 }
 
 fn weather_card(p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {

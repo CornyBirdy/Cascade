@@ -2798,10 +2798,10 @@ impl App {
     }
 
     fn sample_stats(&mut self) {
-        let before = self.sysmon.stats.signature();
+        let before = self.sysmon.signature();
         // GPU and disk load cost a bit more: only when they are shown.
         self.sysmon.sample(self.cfg.placed("gpu") || self.widgets.open);
-        if self.sysmon.stats.signature() != before {
+        if self.sysmon.signature() != before {
             self.dock.dirty = true;
         }
         if self.widgets.open {
@@ -3112,7 +3112,13 @@ impl App {
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());
             let bars = (self.widget_bars && self.dock_bars).then(|| (self.levels(), self.accent()));
-            let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art, bars };
+            let data = dock::WidgetData {
+                stats: &self.sysmon.stats,
+                gpus: &self.sysmon.gpus,
+                media: self.media.as_ref(),
+                art,
+                bars,
+            };
             let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);
             if let Some(h) = self.systray.hwnd {
                 let r = self.dock.bar_rect();
@@ -3125,7 +3131,7 @@ impl App {
         if self.screens.iter().any(|d| d.wants_frame()) {
             // The other screens' taskbars: apps and the clock, no widgets.
             let status = dock::Status::default();
-            let data = dock::WidgetData { stats: &self.sysmon.stats, media: None, art: None, bars: None };
+            let data = dock::WidgetData { stats: &self.sysmon.stats, gpus: &[], media: None, art: None, bars: None };
             for d in &mut self.screens {
                 if d.wants_frame() {
                     fast |= d.step(dt);
