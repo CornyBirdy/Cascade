@@ -88,6 +88,7 @@ Cascade's own versions of Windows' shortcut menus, in the current theme and wher
 - **Win+X** (or right-click **Start**): the quick links menu above the Start button: Installed apps, Power Options, Event Viewer, System, Device Manager, Network Connections, Disk Management, Computer Management, Terminal, Terminal (Admin), Task Manager, Settings, File Explorer, Search, Run, *Shut down or sign out* and Desktop (plus Mobility Center on a laptop). The same keys work as in Windows', shown beside each item: Win+X then A for an admin terminal, or U then R to restart. Arrow keys, Enter and Esc work too. (`shortcut_win_x`)
 - **Win+N:** the widgets panel, with your notifications and the calendar (`shortcut_win_n`; needs Cascade's taskbar).
 - **Win+A** (off by default): the notch's Controls instead of Windows' quick settings (`shortcut_win_a`).
+- **Win+V:** your clipboard history by the text cursor (or the pointer, in apps that don't say where their cursor is): Windows' own history, so pinned and synced items are there too. Click an item, press its number, or pick it with the arrow keys and Enter, and it's pasted into the app you were in; Delete or its × takes it out, *Clear all* empties it. With clipboard history off in Windows it offers to turn it on. It's only read while the menu is open (`shortcut_win_v`).
 
 ## Screens
 
@@ -158,6 +159,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/nvml.rs` | Each NVIDIA card's load, temperature, memory and power (the driver's NVML) |
 | `src/widgets.rs` | The widgets panel |
 | `src/quickmenu.rs` | The Win+X menu |
+| `src/clipboard.rs` | The Win+V menu: Windows' clipboard history, and pasting from it |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |

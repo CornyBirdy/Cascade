@@ -648,6 +648,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row(
+                "shortcut_win_v",
+                "Win+V",
+                "Your clipboard history (Windows' own, pins and all) by the text cursor. Click an item or press Enter to paste it.",
+                Toggle,
+            ),
+            row(
                 "shortcuts_note",
                 "Turned off",
                 "The key opens Windows' own menu, as usual. Other Win+key shortcuts are never touched.",

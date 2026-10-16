@@ -165,6 +165,8 @@ shortcut_win_x = true
 shortcut_win_n = true
 # Win+A: the notch's Controls instead of Windows' quick settings.
 shortcut_win_a = false
+# Win+V: your clipboard history (Windows' own) by the text cursor.
+shortcut_win_v = true
 # Where the Start menu opens: auto (follows the taskbar), center or left.
 start_position = auto
 start_height = 620
@@ -294,6 +296,7 @@ pub struct Config {
     pub shortcut_win_x: bool,
     pub shortcut_win_n: bool,
     pub shortcut_win_a: bool,
+    pub shortcut_win_v: bool,
     pub admin_helper: bool,
     pub start_position: String,
     pub start_height: f32,
@@ -404,6 +407,7 @@ impl Default for Config {
             shortcut_win_x: true,
             shortcut_win_n: true,
             shortcut_win_a: false,
+            shortcut_win_v: true,
             focus_minutes: 25,
             break_minutes: 5,
             weather: true,
@@ -629,6 +633,7 @@ impl Config {
                 "shortcut_win_x" => set_b(&mut c.shortcut_win_x),
                 "shortcut_win_n" => set_b(&mut c.shortcut_win_n),
                 "shortcut_win_a" => set_b(&mut c.shortcut_win_a),
+                "shortcut_win_v" => set_b(&mut c.shortcut_win_v),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "weather" => set_b(&mut c.weather),
@@ -757,6 +762,7 @@ impl Config {
             "shortcut_win_x" => b(self.shortcut_win_x),
             "shortcut_win_n" => b(self.shortcut_win_n),
             "shortcut_win_a" => b(self.shortcut_win_a),
+            "shortcut_win_v" => b(self.shortcut_win_v),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
             "weather" => b(self.weather),

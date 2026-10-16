@@ -7,6 +7,7 @@ compile_error!("Cascade is a Windows app.");
 mod audio;
 mod backdrop;
 mod brightness;
+mod clipboard;
 mod config;
 mod devices;
 mod dock;
@@ -73,6 +74,10 @@ pub mod msg {
     pub const STATS: u32 = WM_APP + 23;
     /// The Start menu's recent files (a boxed `Vec<launcher::RecentFile>`).
     pub const RECENT: u32 = WM_APP + 24;
+    /// The clipboard history (a boxed `clipboard::Clips`).
+    pub const CLIPS: u32 = WM_APP + 25;
+    /// A clipboard item is back on the clipboard, ready to paste (wParam 1) or not (0).
+    pub const CLIP_PASTE: u32 = WM_APP + 26;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

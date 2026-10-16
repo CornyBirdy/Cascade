@@ -1,5 +1,5 @@
 //! Closes pop-ups (the Start menu, the hidden-icons flyout, the widgets panel,
-//! the notch opened from the taskbar, the Win+X menu) when you click anywhere
+//! the notch opened from the taskbar, the Win+X and Win+V menus) when you click anywhere
 //! outside them.
 //!
 //! Windows only tells a pop-up it lost focus when something else takes it,
@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::msg;
 
-const SLOTS: usize = 5;
+const SLOTS: usize = 6;
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 static ACTIVE: [AtomicBool; SLOTS] = [const { AtomicBool::new(false) }; SLOTS];

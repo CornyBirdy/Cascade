@@ -18,6 +18,7 @@ windows = { version = "0.61", features = [
 	"UI_Notifications",
 	"UI_Notifications_Management",
 	"ApplicationModel",
+	"ApplicationModel_DataTransfer",
 	"Win32_Devices_Display",
 	"Win32_Foundation",
 	"Win32_Globalization",

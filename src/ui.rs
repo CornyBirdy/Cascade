@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
+use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
 use crate::devices::{self, Device};
 use crate::dock::{self, Dock, Hot as DockHot};
@@ -85,6 +86,8 @@ const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
 /// Refreshes clear glass's bent edges (see `lens`).
 const TIMER_LENS: usize = 19;
+/// Pastes a clipboard item once the app it's for is in front again.
+const TIMER_PASTE: usize = 20;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -144,9 +147,11 @@ enum Surface {
     Quick,
     Widgets,
     Switcher,
+    Clipboard,
 }
 
-const SURFACES: [&str; 8] = ["notch", "dock", "screens", "launcher", "flyout", "quick", "widgets", "switcher"];
+const SURFACES: [&str; 9] =
+    ["notch", "dock", "screens", "launcher", "flyout", "quick", "widgets", "switcher", "clipboard"];
 
 /// Each surface's render time and frame count, written to the log about once
 /// a second while `perf_log` is on (and nothing at all while it's off).
@@ -341,6 +346,11 @@ struct App {
     flyout: Flyout,
     /// The Win+X menu.
     quick: QuickMenu,
+    /// The Win+V menu (made the first time it's opened), its reader, and the
+    /// window it pastes into.
+    clips: Option<ClipMenu>,
+    clip_tx: Sender<ClipCmd>,
+    clip_target: HWND,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
     /// System stats, sampled only while a stats widget is on screen.
@@ -615,6 +625,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::CLIPS => {
+            let c = Box::from_raw(lp.0 as *mut clipboard::Clips);
+            with_app(move |a| {
+                if let Some(m) = &mut a.clips {
+                    m.set(*c);
+                }
+            });
+            return LRESULT(0);
+        }
         msg::RECENT => {
             let list = Box::from_raw(lp.0 as *mut Vec<launcher::RecentFile>);
             with_app(move |a| a.launcher.set_recent(*list));
@@ -879,6 +898,9 @@ impl App {
             switcher: Switcher::new(switcher_hwnd, switcher_backdrop),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
+            clips: None,
+            clip_tx: clipboard::spawn(),
+            clip_target: HWND::default(),
             tray_rect: RECT::default(),
             outside_close: None,
             shell_msg: unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) },
@@ -1068,6 +1090,12 @@ impl App {
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.quick.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        if let Some(c) = &mut self.clips {
+            c.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            if !self.cfg.shortcut_win_v {
+                c.hide();
+            }
+        }
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.notch_blur = theme::style_backdrop(
@@ -1324,6 +1352,9 @@ impl App {
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
         }
+        if self.clips.as_ref().is_some_and(|c| c.hwnd == hwnd) {
+            return self.handle_clips(m, wp, lp);
+        }
         if hwnd == self.widgets.hwnd {
             return self.handle_widgets(m, wp, lp);
         }
@@ -1504,6 +1535,15 @@ impl App {
                 self.dirty = true;
             }
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
+            msg::CLIP_PASTE => {
+                // The item is on the clipboard: back to the app, then paste.
+                if wp.0 == 1 && !self.clip_target.is_invalid() {
+                    dock::focus_window(self.clip_target);
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_PASTE, 60, None);
+                    }
+                }
+            }
             WM_DEVICECHANGE => {
                 if let Some(c) = unsafe { devices::parse(wp, lp) } {
                     self.on_device(c);
@@ -1896,6 +1936,7 @@ impl App {
                 self.retarget();
             }
             TIMER_TICK => self.dirty = true,
+            TIMER_PASTE => shell::paste(),
             TIMER_LENS => {
                 // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
                 if !crate::lens::refresh() {
@@ -2088,6 +2129,9 @@ impl App {
 
     fn right_click_target(&mut self, hwnd: HWND) -> RightClick {
         if hwnd == self.widgets.hwnd || hwnd == self.switcher.overlay {
+            return RightClick::Nothing;
+        }
+        if self.clips.as_ref().is_some_and(|c| c.hwnd == hwnd) {
             return RightClick::Nothing;
         }
         if hwnd == self.flyout.hwnd {
@@ -2288,6 +2332,10 @@ impl App {
         }
         if self.quick.open {
             self.quick.hide();
+            closed = true;
+        }
+        if let Some(c) = self.clips.as_mut().filter(|c| c.open) {
+            c.hide();
             closed = true;
         }
         if self.widgets.open {
@@ -3085,6 +3133,10 @@ impl App {
             b'N' => self.toggle_widgets(),
             b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
             b'A' => self.open_controls(),
+            b'V' => match &mut self.clips {
+                Some(c) if c.open => c.hide(),
+                _ => self.open_clips(),
+            },
             _ => {}
         }
     }
@@ -3108,6 +3160,114 @@ impl App {
         };
         let laptop = battery().is_some();
         self.quick.show(left, bottom, monitor, laptop, keyboard, k);
+    }
+
+    /// The Win+V menu, by the text cursor in the app in front (or the pointer
+    /// when the app doesn't say where its cursor is).
+    fn open_clips(&mut self) {
+        let fg = unsafe { GetForegroundWindow() };
+        if self.clips.as_ref().is_none_or(|c| c.hwnd != fg) {
+            self.clip_target = fg;
+        }
+        if self.clips.is_none() {
+            let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+            let (Ok(hwnd), Ok(backdrop)) =
+                (create_window(w!("CascadeWindow"), self.instance, ex), Backdrop::create(self.instance))
+            else {
+                return;
+            };
+            let mut menu = ClipMenu::new(hwnd, backdrop);
+            menu.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            self.clips = Some(menu);
+        }
+        let at = clipboard::caret().unwrap_or_else(|| {
+            let mut p = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+            }
+            p
+        });
+        let bounds = shell::work_area_of(RECT { left: at.x, top: at.y, right: at.x + 1, bottom: at.y + 1 });
+        let k = unsafe {
+            let mon = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
+            let (mut dx, mut dy) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            dx.max(48) as f32 / 96.0
+        };
+        self.preview.hide();
+        self.launcher.hide();
+        self.quick.hide();
+        if let Some(c) = &mut self.clips {
+            c.show(at.x, at.y, bounds, k);
+        }
+        // Read once it's in front: Windows only hands the history to the app in front.
+        let _ = self.clip_tx.send(ClipCmd::Refresh);
+    }
+
+    fn run_clip(&mut self, action: clipboard::Action) {
+        use clipboard::Action;
+        let close = |a: &mut Self| {
+            if let Some(c) = &mut a.clips {
+                c.hide();
+            }
+        };
+        match action {
+            Action::Paste(id) => {
+                close(self);
+                let _ = self.clip_tx.send(ClipCmd::Paste(id));
+            }
+            Action::Delete(id) => {
+                let _ = self.clip_tx.send(ClipCmd::Delete(id));
+            }
+            Action::Clear => {
+                let _ = self.clip_tx.send(ClipCmd::Clear);
+            }
+            Action::Settings => {
+                close(self);
+                shell::open("ms-settings:clipboard");
+            }
+            Action::Windows => {
+                close(self);
+                shell::win_combo(b'V' as u16);
+            }
+            Action::Close => close(self),
+        }
+    }
+
+    fn handle_clips(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let c = self.clips.as_mut()?;
+        let action = match m {
+            WM_ACTIVATE => {
+                // Clicking anywhere else closes it.
+                if wp.0 & 0xFFFF == 0 {
+                    c.hide();
+                }
+                return None;
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                c.on_move(x, y);
+                None
+            }
+            WM_MOUSELEAVE => {
+                c.on_leave();
+                None
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                c.on_click(x, y)
+            }
+            WM_MOUSEWHEEL => {
+                c.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+                None
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => c.on_key(wp.0 as u16),
+            _ => return None,
+        };
+        if let Some(a) = action {
+            self.run_clip(a);
+        }
+        Some(LRESULT(0))
     }
 
     fn run_quick(&mut self, action: quickmenu::Action) {
@@ -3286,6 +3446,7 @@ impl App {
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
             || self.quick.wants_frame()
+            || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
     }
@@ -3381,6 +3542,12 @@ impl App {
             let t = self.perf.start();
             let _ = self.quick.render(&mut self.gfx);
             self.perf.end(Surface::Quick, t);
+        }
+        if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
+            fast |= c.step(dt);
+            let t = self.perf.start();
+            let _ = c.render(&mut self.gfx);
+            self.perf.end(Surface::Clipboard, t);
         }
         if self.switcher.wants_frame() {
             fast |= self.switcher.animate(dt);

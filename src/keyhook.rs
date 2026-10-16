@@ -1,6 +1,6 @@
 //! Global keyboard hook: opens the Cascade launcher on a lone Win key press,
 //! drives the Alt+Tab switcher, and takes the Win+key shortcuts Cascade has
-//! its own menus for (Win+X, Win+N, Win+A, each only when turned on). Every
+//! its own menus for (Win+X, Win+N, Win+A, Win+V, each only when turned on). Every
 //! other Win+key (Win+E, Win+R, Win+Shift+S...) is left completely alone.
 //!
 //! A shortcut's key press and release are kept from Windows, so it never
@@ -312,6 +312,7 @@ pub fn shortcuts(cfg: &crate::config::Config) -> u32 {
         // The widgets panel opens from Cascade's taskbar, and Controls are in the notch.
         | bit(b'N', cfg.shortcut_win_n && cfg.dock)
         | bit(b'A', cfg.shortcut_win_a && cfg.notch)
+        | bit(b'V', cfg.shortcut_win_v)
 }
 
 /// Turns the Win-key launcher, the Alt+Tab switcher and the Win+key
