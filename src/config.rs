@@ -222,6 +222,9 @@ github_token =
 # ---- General ----
 # Frame-rate cap while animating (also capped to your refresh rate).
 max_fps = 144
+# Write each surface's render time and frame rate to cascade.log about once a
+# second while something animates (for measuring; costs nothing when off).
+perf_log = false
 ";
 
 #[derive(Clone, Debug)]
@@ -316,6 +319,7 @@ pub struct Config {
     pub update_check: bool,
     pub github_token: String,
     pub max_fps: u32,
+    pub perf_log: bool,
 }
 
 impl Default for Config {
@@ -410,6 +414,7 @@ impl Default for Config {
             update_check: true,
             github_token: String::new(),
             max_fps: 144,
+            perf_log: false,
         }
     }
 }
@@ -636,6 +641,7 @@ impl Config {
                 "update_check" => set_b(&mut c.update_check),
                 "github_token" => c.github_token = v.trim_matches('"').to_string(),
                 "max_fps" => set_u(&mut c.max_fps, 15.0, 500.0),
+                "perf_log" => set_b(&mut c.perf_log),
                 _ => {}
             }
         }
@@ -761,6 +767,7 @@ impl Config {
             "update_check" => b(self.update_check),
             "github_token" => self.github_token.clone(),
             "max_fps" => self.max_fps.to_string(),
+            "perf_log" => b(self.perf_log),
             _ => String::new(),
         }
     }

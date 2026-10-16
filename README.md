@@ -135,7 +135,7 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
 
-Frames are only drawn while something is animating; the taskbar clock costs one redraw a minute. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep. The acrylic blur is done by Windows' own compositor, the same way the real taskbar gets it, so it costs Cascade nothing.
+Frames are only drawn while something is animating; the taskbar clock costs one redraw a minute. To see what each surface costs on your machine, set `perf_log = true` in the config: while something animates, `cascade.log` gets each surface's average render time and frame rate about once a second. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep. The acrylic blur is done by Windows' own compositor, the same way the real taskbar gets it, so it costs Cascade nothing.
 
 Cascade also never injects code into Explorer or patches Windows files, unlike Explorer mods. It draws its own windows next to Explorer, so Windows updates have nothing of it to break.
 

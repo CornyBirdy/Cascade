@@ -133,6 +133,70 @@ enum PeekKind {
     Device,
 }
 
+/// The surfaces `perf_log` times.
+#[derive(Clone, Copy)]
+enum Surface {
+    Notch,
+    Dock,
+    /// The other screens' taskbars, together.
+    Screens,
+    Launcher,
+    Flyout,
+    Quick,
+    Widgets,
+    Switcher,
+}
+
+const SURFACES: [&str; 8] = ["notch", "dock", "screens", "launcher", "flyout", "quick", "widgets", "switcher"];
+
+/// Each surface's render time and frame count, written to the log about once
+/// a second while `perf_log` is on (and nothing at all while it's off).
+struct Perf {
+    on: bool,
+    since: Instant,
+    total: [Duration; SURFACES.len()],
+    frames: [u32; SURFACES.len()],
+}
+
+impl Perf {
+    fn new(on: bool) -> Self {
+        Self { on, since: Instant::now(), total: [Duration::ZERO; SURFACES.len()], frames: [0; SURFACES.len()] }
+    }
+
+    fn start(&self) -> Option<Instant> {
+        self.on.then(Instant::now)
+    }
+
+    fn end(&mut self, s: Surface, started: Option<Instant>) {
+        if let Some(t) = started {
+            self.total[s as usize] += t.elapsed();
+            self.frames[s as usize] += 1;
+        }
+    }
+
+    /// "perf: notch 0.42 ms 60 fps | dock 1.80 ms 30 fps", for the surfaces drawn.
+    fn flush(&mut self) {
+        if !self.on {
+            return;
+        }
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let parts: Vec<String> = (0..SURFACES.len())
+            .filter(|&i| self.frames[i] > 0)
+            .map(|i| {
+                let ms = self.total[i].as_secs_f64() * 1000.0 / self.frames[i] as f64;
+                format!("{} {ms:.2} ms {:.0} fps", SURFACES[i], self.frames[i] as f64 / secs)
+            })
+            .collect();
+        if !parts.is_empty() {
+            config::log(&format!("perf: {}", parts.join(" | ")));
+        }
+        *self = Self::new(true);
+    }
+}
+
 /// A USB device being announced in the notch.
 struct DeviceNote {
     device: Device,
@@ -307,6 +371,8 @@ struct App {
 
     message: String,
     message_color: Color,
+    /// Render times, logged with `perf_log`.
+    perf: Perf,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
     update_available: Option<u32>,
@@ -814,6 +880,7 @@ impl App {
             message: String::new(),
             message_color: theme::accent(),
             device: None,
+            perf: Perf::new(cfg.perf_log),
             update_available: None,
             updating: false,
             cfg,
@@ -2128,6 +2195,7 @@ impl App {
             }
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
+        self.perf = Perf::new(self.cfg.perf_log);
         self.update_display();
         self.apply_taskbar();
         self.apply_flyout();
@@ -3217,7 +3285,9 @@ impl App {
             self.tabs_fade.step(dt);
             fast |= self.level.step(dt);
             self.dirty = false;
+            let t = self.perf.start();
             let _ = self.render();
+            self.perf.end(Surface::Notch, t);
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
@@ -3234,7 +3304,9 @@ impl App {
                 art,
                 bars,
             };
+            let t = self.perf.start();
             let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);
+            self.perf.end(Surface::Dock, t);
             if let Some(h) = self.systray.hwnd {
                 let r = self.dock.bar_rect();
                 if r != self.tray_rect {
@@ -3250,21 +3322,29 @@ impl App {
             for d in &mut self.screens {
                 if d.wants_frame() {
                     fast |= d.step(dt);
+                    let t = self.perf.start();
                     let _ = d.render(&mut self.gfx, &status, None, &mut self.systray, &data);
+                    self.perf.end(Surface::Screens, t);
                 }
             }
         }
         if self.flyout.wants_frame() {
             fast |= self.flyout.step(dt);
+            let t = self.perf.start();
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
+            self.perf.end(Surface::Flyout, t);
         }
         if self.quick.wants_frame() {
             fast |= self.quick.step(dt);
+            let t = self.perf.start();
             let _ = self.quick.render(&mut self.gfx);
+            self.perf.end(Surface::Quick, t);
         }
         if self.switcher.wants_frame() {
             fast |= self.switcher.animate(dt);
+            let t = self.perf.start();
             let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
+            self.perf.end(Surface::Switcher, t);
         }
         if self.widgets.wants_frame() {
             fast |= self.widgets.step(dt);
@@ -3279,7 +3359,9 @@ impl App {
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
             };
+            let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);
+            self.perf.end(Surface::Widgets, t);
         }
         // Stats are read faster while the panel is open.
         if self.widgets.open != self.widgets_seen {
@@ -3314,8 +3396,11 @@ impl App {
             let d = self.pd();
             let anchor = if d.shown { d.start_anchor() } else { None };
             let monitor = if self.pop == 0 { self.monitor } else { d.monitor() };
+            let t = self.perf.start();
             let _ = self.launcher.render(&mut self.gfx, &mut self.dock, monitor, bottom, anchor);
+            self.perf.end(Surface::Launcher, t);
         }
+        self.perf.flush();
 
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.
