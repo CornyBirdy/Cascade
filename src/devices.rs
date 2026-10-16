@@ -47,8 +47,7 @@ struct InterfaceFilter {
 /// Asks Windows to tell `hwnd` about USB devices coming and going (serial
 /// ports are announced to every window anyway).
 pub fn listen(hwnd: HWND) {
-    use windows::Win32::System::Power::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::UI::WindowsAndMessaging::{RegisterDeviceNotificationW, DEVICE_NOTIFY_WINDOW_HANDLE};
     let filter = InterfaceFilter {
         size: std::mem::size_of::<InterfaceFilter>() as u32,
         kind: DBT_DEVTYP_DEVICEINTERFACE,
