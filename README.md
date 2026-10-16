@@ -94,7 +94,7 @@ It doesn't watch the mouse at all: thin invisible strips along the shared edges 
 
 ## Settings
 
-Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Starting Cascade again while it's already running also opens Settings.
+Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Settings that wouldn't do anything as things are set up stay out of the way: the lip's length shows only in Lip style, the notch's width only in Notch style, the custom colour only with Custom picked, the Start menu's parts only with Cascade's Start menu on, and so on. They come back as soon as they'd make a difference. When one needs something on another page (Win+N needs Cascade's taskbar), its description says so, in amber. Starting Cascade again while it's already running also opens Settings.
 
 ## Running it
 

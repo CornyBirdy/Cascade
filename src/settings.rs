@@ -112,11 +112,6 @@ fn row_h(r: &Row) -> f32 {
     }
 }
 
-/// Distance from the top of the first row to the top of row `i` of a section.
-fn row_offset(section: usize, i: usize) -> f32 {
-    rows(section).iter().take(i).map(|r| row_h(r) + ROW_GAP).sum()
-}
-
 fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
     Ctl::Slider { min, max, step, unit }
 }
@@ -391,7 +386,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "theme_hue",
                 "Custom colour",
-                "Drag to pick one (switches to Custom).",
+                "Drag to pick one.",
                 slider(0.0, 360.0, 1.0, Unit::Degrees),
             ),
             row(
@@ -459,7 +454,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "live_activity",
                 "Live activity",
-                "Show it on the closed notch: the Notch style grows to show album art or the timer, the Lip lights a coloured line. Off: the closed notch stays plain.",
+                "Show it on the closed notch. Off: it stays plain.",
                 Toggle,
             ),
             row(
@@ -471,7 +466,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "lip_visualizer",
                 "Moving lip line",
-                "Lip style (or a notch on a side edge): the coloured line pulses with the music instead of staying still. Needs Live activity.",
+                "The coloured line pulses out from the middle with the music instead of staying still.",
                 Toggle,
             ),
             heading("h_more", "Pop-ups, size and hover"),
@@ -616,7 +611,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "shortcut_win_n",
                 "Win+N",
-                "The widgets panel, with your notifications and the calendar. Needs Cascade's taskbar.",
+                "The widgets panel, with your notifications and the calendar.",
                 Toggle,
             ),
             row(
@@ -727,6 +722,112 @@ fn rows(section: usize) -> Vec<Row> {
     }
 }
 
+/// Whether row `key` of `section` would change anything with the other
+/// settings as they are. Rows that wouldn't (a lip setting in Notch style,
+/// the Start menu's parts with Cascade's Start menu off) are left out, and
+/// come back as soon as they would.
+fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
+    let on = |k: &str| get(k) == "true";
+    let lip = get("notch_style") == "lip";
+    let side = matches!(get("notch_edge").as_str(), "left" | "right");
+    match (section, key) {
+        // Appearance: what the theme picked can use.
+        (1, "theme_hue") => get("theme_color") == "custom",
+        // With no colour everything is grey already.
+        (1, "theme_intensity") => get("theme_color") != "neutral",
+        (1, "acrylic" | "refraction") => {
+            let theme = get("theme");
+            let t = theme::THEMES.iter().find(|t| t.key == theme).copied().unwrap_or(theme::THEMES[0]);
+            t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
+        }
+        // Notch.
+        (2, "notch") => true,
+        (2, _) if !on("notch") => false,
+        (2, "lip_width" | "lip_height") => lip,
+        (2, "idle_width") => !lip,
+        // The line only shows on a slim strip, and only with Live activity.
+        (2, "lip_visualizer") => on("live_activity") && (lip || side),
+        (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
+        // Taskbar.
+        (3, "dock") => true,
+        (3, _) if !on("dock") => false,
+        (3, "status_click") => on("show_status"),
+        // Start menu: the helper also serves Alt+Tab and the shortcuts.
+        (4, "launcher" | "admin_helper") => true,
+        (4, _) if !on("launcher") => false,
+        (4, "start_columns" | "start_pinned_rows") => on("start_show_pinned"),
+        (4, k) if k.starts_with("start_place_") => on("start_show_sidebar"),
+        (4, "start_sidebar_compact" | "start_show_profile" | "start_show_cascade") => on("start_show_sidebar"),
+        // Widgets: settings for widgets that aren't placed anywhere.
+        (6, "widget_visualizer") => {
+            let bar = Board::Taskbar.read(get);
+            bar[..2].iter().any(|l| l.contains(&"music")) || Board::Panel.read(get)[0].contains(&"media")
+        }
+        // The open panel always reads once a second; this is the taskbar's.
+        (6, "stats_seconds") => {
+            Board::Taskbar.read(get)[..2].iter().flatten().any(|n| matches!(*n, "cpu" | "ram" | "gpu" | "net"))
+        }
+        (6, "widgets_columns") => Board::Panel.read(get)[0].len() > 1,
+        // Screens.
+        (7, "mouse_align" | "screen_inches") => on("mouse_match"),
+        // Weather.
+        (8, "weather_location" | "fahrenheit" | "weather_click") => on("weather"),
+        (8, "weather_url") => on("weather") && get("weather_click") == "custom",
+        _ => true,
+    }
+}
+
+/// The rows of `section` that apply (see `shown`), without headings left
+/// with nothing under them.
+fn visible_rows(section: usize, get: &dyn Fn(&str) -> String) -> Vec<Row> {
+    let mut out: Vec<Row> = Vec::new();
+    for r in rows(section).into_iter().filter(|r| matches!(r.ctl, Ctl::Heading) || shown(section, r.key, get)) {
+        if matches!(r.ctl, Ctl::Heading) && out.last().is_some_and(|l| matches!(l.ctl, Ctl::Heading)) {
+            out.pop();
+        }
+        out.push(r);
+    }
+    if out.last().is_some_and(|l| matches!(l.ctl, Ctl::Heading)) {
+        out.pop();
+    }
+    out
+}
+
+/// Descriptions that depend on other settings: what a row does with the
+/// notch as it's set up, or (true) what it's waiting on elsewhere, shown as
+/// a warning.
+fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, bool)> {
+    let on = |k: &str| get(k) == "true";
+    let lip = get("notch_style") == "lip";
+    let side = matches!(get("notch_edge").as_str(), "left" | "right");
+    let taskbar_off = "Needs Cascade's taskbar: turn on Taskbar > Show the taskbar.";
+    Some(match key {
+        "live_activity" if lip => (
+            "A coloured line lights up on the closed lip, in the album art's colour or showing the timer's progress. Off: the lip stays plain.",
+            false,
+        ),
+        "live_activity" if side => (
+            "A coloured line lights up on the closed notch, in the album art's colour or showing the timer's progress. Off: it stays plain.",
+            false,
+        ),
+        "live_activity" => {
+            ("The closed notch grows to show the album art or the timer. Off: it stays plain.", false)
+        }
+        // Without the notch growing for music, the Media tab is all that's left.
+        "visualizer" if lip || side || !on("live_activity") => ("Moving bars on the open notch's Media tab.", false),
+        "shortcut_win_n" if !on("dock") => (taskbar_off, true),
+        "shortcut_win_a" if !on("notch") => ("Needs the notch: turn on Notch > Show the notch.", true),
+        "status_click" if get("status_click") == "notch" && !on("notch") => {
+            ("The notch is off, so they open Windows' quick settings.", true)
+        }
+        "taskbar_board" | "panel_board" if !on("dock") => (taskbar_off, true),
+        "start_opacity" if !on("launcher") => {
+            ("Needs Cascade's Start menu: turn on Start menu > Cascade Start menu.", true)
+        }
+        _ => return None,
+    })
+}
+
 fn fmt(v: f32, unit: Unit) -> String {
     match unit {
         Unit::Fps => format!("{v:.0} fps"),
@@ -792,9 +893,10 @@ pub struct Settings {
     tracking: bool,
     drag: Option<(usize, f32)>,
     tile_drag: Option<TileDrag>,
-    /// Text boxes: window, row index, and the text they were loaded with (only
-    /// a box the user actually edited is written back).
-    edits: Vec<(HWND, usize, String)>,
+    /// Text boxes: window, row key, and the text they were loaded with (only
+    /// a box the user actually edited is written back). Every text row of the
+    /// section has one; those of rows left out are hidden.
+    edits: Vec<(HWND, &'static str, String)>,
     font: HFONT,
     pub brush: HBRUSH,
     measure: Option<Measure>,
@@ -802,11 +904,12 @@ pub struct Settings {
     fit: RefCell<Fit>,
 }
 
-/// Row heights (descriptions wrap onto more lines) and segmented-button
-/// widths, measured for one section.
+/// The rows shown (see `shown`), their heights (descriptions wrap onto
+/// more lines) and segmented-button widths, worked out for one section.
 #[derive(Default)]
 struct Fit {
     section: Option<usize>,
+    keys: Vec<&'static str>,
     heights: Vec<f32>,
     segs: Vec<f32>,
 }
@@ -920,8 +1023,26 @@ impl Settings {
         CW - SIDEBAR - 24.0 - 28.0
     }
 
+    /// The current section's rows as shown: those that apply with the
+    /// settings as they were when last painted.
+    fn rows(&self) -> Vec<Row> {
+        let fit = self.fit.borrow();
+        let all = rows(self.section);
+        if fit.section != Some(self.section) {
+            return all;
+        }
+        all.into_iter().filter(|r| fit.keys.contains(&r.key)).collect()
+    }
+
+    /// How far the page is scrolled, kept in range when rows above the end
+    /// are left out.
+    fn scroll(&self) -> f32 {
+        let content = TOP + self.offset(usize::MAX) + 16.0;
+        self.scroll.min((content - CH).max(0.0))
+    }
+
     fn row_y(&self, i: usize) -> f32 {
-        TOP + self.offset(i) - self.scroll
+        TOP + self.offset(i) - self.scroll()
     }
 
     /// Height of row `i` of the current section.
@@ -929,7 +1050,7 @@ impl Settings {
         let fit = self.fit.borrow();
         match fit.heights.get(i) {
             Some(&h) if fit.section == Some(self.section) => h,
-            _ => rows(self.section).get(i).map_or(ROW_H, row_h),
+            _ => self.rows().get(i).map_or(ROW_H, row_h),
         }
     }
 
@@ -939,7 +1060,8 @@ impl Settings {
         if fit.section == Some(self.section) {
             return fit.heights.iter().take(i).map(|h| h + ROW_GAP).sum();
         }
-        row_offset(self.section, i)
+        drop(fit);
+        self.rows().iter().take(i).map(|r| row_h(r) + ROW_GAP).sum()
     }
 
     /// Width of each segment of row `i`'s segmented buttons.
@@ -977,6 +1099,8 @@ impl Settings {
             crate::mouseedge::info()
         } else if r.key == "resources" {
             crate::usage::summary()
+        } else if let Some((text, warn)) = live_desc(r.key, get) {
+            return (text.to_string(), if warn { WARN } else { Color::white(0.55) }, None);
         } else if r.key == "admin_helper" && get(r.key) == "true" {
             // Live status, so it's clear whether it's working.
             if crate::helper::running() {
@@ -993,25 +1117,34 @@ impl Settings {
         note.unwrap_or((desc, Color::white(0.55), None))
     }
 
-    /// Sizes the current section's rows to their text: segmented buttons
-    /// wide enough for their labels, descriptions wrapped instead of cut
-    /// off. Returns whether anything moved.
+    /// Picks the current section's rows that apply and sizes them to their
+    /// text: segmented buttons wide enough for their labels, descriptions
+    /// wrapped instead of cut off. Returns whether anything moved.
     fn refit(&self, get: &dyn Fn(&str) -> String, build: u32) -> bool {
-        let Some(m) = &self.measure else { return false };
-        let rows = rows(self.section);
+        let rows = visible_rows(self.section, get);
+        let m = self.measure.as_ref();
         let segs: Vec<f32> = rows
             .iter()
-            .map(|r| match r.ctl {
-                Ctl::Choice(opts) => {
+            .map(|r| match (&r.ctl, m) {
+                (Ctl::Choice(opts), Some(m)) => {
                     opts.iter().map(|(_, l)| (m.width(l, &m.body) + 28.0).ceil()).fold(CHOICE_W, f32::max)
                 }
-                _ => 0.0,
+                _ => CHOICE_W,
             })
             .collect();
         let before = std::mem::replace(
             &mut *self.fit.borrow_mut(),
-            Fit { section: Some(self.section), heights: rows.iter().map(row_h).collect(), segs },
+            Fit {
+                section: Some(self.section),
+                keys: rows.iter().map(|r| r.key).collect(),
+                heights: rows.iter().map(row_h).collect(),
+                segs,
+            },
         );
+        let Some(m) = m else {
+            let fit = self.fit.borrow();
+            return before.section != fit.section || before.keys != fit.keys;
+        };
         let heights: Vec<f32> = rows
             .iter()
             .enumerate()
@@ -1031,17 +1164,25 @@ impl Settings {
             .collect();
         let mut fit = self.fit.borrow_mut();
         fit.heights = heights;
-        before.section != fit.section || before.heights != fit.heights || before.segs != fit.segs
+        before.section != fit.section
+            || before.keys != fit.keys
+            || before.heights != fit.heights
+            || before.segs != fit.segs
     }
 
-    /// Moves the text boxes onto their rows (after rows above changed height).
+    /// Moves the text boxes onto their rows (after rows above changed height
+    /// or were left out), hiding those whose rows are left out.
     fn place_edits(&self) {
         let k = self.k;
         let pad = (6.0 * k) as i32;
-        for &(e, i, _) in &self.edits {
-            let Some(r) = rows(self.section).into_iter().nth(i) else { continue };
-            let (x, y, w, h) = self.ctl_rect(i, &r.ctl);
+        let rows = self.rows();
+        for &(e, key, _) in &self.edits {
             unsafe {
+                let Some(i) = rows.iter().position(|r| r.key == key) else {
+                    let _ = ShowWindow(e, SW_HIDE);
+                    continue;
+                };
+                let (x, y, w, h) = self.ctl_rect(i, &rows[i].ctl);
                 let _ = SetWindowPos(
                     e,
                     None,
@@ -1049,7 +1190,7 @@ impl Settings {
                     (y * k) as i32 + pad,
                     (w * k) as i32 - pad * 2,
                     (h * k) as i32 - pad * 2,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
             }
         }
@@ -1105,25 +1246,24 @@ impl Settings {
                 let _ = DestroyWindow(h);
             }
             let instance = GetWindowLongPtrW(self.hwnd, GWLP_HINSTANCE);
+            // One for every text row, shown or not, so a row coming back
+            // finds its box; `place_edits` puts them on their rows.
             for (i, r) in rows(self.section).iter().enumerate() {
                 let Ctl::Text { secret } = r.ctl else { continue };
-                let (x, y, w, h) = self.ctl_rect(i, &r.ctl);
-                let k = self.k;
-                let mut style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x80); // ES_AUTOHSCROLL
+                let mut style = WS_CHILD | WS_TABSTOP | WINDOW_STYLE(0x80); // ES_AUTOHSCROLL
                 if secret {
                     style |= WINDOW_STYLE(0x20); // ES_PASSWORD
                 }
-                let pad = (6.0 * k) as i32;
                 let loaded = get(r.key);
                 let Ok(e) = CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     w!("EDIT"),
                     &windows::core::HSTRING::from(loaded.as_str()),
                     style,
-                    (x * k) as i32 + pad,
-                    (y * k) as i32 + pad,
-                    (w * k) as i32 - pad * 2,
-                    (h * k) as i32 - pad * 2,
+                    0,
+                    0,
+                    0,
+                    0,
                     Some(self.hwnd),
                     Some(HMENU((1000 + i) as *mut _)),
                     Some(HINSTANCE(instance as *mut _)),
@@ -1132,17 +1272,17 @@ impl Settings {
                     continue;
                 };
                 SendMessageW(e, WM_SETFONT, Some(WPARAM(self.font.0 as usize)), Some(LPARAM(1)));
-                self.edits.push((e, i, loaded));
+                self.edits.push((e, r.key, loaded));
             }
         }
+        self.place_edits();
     }
 
     /// A text box lost focus: returns its new value.
     pub fn commit_edit(&self, edit: HWND) -> Option<Change> {
-        let (_, i, loaded) = self.edits.iter().find(|(h, _, _)| *h == edit)?;
-        let r = rows(self.section).into_iter().nth(*i)?;
+        let (_, key, loaded) = self.edits.iter().find(|(h, _, _)| *h == edit)?;
         let text = edit_text(edit).trim().to_string();
-        (text != loaded.trim()).then_some(Change::Set(r.key, text))
+        (text != loaded.trim()).then_some(Change::Set(key, text))
     }
 
     /// All text boxes' values (when the window closes).
@@ -1156,13 +1296,13 @@ impl Settings {
             let i = ((ly - 24.0) / 40.0).floor();
             return (ly >= 24.0 && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
         }
-        for (i, r) in rows(self.section).iter().enumerate() {
+        for (i, r) in self.rows().iter().enumerate() {
             let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
             if lx >= rx && lx < rx + rs && ly >= ry && ly < ry + rs && changed(r, &get(r.key)).is_some() {
                 return Some(Hit::Reset(i));
             }
         }
-        for (i, r) in rows(self.section).iter().enumerate() {
+        for (i, r) in self.rows().iter().enumerate() {
             if let Ctl::Gallery = r.ctl {
                 let area = self.ctl_rect(i, &r.ctl);
                 for k in 0..theme::THEMES.len() {
@@ -1195,7 +1335,7 @@ impl Settings {
     }
 
     fn slider_value(&self, i: usize, x: i32) -> Option<f32> {
-        let rs = rows(self.section);
+        let rs = self.rows();
         let Ctl::Slider { min, max, step, .. } = rs.get(i)?.ctl else { return None };
         let (cx, _, cw, _) = self.ctl_rect(i, &rs[i].ctl);
         let t = ((x as f32 / self.k - cx) / cw).clamp(0.0, 1.0);
@@ -1248,12 +1388,12 @@ impl Settings {
         let hit = self.hit(x, y, get)?;
         match hit {
             Hit::Reset(i) => {
-                let r = rows(self.section).into_iter().nth(i)?;
+                let r = self.rows().into_iter().nth(i)?;
                 let d = changed(&r, &get(r.key))?;
                 self.hovered = None;
                 if matches!(r.ctl, Ctl::Text { .. }) {
                     // Show the default in the text box straight away.
-                    if let Some((h, _, loaded)) = self.edits.iter_mut().find(|(_, j, _)| *j == i) {
+                    if let Some((h, _, loaded)) = self.edits.iter_mut().find(|(_, key, _)| *key == r.key) {
                         unsafe {
                             let _ = SetWindowTextW(*h, &windows::core::HSTRING::from(d.as_str()));
                         }
@@ -1264,13 +1404,13 @@ impl Settings {
                 Some(Change::Set(r.key, d))
             }
             Hit::Swatch(i, k) => {
-                let r = rows(self.section).into_iter().nth(i)?;
+                let r = self.rows().into_iter().nth(i)?;
                 let value = theme::THEMES.get(k)?.key;
                 self.invalidate();
                 (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
             }
             Hit::Tile(i, j, k) => {
-                let r = rows(self.section).into_iter().nth(i)?;
+                let r = self.rows().into_iter().nth(i)?;
                 let Ctl::Board(b) = r.ctl else { return None };
                 let item = *b.read(get).get(j)?.get(k)?;
                 let (tx, ty) = tile_rect(lane_rect(self.ctl_rect(i, &r.ctl), j), k);
@@ -1294,7 +1434,7 @@ impl Settings {
                 None
             }
             Hit::Row(i) => {
-                let r = rows(self.section).into_iter().nth(i)?;
+                let r = self.rows().into_iter().nth(i)?;
                 match r.ctl {
                     Ctl::Toggle => {
                         let on = get(r.key) == "true";
@@ -1328,7 +1468,7 @@ impl Settings {
                 let _ = ReleaseCapture();
             }
             self.invalidate();
-            let r = rows(self.section).into_iter().nth(d.row)?;
+            let r = self.rows().into_iter().nth(d.row)?;
             let Ctl::Board(b) = r.ctl else { return None };
             let mut lanes = b.read(get);
             for lane in &mut lanes {
@@ -1353,7 +1493,7 @@ impl Settings {
             let _ = ReleaseCapture();
         }
         self.invalidate();
-        let r = rows(self.section).into_iter().nth(i)?;
+        let r = self.rows().into_iter().nth(i)?;
         if r.key == "theme_hue" {
             // Picking a colour means using it.
             return Some(Change::Many(vec![(r.key, format!("{v}")), ("theme_color", "custom".to_string())]));
@@ -1364,8 +1504,8 @@ impl Settings {
     pub fn on_wheel(&mut self, delta: i16, get: &dyn Fn(&str) -> String) {
         let content = TOP + self.offset(usize::MAX) + 16.0;
         let max = (content - CH).max(0.0);
-        let before = self.scroll;
-        self.scroll = (self.scroll - delta as f32 / 120.0 * 60.0).clamp(0.0, max);
+        let before = self.scroll();
+        self.scroll = (before - delta as f32 / 120.0 * 60.0).clamp(0.0, max);
         if self.scroll != before {
             self.sync_edits(get);
             self.invalidate();
@@ -1434,13 +1574,13 @@ impl Settings {
                     SECTIONS[self.section],
                     &f.big,
                     x0,
-                    22.0 - self.scroll,
+                    22.0 - self.scroll(),
                     cw,
                     44.0,
                     Align::Left,
                     Color::white(0.95),
                 );
-                for (i, r) in rows(self.section).iter().enumerate() {
+                for (i, r) in self.rows().iter().enumerate() {
                     let y = self.row_y(i);
                     let h = self.row_h(i);
                     if y + h < 0.0 || y > CH {
@@ -1788,6 +1928,44 @@ mod tests {
         assert_eq!(lanes, vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "widgets"]]);
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
         assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather"]]);
+    }
+
+    fn keys(section: usize, set: &[(&str, &str)]) -> Vec<&'static str> {
+        let get = |k: &str| {
+            set.iter().find(|(s, _)| *s == k).map_or_else(|| Config::default().get(k), |(_, v)| v.to_string())
+        };
+        visible_rows(section, &get).iter().map(|r| r.key).collect()
+    }
+
+    #[test]
+    fn rows_follow_other_settings() {
+        // The lip's own settings only in Lip style, the notch's only in Notch.
+        let lip = keys(2, &[("notch_style", "lip"), ("notch_edge", "top")]);
+        assert!(lip.contains(&"lip_width") && lip.contains(&"lip_visualizer") && !lip.contains(&"idle_width"));
+        let notch = keys(2, &[("notch_style", "notch"), ("notch_edge", "top")]);
+        assert!(notch.contains(&"idle_width") && !notch.contains(&"lip_width") && !notch.contains(&"lip_visualizer"));
+        // ...except that a notch on a side edge rests as a line too.
+        assert!(keys(2, &[("notch_style", "notch"), ("notch_edge", "left")]).contains(&"lip_visualizer"));
+        assert!(!keys(2, &[("notch_style", "lip"), ("live_activity", "false")]).contains(&"lip_visualizer"));
+        // The notch off: only the switch, and no headings left on their own.
+        assert_eq!(keys(2, &[("notch", "false")]), vec!["notch"]);
+        assert_eq!(keys(4, &[("launcher", "false")]), vec!["h_open", "launcher", "admin_helper"]);
+        // A sidebar that's off takes its buttons, and their headings, with it.
+        let start = keys(4, &[("start_show_sidebar", "false")]);
+        assert!(!start.iter().any(|k| k.starts_with("start_place_") || *k == "h_side" || *k == "h_places"));
+        assert!(keys(8, &[("weather", "true"), ("weather_click", "custom")]).contains(&"weather_url"));
+        assert!(!keys(8, &[("weather", "true"), ("weather_click", "google")]).contains(&"weather_url"));
+        assert!(!keys(8, &[("weather", "false"), ("weather_click", "custom")]).contains(&"weather_location"));
+        assert!(!keys(1, &[("theme_color", "theme")]).contains(&"theme_hue"));
+        assert!(keys(1, &[("theme_color", "custom")]).contains(&"theme_hue"));
+        // Refraction only for clear glass that bends light, with the blur on.
+        assert!(keys(1, &[("theme", "liquid_glass"), ("acrylic", "true")]).contains(&"refraction"));
+        assert!(!keys(1, &[("theme", "acrylic"), ("acrylic", "true")]).contains(&"refraction"));
+        assert!(!keys(1, &[("theme", "obsidian")]).contains(&"acrylic"));
+        // Widget settings follow where the widgets are.
+        assert!(!keys(6, &[("taskbar_left", ""), ("taskbar_right", ""), ("widgets_panel", "calendar")])
+            .contains(&"widget_visualizer"));
+        assert!(keys(6, &[("taskbar_left", "music"), ("taskbar_right", "")]).contains(&"widget_visualizer"));
     }
 
     #[test]
