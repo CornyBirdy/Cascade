@@ -740,6 +740,19 @@ fn rows(section: usize) -> Vec<Row> {
                 ]),
             ),
             row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
+            heading("h_calendar", "Calendar"),
+            row(
+                "calendar_url",
+                "Calendar link",
+                "Your calendar's private iCal address (Google: its settings > Secret address in iCal format).",
+                Text { secret: true },
+            ),
+            row(
+                "calendar_soon",
+                "Countdown",
+                "How long before an event the closed notch starts counting down to it.",
+                slider(0.0, 30.0, 1.0, Unit::Min),
+            ),
         ],
         9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
@@ -808,6 +821,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         // Weather.
         (8, "weather_location" | "fahrenheit" | "weather_click") => on("weather"),
         (8, "weather_url") => on("weather") && get("weather_click") == "custom",
+        (8, "calendar_soon") => !get("calendar_url").trim().is_empty(),
         _ => true,
     }
 }

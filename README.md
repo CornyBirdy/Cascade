@@ -12,7 +12,7 @@ The notch lives at the top centre of your main screen. Turn it off in the right-
 - **Hover to open.** Click a tab in the tab bar along the bottom (or scroll, or swipe sideways on a touchpad) to switch between three modes:
   - **Media:** title, artist, progress bar and play/pause/skip buttons. With nothing playing it shows the time, date, weather and battery instead.
   - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
-  - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
+  - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default). Give Cascade your calendar's private iCal link (Settings → Focus & weather → Calendar link; Google Calendar calls it the *Secret address in iCal format*, Outlook lets you publish one) and days with events get a dot, the next few events this week are listed under the month, and in the minutes before each one (10 by default, `calendar_soon`) the closed notch counts down to it: the lip's line fills up, the classic notch shows the event and the minutes left, and it says so when it's coming up and when it starts. Repeating events, moved and cancelled ones are followed. The link is read every 15 minutes on a sleeping thread (`calendar_url`).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
 - **USB devices:** plug in a flight controller and the notch says *Flight controller (STM32) on COM5* with an *Open Betaflight* button (it opens the web configurator, which talks to the board over Web Serial). It knows STM32 and AT32 flight controllers (also in DFU mode), ArduPilot boards, EdgeTX/OpenTX radios plugged in as a joystick, the USB-serial chips on ExpressLRS gear, ESP32 boards, Meta Quest headsets, DJI gear and Android phones. Name your own devices and pick what clicking opens in `devices.txt` (Settings → Notch → *Your devices*), set it to announce any device, and choose whether unplugging shows too (`usb_popups = known | all | off`, `usb_unplug`). Windows tells Cascade when a device comes or goes; nothing is polled.
 - **Fullscreen apps and games:** the notch and taskbar hide automatically.
@@ -170,6 +170,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/radios.rs` | Wi-Fi / Bluetooth toggles |
 | `src/weather.rs` | Open-Meteo over WinHTTP |
 | `src/pomodoro.rs` | Focus timer |
+| `src/calendar.rs`, `src/ics.rs` | Your calendar's events, from its iCal link |
 | `src/icons.rs` | App icons and names |
 | `src/update.rs` | One-click updates from GitHub releases |
 | `src/http.rs` | Tiny WinHTTP client |

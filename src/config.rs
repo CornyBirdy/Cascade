@@ -202,6 +202,15 @@ admin_helper = false
 focus_minutes = 25
 break_minutes = 5
 
+# ---- Calendar ----
+# Your calendar's private iCal (.ics) link, for its events in the notch: the
+# Calendar tab's agenda and dots, and a countdown on the closed notch before
+# each event. Google Calendar: Settings > your calendar > Secret address in
+# iCal format. Outlook: Settings > Calendar > Shared calendars > Publish.
+calendar_url =
+# Minutes before an event that the countdown starts (0 = none).
+calendar_soon = 10
+
 # ---- Weather (Open-Meteo, no account needed) ----
 weather = true
 # Empty = detect from your IP. Or a city name (\"Town, Country\" to pick
@@ -314,6 +323,8 @@ pub struct Config {
     pub start_opacity: f32,
     pub focus_minutes: u32,
     pub break_minutes: u32,
+    pub calendar_url: String,
+    pub calendar_soon: u32,
     pub weather: bool,
     pub weather_location: String,
     pub weather_click: String,
@@ -410,6 +421,8 @@ impl Default for Config {
             shortcut_win_v: true,
             focus_minutes: 25,
             break_minutes: 5,
+            calendar_url: String::new(),
+            calendar_soon: 10,
             weather: true,
             weather_location: String::new(),
             weather_click: "panel".into(),
@@ -636,6 +649,8 @@ impl Config {
                 "shortcut_win_v" => set_b(&mut c.shortcut_win_v),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
+                "calendar_url" => c.calendar_url = v.trim_matches('"').to_string(),
+                "calendar_soon" => set_u(&mut c.calendar_soon, 0.0, 60.0),
                 "weather" => set_b(&mut c.weather),
                 "weather_location" => c.weather_location = v.trim_matches('"').to_string(),
                 "weather_click" if matches!(v, "panel" | "google" | "bing" | "custom" | "none") => {
@@ -765,6 +780,8 @@ impl Config {
             "shortcut_win_v" => b(self.shortcut_win_v),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
+            "calendar_url" => self.calendar_url.clone(),
+            "calendar_soon" => self.calendar_soon.to_string(),
             "weather" => b(self.weather),
             "weather_location" => self.weather_location.clone(),
             "weather_click" => self.weather_click.clone(),

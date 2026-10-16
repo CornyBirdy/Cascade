@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
+use crate::calendar;
 use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
 use crate::devices::{self, Device};
@@ -38,6 +39,7 @@ use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
 use crate::helper;
 use crate::icons::{self, IconResult};
+use crate::ics::{self, DAY};
 use crate::keyhook;
 use crate::launcher::{self, AppEntry, Launcher};
 use crate::media::{self, Art, MediaCmd, MediaInfo};
@@ -88,6 +90,9 @@ const TIMER_NOTIFS: usize = 18;
 const TIMER_LENS: usize = 19;
 /// Pastes a clipboard item once the app it's for is in front again.
 const TIMER_PASTE: usize = 20;
+/// The next moment the calendar needs a look: a countdown to show or step,
+/// or an event starting.
+const TIMER_CAL: usize = 21;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -391,6 +396,13 @@ struct App {
     lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
+    /// Your calendar's events (this month and the next six weeks), the
+    /// reader, the link it was last given, and what's been announced:
+    /// (event start, 0 coming up / 1 starting).
+    events: Vec<ics::Event>,
+    cal_tx: Sender<String>,
+    cal_url: String,
+    cal_said: Vec<(i64, u8)>,
     update_available: Option<u32>,
     updating: bool,
 }
@@ -625,6 +637,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::CALENDAR => {
+            let events = Box::from_raw(lp.0 as *mut Vec<ics::Event>);
+            with_app(move |a| a.on_events(*events));
+            return LRESULT(0);
+        }
         msg::CLIPS => {
             let c = Box::from_raw(lp.0 as *mut clipboard::Clips);
             with_app(move |a| {
@@ -726,6 +743,58 @@ fn date_text(format: PCWSTR) -> String {
     unsafe {
         let n = GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), None, format, Some(&mut d), PCWSTR::null());
         String::from_utf16_lossy(&d[..(n.max(1) - 1) as usize])
+    }
+}
+
+/// Local-seconds time `t` (see `ics`) in a date `format` ("ddd", "d MMM").
+fn date_at(t: i64, format: PCWSTR) -> String {
+    let st = calendar::system_time(t);
+    let mut d = [0u16; 64];
+    unsafe {
+        let n = GetDateFormatEx(
+            PCWSTR::null(),
+            ENUM_DATE_FORMATS_FLAGS(0),
+            Some(&st as *const SYSTEMTIME),
+            format,
+            Some(&mut d),
+            PCWSTR::null(),
+        );
+        String::from_utf16_lossy(&d[..(n.max(1) - 1) as usize])
+    }
+}
+
+/// The time of day of `t`, as the clock shows it ("10:30", "10:30 am").
+fn time_at(t: i64) -> String {
+    let st = calendar::system_time(t);
+    let mut b = [0u16; 32];
+    unsafe {
+        let n = GetTimeFormatEx(
+            PCWSTR::null(),
+            TIME_NOSECONDS,
+            Some(&st as *const SYSTEMTIME),
+            PCWSTR::null(),
+            Some(&mut b),
+        );
+        String::from_utf16_lossy(&b[..(n.max(1) - 1) as usize])
+    }
+}
+
+/// When an event is, for the agenda: "Now", "Today 10:30", "Tomorrow",
+/// "Fri 9:00".
+fn when(e: &ics::Event, now: i64) -> String {
+    if e.start <= now && e.end > now && !e.all_day {
+        return "Now".into();
+    }
+    let days = e.start.div_euclid(DAY) - now.div_euclid(DAY);
+    let day = match days {
+        ..=0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        _ => date_at(e.start, w!("ddd")),
+    };
+    if e.all_day {
+        day
+    } else {
+        format!("{day} {}", time_at(e.start))
     }
 }
 
@@ -919,6 +988,10 @@ impl App {
             message: String::new(),
             message_color: theme::accent(),
             device: None,
+            events: Vec::new(),
+            cal_tx: calendar::spawn(),
+            cal_url: String::new(),
+            cal_said: Vec::new(),
             perf: Perf::new(cfg.perf_log),
             lens_wanted: false,
             lens_on: false,
@@ -931,6 +1004,7 @@ impl App {
     fn start(&mut self) {
         shell::ensure_shortcuts();
         launcher::spawn_scan();
+        self.apply_calendar();
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
         }
@@ -1146,7 +1220,7 @@ impl App {
             View::Peek
         } else if self.expanded {
             View::Expanded
-        } else if self.cfg.live_activity && (self.playing() || self.pomo.running()) {
+        } else if self.cfg.live_activity && (self.playing() || self.pomo.running() || self.countdown().is_some()) {
             View::Live
         } else {
             View::Idle
@@ -1197,7 +1271,7 @@ impl App {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
                 Mode::Controls => (420.0, 154.0 + TAB_BAR, 30.0),
-                Mode::Calendar => (420.0, 194.0 + TAB_BAR, 30.0),
+                Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
         };
         (w, h, if lip { self.lip_radius() } else { r })
@@ -1631,6 +1705,108 @@ impl App {
         }
     }
 
+    /// Hands the calendar reader its link when it changed (empty stops it).
+    fn apply_calendar(&mut self) {
+        if self.cfg.calendar_url.trim() != self.cal_url {
+            self.cal_url = self.cfg.calendar_url.trim().to_string();
+            let _ = self.cal_tx.send(self.cal_url.clone());
+            if self.cal_url.is_empty() {
+                self.events.clear();
+                self.retarget();
+                self.arm_calendar();
+            }
+        }
+    }
+
+    fn on_events(&mut self, events: Vec<ics::Event>) {
+        if self.cal_url.is_empty() {
+            return; // read before the link was taken away
+        }
+        self.events = events;
+        self.retarget();
+        self.arm_calendar();
+    }
+
+    /// The event counted down to on the closed notch: the next one starting
+    /// within `calendar_soon` minutes, and how far through that wait it is.
+    fn countdown(&self) -> Option<(&ics::Event, f32)> {
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        if soon == 0 || self.cal_url.is_empty() {
+            return None;
+        }
+        let now = calendar::now();
+        let e = self.events.iter().find(|e| !e.all_day && e.start > now && e.start - now <= soon)?;
+        Some((e, 1.0 - (e.start - now) as f32 / soon as f32))
+    }
+
+    /// Says in the notch when an event is coming up, and when it starts.
+    fn announce_events(&mut self) {
+        let now = calendar::now();
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        let mut say = None;
+        for e in self.events.iter().filter(|e| !e.all_day) {
+            let key = |k: u8| (e.start, k);
+            if e.start <= now && now - e.start < 120 && !self.cal_said.contains(&key(1)) {
+                say = Some((key(1), format!("{} \u{2014} now", e.title)));
+                break;
+            }
+            if soon > 0 && e.start > now && e.start - now <= soon && !self.cal_said.contains(&key(0)) {
+                let mins = ((e.start - now) as f32 / 60.0).round().max(1.0);
+                say = Some((key(0), format!("{} in {mins:.0} min", e.title)));
+                break;
+            }
+        }
+        if let Some((key, text)) = say {
+            self.cal_said.push(key);
+            // Only today's are worth remembering.
+            self.cal_said.retain(|(t, _)| now - t < DAY);
+            self.notify(text, theme::accent(), false);
+        }
+    }
+
+    /// Wakes up at the calendar's next moment: every 30 s while counting
+    /// down (to move the line), else when the next countdown or event starts.
+    fn arm_calendar(&mut self) {
+        let now = calendar::now();
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        let next = self
+            .events
+            .iter()
+            .filter(|e| !e.all_day)
+            .flat_map(|e| [e.start - soon, e.start])
+            .filter(|&t| t > now)
+            .min();
+        unsafe {
+            match next {
+                _ if self.countdown().is_some() => {
+                    SetTimer(Some(self.hwnd), TIMER_CAL, 30_000, None);
+                }
+                Some(t) => {
+                    let ms = ((t - now).clamp(1, 3600) * 1000) as u32;
+                    SetTimer(Some(self.hwnd), TIMER_CAL, ms, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_CAL);
+                }
+            }
+        }
+    }
+
+    /// The next few events, for the Calendar tab.
+    fn agenda(&self) -> Vec<&ics::Event> {
+        let now = calendar::now();
+        let until = (now.div_euclid(DAY) + 7) * DAY;
+        calendar::upcoming(&self.events, now).filter(|e| e.start < until).take(3).collect()
+    }
+
+    /// Room for the agenda under the month.
+    fn agenda_h(&self) -> f32 {
+        match self.agenda().len() {
+            0 => 0.0,
+            n => 10.0 + n as f32 * 22.0,
+        }
+    }
+
     fn device_hot(&self) -> bool {
         self.device.as_ref().is_some_and(|d| d.hot)
     }
@@ -1937,6 +2113,11 @@ impl App {
             }
             TIMER_TICK => self.dirty = true,
             TIMER_PASTE => shell::paste(),
+            TIMER_CAL => {
+                self.announce_events();
+                self.retarget();
+                self.arm_calendar();
+            }
             TIMER_LENS => {
                 // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
                 if !crate::lens::refresh() {
@@ -2272,6 +2453,7 @@ impl App {
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         self.perf = Perf::new(self.cfg.perf_log);
+        self.apply_calendar();
         self.update_display();
         self.apply_taskbar();
         self.apply_flyout();
@@ -3866,6 +4048,23 @@ impl App {
             let (bar, gap) = (3.0, 2.2);
             let bars_w = BANDS as f32 * bar + (BANDS - 1) as f32 * gap;
             self.draw_bars(p, ox + tw - 12.0 - bars_w, th / 2.0, bar, gap, th - 12.0, alpha);
+        } else if let Some((e, _)) = self.countdown().filter(|_| !self.pomo.running()) {
+            // The event coming up, and how long until it starts.
+            let mins = ((e.start - calendar::now()) as f32 / 60.0).ceil().max(1.0);
+            p.circle(ox + 16.0, th / 2.0, 4.0, theme::accent().alpha(alpha));
+            let fonts = &self.gfx.fonts;
+            let left = format!("{mins:.0} min");
+            p.text(
+                &e.title,
+                &fonts.label,
+                ox + 26.0,
+                0.0,
+                tw - 26.0 - 62.0,
+                th,
+                Align::Left,
+                Color::white(0.95 * alpha),
+            );
+            p.text(&left, &fonts.num, ox + tw - 60.0, 0.0, 48.0, th, Align::Right, Color::white(0.7 * alpha));
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
             let (cx, cy, r) = (ox + 22.0, th / 2.0, (th / 2.0 - 6.0).max(5.0));
@@ -3918,6 +4117,13 @@ impl App {
             centred(lw * bass, c.alpha(0.95 * alpha));
         } else if self.playing() {
             line(lw, self.accent().alpha(0.9 * alpha));
+        } else if let Some((_, frac)) = self.countdown().filter(|_| !self.pomo.running()) {
+            // Fills up over the minutes before the event starts.
+            line(lw, Color::white(0.14 * alpha));
+            let done = lw * frac.clamp(0.0, 1.0);
+            if done > 0.5 {
+                line(done.max(t), theme::accent().alpha(alpha));
+            }
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
             line(lw, Color::white(0.14 * alpha));
@@ -4264,6 +4470,17 @@ impl App {
         let col0 = (first_dow + 6) % 7; // Monday first
         let cell = 27.0;
         let gx = ox + 18.0;
+        // Days this month with something on.
+        let month_start = ics::days_from_civil(year, month, 1);
+        let busy: Vec<u32> = self
+            .events
+            .iter()
+            .flat_map(|e| {
+                let last = if e.end > e.start { (e.end - 1).div_euclid(DAY) } else { e.start.div_euclid(DAY) };
+                e.start.div_euclid(DAY)..=last
+            })
+            .filter_map(|d| (d >= month_start).then_some((d - month_start + 1) as u32))
+            .collect();
 
         p.text(
             &date_text(w!("MMMM yyyy")),
@@ -4297,6 +4514,28 @@ impl App {
             };
             let font = if is_today { &fonts.label } else { &fonts.small };
             p.text(&day.to_string(), font, cx, cy, cell, 22.0, Align::Center, Color::white(a * alpha));
+            if busy.contains(&day) {
+                let c = if is_today { Color::white(alpha) } else { theme::accent().alpha(alpha) };
+                p.circle(cx + cell / 2.0, cy + 19.5, 1.6, c);
+            }
+        }
+
+        // What's coming up: the next few events this week.
+        let agenda = self.agenda();
+        if !agenda.is_empty() {
+            let tw = self.content_w;
+            let now = calendar::now();
+            p.rrect(gx, 198.0, tw - 36.0, 1.0, 0.0, Color::white(0.08 * alpha));
+            for (i, e) in agenda.iter().enumerate() {
+                let y = 202.0 + i as f32 * 22.0;
+                let on = e.start <= now && e.end > now;
+                let c = if on { theme::accent() } else { Color::white(0.6) };
+                p.text(&when(e, now), &fonts.small, gx + 4.0, y, 112.0, 22.0, Align::Left, c.alpha(alpha));
+                let what =
+                    if e.location.is_empty() { e.title.clone() } else { format!("{} \u{b7} {}", e.title, e.location) };
+                let x = gx + 120.0;
+                p.text(&what, &fonts.small, x, y, ox + tw - 18.0 - x, 22.0, Align::Left, Color::white(0.92 * alpha));
+            }
         }
 
         // Focus timer.

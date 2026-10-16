@@ -7,6 +7,7 @@ compile_error!("Cascade is a Windows app.");
 mod audio;
 mod backdrop;
 mod brightness;
+mod calendar;
 mod clipboard;
 mod config;
 mod devices;
@@ -15,6 +16,7 @@ mod gfx;
 mod helper;
 mod http;
 mod icons;
+mod ics;
 mod keyhook;
 mod launcher;
 mod lens;
@@ -78,6 +80,8 @@ pub mod msg {
     pub const CLIPS: u32 = WM_APP + 25;
     /// A clipboard item is back on the clipboard, ready to paste (wParam 1) or not (0).
     pub const CLIP_PASTE: u32 = WM_APP + 26;
+    /// Your calendar's events (a boxed `Vec<ics::Event>`).
+    pub const CALENDAR: u32 = WM_APP + 27;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
