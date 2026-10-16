@@ -40,7 +40,7 @@ Everything about the look is on that one page:
 
 - **Colour → Based on:** the theme's own colours, your Windows accent, none (grey glass), or **Custom**, picked on the **Custom colour** slider. Windows Glass is blue only if you want it to be. A theme's other shades turn with it, so Rosé Pine and Neon keep their two-colour edges. (`theme_color = theme | accent | neutral | custom`, `theme_hue` in degrees.)
 - **Colour intensity:** from 0% (grey) through 100% (as the theme was made) to 200% (`theme_intensity`, 0 to 2).
-- **Refraction:** clear glass (Liquid Glass, Translucent) bends what's behind it round its rounded edge, the way thick glass does: near the edge the background is squeezed and pulled round the curve, its colours split a little, so the edge shows without any outline drawn. Cascade reads the screen just outside each pane's edge (never under it, where a screen copy would see the pane itself), folds it in over the edge as a thin ring under the pane, and refreshes it about 20 times a second, redrawing only when something behind changed. The middle of the pane stays truly see-through. Turn it off for the lightest Cascade (`refraction`).
+- **Refraction:** clear glass (Liquid Glass, Translucent) bends what's behind it round its rounded edge, the way thick glass does: near the edge the background is squeezed and pulled round the curve, its colours split a little, so the edge shows without any outline drawn. Cascade reads the screen just outside each pane's edge (never under it, where a screen copy would see the pane itself), folds it in over the edge as a thin ring under the pane, and refreshes it about 20 times a second, redrawing only when something behind changed. Only the thin strips just outside the pane are copied from the screen; once what's around a pane keeps still it's looked at a few times a second instead, and nothing is read at all while no clear pane is on screen. The middle of the pane stays truly see-through. Turn it off for the lightest Cascade (`refraction`).
 - **Glass:** **Blur**, **Corners**, **Tint** (taskbar, panels and the lip), **Start menu tint**, and **Edge**: how strongly the glass's edge catches the light, from 0% (no outline at all) to 200% (`theme_edge`), on top of any theme.
 
 ## Taskbar
@@ -66,7 +66,7 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 - **Customising it** (Settings → Widgets): the music visualizer on the music widget and card on or off (`widget_visualizer`), the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
 - **NVIDIA cards, each on its own:** with an NVIDIA card (or two), the GPU widget shows a column per card with its load and temperature (*GPU 1 · 54°* over *37%*), and the panel gives each card a row with its name, video memory, power draw, load, temperature and a graph. The readings come from the driver's own `nvml.dll`, loaded only while a GPU reading is on screen; other cards keep the single Windows figure.
-- **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
+- **Light by design:** nothing is read until a stats widget is on screen. The readings are taken on a thread of their own, so a slow counter never holds up an animation, and it stops and releases the counters as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 
 ## Start menu
 
@@ -130,8 +130,9 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Window previews | Captured bitmaps | DWM live thumbnails (composited by Windows) |
 | Wi-Fi / Bluetooth | Queried on demand | Radio state-change events |
 | Fullscreen | — | App-bar `ABN_FULLSCREENAPP` notification |
-| Themes | — | A DWM blur style and a few gradients per panel; nothing extra runs |
-| Visualizer | Runs whenever media plays | Runs only while the bars are on screen |
+| Themes | — | A DWM blur style and a few gradients per panel, painted once and drawn from a bitmap while the panel stays the same; nothing extra runs |
+| Visualizer | Runs whenever media plays | Runs only while the bars are on screen, and redraws only the music widget, not the whole taskbar |
+| Stats | — | Read on their own thread, only while a stats widget is on screen |
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
 
