@@ -50,6 +50,9 @@ pub enum ViewAction {
     Close,
 }
 
+/// A box in Task View's strip of desktops: (x, y, width); all are DESK_H tall.
+type StripBox = (f32, f32, f32);
+
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
     Card(usize),
@@ -321,8 +324,8 @@ impl Switcher {
         self.desks.names.len() as f32 * (DESK_W + DESK_GAP) + PLUS_W
     }
 
-    /// Each desktop's box in the strip, then the new-desktop button's: (x, y, w).
-    fn strip(&self) -> (Vec<(f32, f32, f32)>, (f32, f32, f32)) {
+    /// Each desktop's box in the strip, then the new-desktop button's.
+    fn strip(&self) -> (Vec<StripBox>, StripBox) {
         let (_, _, w, h) = self.layout();
         let y = h - PAD - DESK_H;
         let mut x = (w - self.strip_w()) / 2.0;

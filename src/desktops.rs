@@ -102,10 +102,10 @@ pub fn read() -> Desktops {
     let Some(ids) = binary(&key, w!("VirtualDesktopIDs")).filter(|b| b.len() >= 16) else {
         return Desktops::default();
     };
-    let ids: Vec<&[u8]> = ids.chunks_exact(16).collect();
+    let ids: &[[u8; 16]] = ids.as_chunks::<16>().0;
     let current = binary(&key, w!("CurrentVirtualDesktop"))
         .or_else(|| binary(&session_key(), w!("CurrentVirtualDesktop")))
-        .and_then(|c| ids.iter().position(|id| *id == c.as_slice()))
+        .and_then(|c| ids.iter().position(|id| id.as_slice() == c.as_slice()))
         .unwrap_or(0);
     let names = ids
         .iter()
