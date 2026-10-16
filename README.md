@@ -11,9 +11,10 @@ The notch lives at the top centre of your main screen. Turn it off in the right-
 - **The classic notch:** set Style to *Notch* (`notch_style = notch`) for the black notch that's always there. While music plays it widens to show album art and a visualizer in the art's colours. While the focus timer runs it shows a progress ring and the time left.
 - **Hover to open.** Click a tab in the tab bar along the bottom (or scroll, or swipe sideways on a touchpad) to switch between three modes:
   - **Media:** title, artist, progress bar and play/pause/skip buttons. With nothing playing it shows the time, date, weather and battery instead.
-  - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
-  - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
+  - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI. Under them, a volume mixer: the output device (click it for the list, and pick another to make it the default, as Windows' own picker does), then each app playing sound with its own slider (click its name to mute it). It's read as Controls opens, not watched (`controls_mixer`).
+  - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default). Give Cascade your calendar's private iCal link (Settings → Focus & weather → Calendar link; Google Calendar calls it the *Secret address in iCal format*, Outlook lets you publish one) and days with events get a dot, the next few events this week are listed under the month, and in the minutes before each one (10 by default, `calendar_soon`) the closed notch counts down to it: the lip's line fills up, the classic notch shows the event and the minutes left, and it says so when it's coming up and when it starts. Repeating events, moved and cancelled ones are followed. The link is read every 15 minutes on a sleeping thread (`calendar_url`).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
+- **USB devices:** plug in a flight controller and the notch says *Flight controller (STM32) on COM5* with an *Open Betaflight* button (it opens the web configurator, which talks to the board over Web Serial). It knows STM32 and AT32 flight controllers (also in DFU mode), ArduPilot boards, EdgeTX/OpenTX radios plugged in as a joystick, the USB-serial chips on ExpressLRS gear, ESP32 boards, Meta Quest headsets, DJI gear and Android phones. Name your own devices and pick what clicking opens in `devices.txt` (Settings → Notch → *Your devices*), set it to announce any device, and choose whether unplugging shows too (`usb_popups = known | all | off`, `usb_unplug`). Windows tells Cascade when a device comes or goes; nothing is polled.
 - **Fullscreen apps and games:** the notch and taskbar hide automatically.
 
 ## Themes
@@ -39,7 +40,7 @@ Everything about the look is on that one page:
 
 - **Colour → Based on:** the theme's own colours, your Windows accent, none (grey glass), or **Custom**, picked on the **Custom colour** slider. Windows Glass is blue only if you want it to be. A theme's other shades turn with it, so Rosé Pine and Neon keep their two-colour edges. (`theme_color = theme | accent | neutral | custom`, `theme_hue` in degrees.)
 - **Colour intensity:** from 0% (grey) through 100% (as the theme was made) to 200% (`theme_intensity`, 0 to 2).
-- **Refraction:** clear glass (Liquid Glass, Translucent) bends what's behind it round its rounded edge, the way thick glass does: near the edge the background is squeezed and pulled round the curve, its colours split a little, so the edge shows without any outline drawn. Cascade reads the screen just outside each pane's edge (never under it, where a screen copy would see the pane itself), folds it in over the edge as a thin ring under the pane, and refreshes it about 20 times a second, redrawing only when something behind changed. The middle of the pane stays truly see-through. Turn it off for the lightest Cascade (`refraction`).
+- **Refraction:** clear glass (Liquid Glass, Translucent) bends what's behind it round its rounded edge, the way thick glass does: near the edge the background is squeezed and pulled round the curve, its colours split a little, so the edge shows without any outline drawn. Cascade reads the screen just outside each pane's edge (never under it, where a screen copy would see the pane itself), folds it in over the edge as a thin ring under the pane, and refreshes it about 20 times a second, redrawing only when something behind changed. Only the thin strips just outside the pane are copied from the screen; once what's around a pane keeps still it's looked at a few times a second instead, and nothing is read at all while no clear pane is on screen. The middle of the pane stays truly see-through. Turn it off for the lightest Cascade (`refraction`).
 - **Glass:** **Blur**, **Corners**, **Tint** (taskbar, panels and the lip), **Start menu tint**, and **Edge**: how strongly the glass's edge catches the light, from 0% (no outline at all) to 200% (`theme_edge`), on top of any theme.
 
 ## Taskbar
@@ -48,10 +49,12 @@ A Windows 11-style taskbar drawn by Cascade itself, over a real acrylic blur.
 
 - **Left:** the current weather. **Centre:** Start, a search box, then your pinned and running apps. **Right:** hidden icons, network / volume / battery, and the clock.
 - **App buttons** work like Windows: a short line marks apps with open windows and a longer blue one the app in front. Hover for a name and live window previews; click a preview to switch to it, or its × to close it.
+- **Drop files on an app** to open them with it; hold them over an app with windows for a moment and its window comes up, so you can drop into it.
 - **Click an app** to open it if it isn't running, bring it to the front if it is, minimise it if it's already in front, or cycle through its windows. **Middle-click** opens a new window. **Right-click** to pin, unpin, close, or force close (Task Manager's *End task*). **Drag** pinned apps to reorder them.
 - **Tray icons:** apps' notification-area icons show by the clock, the same ones you chose to show in Windows' taskbar settings. The rest are under the **^** button. Click and right-click them as usual. Cascade gets them the way alternative taskbars like RetroBar do: it keeps its own hidden tray window and passes everything on to Explorer, without touching Explorer itself.
 - **Clicks on the right:** the status icons pull the notch down on its Controls tab (Wi-Fi, Bluetooth, volume, brightness), so there's one controls area instead of two. It stays open until you click elsewhere, or tucks away after a few seconds if you never move onto it. Without a notch (or with `status_click = windows`) they open Windows' quick settings instead. The clock opens the widgets panel with your notifications.
 - **Look:** full width or floating islands, centred or left-aligned, the Start button with your apps or alone on its own island at the far left, icon size, icon padding, bar padding (the gap from the bar's edge to its buttons on all four sides, which together set the bar's height) and the gap from the screen edge (all three default to the same small gap), and which parts to show, in Settings → Taskbar. The theme, blur, corners and tint are in Settings → Appearance.
+- **Every screen:** with more than one screen, each gets a taskbar of its own with Start, search, your apps and the clock (the widgets, tray and status icons stay on the main screen). Start, the widgets panel and Win+X open on the screen the pointer is on. Each taskbar shows every open window, or only the ones on its own screen (Settings → Taskbar → Other screens; `taskbar_screens`, `taskbar_screen_apps`, `taskbar_screen_clock`). Pinning or reordering on one does the same on all of them, and a fullscreen game only hides the taskbar on its own screen.
 - **Auto-hide** (optional): push the mouse to the bottom edge to bring it back.
 - **Replaces the Windows taskbar** while it's on (untick *Replace the Windows taskbar* to keep both). The real one comes back when Cascade quits, when the taskbar is turned off, and on the next start if Cascade crashed.
 
@@ -59,11 +62,12 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
 ## Widgets
 
-- **On the taskbar:** the weather, what's playing (with a play / pause button and a little equaliser), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
+- **On the taskbar:** the weather, what's playing (with a play / pause button and a little equaliser), CPU, memory, GPU, network speed, your virtual desktops (a dot each, the one you're on lit, shown with more than one: click for Task View, scroll to go to the next or previous one) and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
 - **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (click one to open the app it came from, dismiss one with its ×, or *Clear all*), what's playing (art, an equaliser under it, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
 - **Customising it** (Settings → Widgets): the music visualizer on the music widget and card on or off (`widget_visualizer`), the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
-- **Light by design:** nothing is read until a stats widget is on screen. The timer stops, and the counters are released, as soon as none is (for example while the taskbar is hidden for a fullscreen game).
+- **NVIDIA cards, each on its own:** with an NVIDIA card (or two), the GPU widget shows a column per card with its load and temperature (*GPU 1 · 54°* over *37%*), and the panel gives each card a row with its name, video memory, power draw, load, temperature and a graph. The readings come from the driver's own `nvml.dll`, loaded only while a GPU reading is on screen; other cards keep the single Windows figure.
+- **Light by design:** nothing is read until a stats widget is on screen. The readings are taken on a thread of their own, so a slow counter never holds up an animation, and it stops and releases the counters as soon as none is (for example while the taskbar is hidden for a fullscreen game).
 
 ## Start menu
 
@@ -74,7 +78,7 @@ Cascade's own Start menu. Windows doesn't let other apps restyle its real one, s
 - **Left:** a slim icon rail with your account, Settings, File Explorer, your Downloads, Documents, Pictures, Music and Videos folders, network settings, Cascade's settings and power (lock, sleep, sign out, restart, shut down, in a menu drawn by Cascade). The button at the top opens the full sidebar over the menu; it folds away when the pointer leaves. Untick **Compact sidebar** in Settings for the always-wide one.
 - **Middle:** pinned apps (the same as your taskbar's) and recently opened files. Turn both off and the column goes away, leaving All apps.
 - **Right:** every installed app A to Z, Store apps included. Scrolling is smooth, and click any letter heading to open a grid of letters and jump straight to one.
-- **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it.
+- **Searching:** just start typing. Use the arrow keys and Enter, or click. Right-click any app to pin or unpin it. It answers more than apps: sums (`12*4+3`, `2^10`, `sqrt(2)`; Enter copies the answer), unit conversions (`10 km to mi`, `180 lb in kg`, `25 c to f`, `1 gb in mb`; lengths, weights, volumes, speeds, data, time and temperature), quick commands (`lock`, `restart`, `shut down`, `bluetooth`, `display`, `task manager`...) and, last, a web search for what you typed (Google, Bing, DuckDuckGo or none, in Settings → Start menu; `start_web_search`).
 
 **Customising it** (Settings → Start menu): where it opens (auto, centre or left), its height, how many columns and rows of pinned apps, and whether to show the sidebar, recent files and the all-apps list. Its glass tint is in Settings → Appearance. Turn off the Win-key takeover or the whole Start menu there too.
 
@@ -85,6 +89,8 @@ Cascade's own versions of Windows' shortcut menus, in the current theme and wher
 - **Win+X** (or right-click **Start**): the quick links menu above the Start button: Installed apps, Power Options, Event Viewer, System, Device Manager, Network Connections, Disk Management, Computer Management, Terminal, Terminal (Admin), Task Manager, Settings, File Explorer, Search, Run, *Shut down or sign out* and Desktop (plus Mobility Center on a laptop). The same keys work as in Windows', shown beside each item: Win+X then A for an admin terminal, or U then R to restart. Arrow keys, Enter and Esc work too. (`shortcut_win_x`)
 - **Win+N:** the widgets panel, with your notifications and the calendar (`shortcut_win_n`; needs Cascade's taskbar).
 - **Win+A** (off by default): the notch's Controls instead of Windows' quick settings (`shortcut_win_a`).
+- **Win+Tab:** Task View in Cascade's look: this desktop's windows as live previews to pick from (click, or the arrow keys and Enter; Esc leaves), and under them your virtual desktops, the one you're on lit: click one to go there, or **+** for a new one (`shortcut_win_tab`).
+- **Win+V:** your clipboard history by the text cursor (or the pointer, in apps that don't say where their cursor is): Windows' own history, so pinned and synced items are there too. Click an item, press its number, or pick it with the arrow keys and Enter, and it's pasted into the app you were in; Delete or its × takes it out, *Clear all* empties it. With clipboard history off in Windows it offers to turn it on. It's only read while the menu is open (`shortcut_win_v`).
 
 ## Screens
 
@@ -127,12 +133,13 @@ To build it yourself, install [Rust](https://rustup.rs) on Windows and run `carg
 | Window previews | Captured bitmaps | DWM live thumbnails (composited by Windows) |
 | Wi-Fi / Bluetooth | Queried on demand | Radio state-change events |
 | Fullscreen | — | App-bar `ABN_FULLSCREENAPP` notification |
-| Themes | — | A DWM blur style and a few gradients per panel; nothing extra runs |
-| Visualizer | Runs whenever media plays | Runs only while the bars are on screen |
+| Themes | — | A DWM blur style and a few gradients per panel, painted once and drawn from a bitmap while the panel stays the same; nothing extra runs |
+| Visualizer | Runs whenever media plays | Runs only while the bars are on screen, and redraws only the music widget, not the whole taskbar |
+| Stats | — | Read on their own thread, only while a stats widget is on screen |
 | Weather | — | One HTTPS request per 30 min on a sleeping thread |
 | Idle loop | Several polling threads | Blocks in `GetMessage`: 0% CPU |
 
-Frames are only drawn while something is animating; the taskbar clock costs one redraw a minute. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep. The acrylic blur is done by Windows' own compositor, the same way the real taskbar gets it, so it costs Cascade nothing.
+Frames are only drawn while something is animating; the taskbar clock costs one redraw a minute. To see what each surface costs on your machine, set `perf_log = true` in the config: while something animates, `cascade.log` gets each surface's average render time and frame rate about once a second. Rendering uses Direct2D's software rasteriser, because the surfaces are small and this keeps the GPU asleep. The acrylic blur is done by Windows' own compositor, the same way the real taskbar gets it, so it costs Cascade nothing.
 
 Cascade also never injects code into Explorer or patches Windows files, unlike Explorer mods. It draws its own windows next to Explorer, so Windows updates have nothing of it to break.
 
@@ -142,6 +149,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 |---|---|
 | `src/ui.rs` | App core: windows, message loop, notch states, layout, input and drawing |
 | `src/launcher.rs` | Start menu: places, pinned, recent files, all apps, search, power |
+| `src/smart.rs` | Start search's sums, unit conversions, commands and web search |
 | `src/keyhook.rs` | Lone Win key → Start menu |
 | `src/settings.rs` | Settings window |
 | `src/dock.rs` | Taskbar: window tracking, layout, drawing, drag, launch/focus |
@@ -151,17 +159,23 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/usage.rs` | Cascade's own memory and CPU use, for Settings → About |
 | `src/helper.rs` | Optional admin helper for the Win key over admin apps |
 | `src/sysmon.rs` | CPU, memory, network, GPU and disk readings for the stats widgets |
+| `src/nvml.rs` | Each NVIDIA card's load, temperature, memory and power (the driver's NVML) |
 | `src/widgets.rs` | The widgets panel |
 | `src/quickmenu.rs` | The Win+X menu |
+| `src/desktops.rs` | Windows' virtual desktops: reading them, watching them, switching |
+| `src/clipboard.rs` | The Win+V menu: Windows' clipboard history, and pasting from it |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |
 | `src/media.rs` | Now playing + album art (event-driven, own thread) |
+| `src/devices.rs` | USB devices plugged in or out, and the device list |
 | `src/audio.rs` | Volume callbacks, loopback visualizer + FFT |
+| `src/mixer.rs` | The Controls tab's per-app volumes and output device |
 | `src/brightness.rs` | Brightness events (WMI) and setting (WMI + DDC/CI) |
 | `src/radios.rs` | Wi-Fi / Bluetooth toggles |
 | `src/weather.rs` | Open-Meteo over WinHTTP |
 | `src/pomodoro.rs` | Focus timer |
+| `src/calendar.rs`, `src/ics.rs` | Your calendar's events, from its iCal link |
 | `src/icons.rs` | App icons and names |
 | `src/update.rs` | One-click updates from GitHub releases |
 | `src/http.rs` | Tiny WinHTTP client |

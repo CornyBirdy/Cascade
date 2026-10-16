@@ -7,25 +7,34 @@ compile_error!("Cascade is a Windows app.");
 mod audio;
 mod backdrop;
 mod brightness;
+mod calendar;
+mod clipboard;
 mod config;
+mod desktops;
+mod devices;
 mod dock;
+mod drop;
 mod gfx;
 mod helper;
 mod http;
 mod icons;
+mod ics;
 mod keyhook;
 mod launcher;
 mod lens;
 mod media;
+mod mixer;
 mod mouseedge;
 mod mousehook;
 mod notifications;
+mod nvml;
 mod pomodoro;
-mod quickmenu;
 mod preview;
+mod quickmenu;
 mod radios;
 mod settings;
 mod shell;
+mod smart;
 mod spring;
 mod switcher;
 mod sysmon;
@@ -67,6 +76,18 @@ pub mod msg {
     pub const NOTIFS: u32 = WM_APP + 21;
     /// A Win+key shortcut Cascade handles (wParam: the key, e.g. 'X').
     pub const SHORTCUT: u32 = WM_APP + 22;
+    /// A stats reading (a boxed `sysmon::Readings`).
+    pub const STATS: u32 = WM_APP + 23;
+    /// The Start menu's recent files (a boxed `Vec<launcher::RecentFile>`).
+    pub const RECENT: u32 = WM_APP + 24;
+    /// The clipboard history (a boxed `clipboard::Clips`).
+    pub const CLIPS: u32 = WM_APP + 25;
+    /// A clipboard item is back on the clipboard, ready to paste (wParam 1) or not (0).
+    pub const CLIP_PASTE: u32 = WM_APP + 26;
+    /// Your calendar's events (a boxed `Vec<ics::Event>`).
+    pub const CALENDAR: u32 = WM_APP + 27;
+    /// The virtual desktops changed (no payload; read them with `desktops::read`).
+    pub const DESKTOPS: u32 = WM_APP + 28;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -108,6 +129,8 @@ fn main() {
     update::cleanup();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // For dropping files on the taskbar (see `drop`).
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
     if let Err(e) = ui::run() {
         use windows::core::{w, HSTRING};

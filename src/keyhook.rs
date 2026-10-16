@@ -1,6 +1,7 @@
 //! Global keyboard hook: opens the Cascade launcher on a lone Win key press,
 //! drives the Alt+Tab switcher, and takes the Win+key shortcuts Cascade has
-//! its own menus for (Win+X, Win+N, Win+A, each only when turned on). Every
+//! its own menus for (Win+X, Win+N, Win+A, Win+V, Win+Tab, each only when
+//! turned on). Every
 //! other Win+key (Win+E, Win+R, Win+Shift+S...) is left completely alone.
 //!
 //! A shortcut's key press and release are kept from Windows, so it never
@@ -102,7 +103,8 @@ pub fn set_helper_mode(hwnd: HWND) {
 
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 static WIN_ON: AtomicBool = AtomicBool::new(false);
-/// The Win+letter shortcuts Cascade takes: bit n is the letter 'A' + n.
+/// The Win+letter shortcuts Cascade takes: bit n is the letter 'A' + n (and
+/// `TAB_BIT` is Win+Tab).
 static SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 /// Shortcut keys whose press was kept from Windows, so their release is too.
 static HELD_SHORTCUTS: AtomicU32 = AtomicU32::new(0);
@@ -242,9 +244,13 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
 
-            // Win+letter shortcuts.
-            if (b'A' as u16..=b'Z' as u16).contains(&vk) {
-                let bit = 1u32 << (vk - b'A' as u16);
+            // Win+letter shortcuts, and Win+Tab.
+            let bit = match vk {
+                v if (b'A' as u16..=b'Z' as u16).contains(&v) => 1u32 << (v - b'A' as u16),
+                v if v == VK_TAB.0 => TAB_BIT,
+                _ => 0,
+            };
+            if bit != 0 {
                 let win_held = WIN_DOWN.load(Ordering::Relaxed)
                     || [VK_LWIN, VK_RWIN].iter().any(|k| GetAsyncKeyState(k.0 as i32) as u16 & 0x8000 != 0);
                 let plain = !ALT_DOWN.load(Ordering::Relaxed)
@@ -306,12 +312,17 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 }
 
 /// The Win+letter shortcuts Cascade takes with `cfg`, for `configure`.
+/// Win+Tab's bit in `SHORTCUTS` (past the letters).
+pub const TAB_BIT: u32 = 1 << 26;
+
 pub fn shortcuts(cfg: &crate::config::Config) -> u32 {
     let bit = |c: u8, on: bool| if on { 1u32 << (c - b'A') } else { 0 };
     bit(b'X', cfg.shortcut_win_x)
         // The widgets panel opens from Cascade's taskbar, and Controls are in the notch.
         | bit(b'N', cfg.shortcut_win_n && cfg.dock)
         | bit(b'A', cfg.shortcut_win_a && cfg.notch)
+        | bit(b'V', cfg.shortcut_win_v)
+        | if cfg.shortcut_win_tab { TAB_BIT } else { 0 }
 }
 
 /// Turns the Win-key launcher, the Alt+Tab switcher and the Win+key

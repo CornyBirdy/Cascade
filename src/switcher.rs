@@ -6,6 +6,10 @@
 //! window on top draws the cards, titles, icons and selection, with see-through
 //! holes where the thumbnails are. Nothing exists, and nothing runs, until
 //! Alt+Tab is pressed.
+//!
+//! Win+Tab opens it as Task View: it stays open (pick a window with a click,
+//! the arrow keys and Enter, or Esc to leave), and under the windows a strip
+//! of your virtual desktops to switch to, or make a new one.
 
 use windows::core::{Result, BOOL};
 use windows::Win32::Foundation::*;
@@ -16,6 +20,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
+use crate::desktops::Desktops;
 use crate::dock::{self, Dock};
 use crate::gfx::{Align, Color, Gfx, Layer};
 use crate::spring::Spring;
@@ -29,6 +34,31 @@ const PAD: f32 = 20.0;
 const MAX_ROWS: usize = 3;
 /// How far a card rises while it appears, in layout units.
 const RISE: f32 = 18.0;
+/// Task View's strip of desktops, under the cards.
+const STRIP_H: f32 = 64.0;
+const DESK_W: f32 = 132.0;
+const DESK_H: f32 = 40.0;
+const DESK_GAP: f32 = 8.0;
+/// The "new desktop" button at the end of the strip.
+const PLUS_W: f32 = 44.0;
+
+/// What a click or key in Task View asks for.
+pub enum ViewAction {
+    Focus(HWND),
+    Desktop(usize),
+    NewDesktop,
+    Close,
+}
+
+/// A box in Task View's strip of desktops: (x, y, width); all are DESK_H tall.
+type StripBox = (f32, f32, f32);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Spot {
+    Card(usize),
+    Desk(usize),
+    Plus,
+}
 
 struct Item {
     window: HWND,
@@ -72,6 +102,11 @@ pub struct Switcher {
     blur: bool,
     opacity: f32,
     pub dirty: bool,
+    /// Open as Task View (Win+Tab) rather than for Alt+Tab, with the desktops.
+    pub view: bool,
+    desks: Desktops,
+    /// The desktop or button under the pointer in the strip.
+    desk_hover: Option<Spot>,
 }
 
 unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
@@ -103,6 +138,9 @@ impl Switcher {
             blur: true,
             opacity: 0.55,
             dirty: false,
+            view: false,
+            desks: Desktops::default(),
+            desk_hover: None,
         }
     }
 
@@ -122,8 +160,57 @@ impl Switcher {
         ((mon_w - 2.0 * PAD - 80.0 + GAP) / (CARD_W + GAP)).floor().max(1.0) as usize
     }
 
+    /// Win+Tab: opens as Task View on `monitor`, with the windows of this
+    /// desktop and the strip of `desks`, and takes the keyboard.
+    pub fn begin_view(&mut self, k: f32, monitor: RECT, desks: Desktops) {
+        if self.active || self.view {
+            self.hide();
+        }
+        self.list(k, monitor);
+        self.view = true;
+        self.desks = desks;
+        self.desk_hover = None;
+        let fg = unsafe { GetForegroundWindow() };
+        self.selected = self.items.iter().position(|i| i.window == fg).unwrap_or(0);
+        self.start();
+        unsafe {
+            // It takes the keyboard while it's Task View.
+            let ex = GetWindowLongW(self.overlay, GWL_EXSTYLE) as u32;
+            SetWindowLongW(self.overlay, GWL_EXSTYLE, (ex & !WS_EX_NOACTIVATE.0) as i32);
+        }
+        self.show_now();
+        crate::launcher::force_foreground(self.overlay);
+    }
+
+    /// New desktops (or a switch) while Task View is open.
+    pub fn set_desktops(&mut self, desks: Desktops) {
+        if self.view && desks != self.desks {
+            self.desks = desks;
+            self.dirty = true;
+        }
+    }
+
     /// Alt+Tab was pressed: lists the windows and picks the one to switch to.
     pub fn begin(&mut self, k: f32, monitor: RECT) -> bool {
+        if self.view {
+            self.hide();
+        }
+        self.list(k, monitor);
+        if self.items.is_empty() {
+            self.active = false;
+            return false;
+        }
+        let fg = unsafe { GetForegroundWindow() };
+        // The first step moves from the window you're in to the next one (or,
+        // if you're not in a listed window, to the first).
+        self.selected = if self.items[0].window == fg { 0 } else { self.items.len() - 1 };
+        self.active = true;
+        self.start();
+        true
+    }
+
+    /// Lists the windows, most recently used first.
+    fn list(&mut self, k: f32, monitor: RECT) {
         self.clear_thumbs();
         self.k = k;
         self.monitor = monitor;
@@ -153,16 +240,11 @@ impl Switcher {
                 }
             })
             .collect();
-        if self.items.is_empty() {
-            self.active = false;
-            return false;
-        }
-        let fg = unsafe { GetForegroundWindow() };
-        // The first step moves from the window you're in to the next one (or,
-        // if you're not in a listed window, to the first).
-        self.selected = if self.items[0].window == fg { 0 } else { self.items.len() - 1 };
+    }
+
+    /// Readies the cards' animations once the windows are listed.
+    fn start(&mut self) {
         self.hovered = None;
-        self.active = true;
         self.open.snap(0.0);
         let (cols, ..) = self.layout();
         let (rx, ry) = Self::card(self.selected, cols);
@@ -172,7 +254,6 @@ impl Switcher {
             it.delay = (i as f32 * 0.03).min(0.15);
             it.sel.snap((i == self.selected) as u8 as f32);
         }
-        true
     }
 
     pub fn step(&mut self, back: bool) {
@@ -192,6 +273,13 @@ impl Switcher {
     }
 
     pub fn hide(&mut self) {
+        if self.view {
+            self.view = false;
+            unsafe {
+                let ex = GetWindowLongW(self.overlay, GWL_EXSTYLE) as u32;
+                SetWindowLongW(self.overlay, GWL_EXSTYLE, (ex | WS_EX_NOACTIVATE.0) as i32);
+            }
+        }
         self.clear_thumbs();
         self.items.clear();
         self.active = false;
@@ -217,14 +305,52 @@ impl Switcher {
         }
     }
 
-    /// Cards in a row, rows, and the panel's size in layout units.
+    /// Cards in a row, rows, and the panel's size in layout units (with
+    /// Task View's strip of desktops under the cards).
     fn layout(&self) -> (usize, usize, f32, f32) {
         let n = self.items.len().max(1);
         let cols = n.min(self.max_cols());
         let rows = n.div_ceil(cols).min(MAX_ROWS);
-        let w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
-        let h = PAD * 2.0 + rows as f32 * CARD_H + (rows - 1) as f32 * GAP;
+        let mut w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
+        let mut h = PAD * 2.0 + rows as f32 * CARD_H + (rows - 1) as f32 * GAP;
+        if self.view {
+            w = w.max(self.strip_w() + 2.0 * PAD);
+            h += STRIP_H;
+        }
         (cols, rows, w, h)
+    }
+
+    fn strip_w(&self) -> f32 {
+        self.desks.names.len() as f32 * (DESK_W + DESK_GAP) + PLUS_W
+    }
+
+    /// Each desktop's box in the strip, then the new-desktop button's.
+    fn strip(&self) -> (Vec<StripBox>, StripBox) {
+        let (_, _, w, h) = self.layout();
+        let y = h - PAD - DESK_H;
+        let mut x = (w - self.strip_w()) / 2.0;
+        let mut desks = Vec::new();
+        for _ in &self.desks.names {
+            desks.push((x, y, DESK_W));
+            x += DESK_W + DESK_GAP;
+        }
+        (desks, (x, y, PLUS_W))
+    }
+
+    fn spot(&self, x: i32, y: i32) -> Option<Spot> {
+        if let Some(i) = self.hit(x, y) {
+            return Some(Spot::Card(i));
+        }
+        if !self.view {
+            return None;
+        }
+        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+        let inside = |(bx, by, bw): (f32, f32, f32)| lx >= bx && lx < bx + bw && ly >= by && ly < by + DESK_H;
+        let (desks, plus) = self.strip();
+        if let Some(i) = desks.iter().position(|&b| inside(b)) {
+            return Some(Spot::Desk(i));
+        }
+        inside(plus).then_some(Spot::Plus)
     }
 
     fn card(i: usize, cols: usize) -> (f32, f32) {
@@ -311,7 +437,7 @@ impl Switcher {
     /// Puts the panel on screen (a moment after Alt+Tab, so a quick flip
     /// between two windows never flashes it).
     pub fn show_now(&mut self) {
-        if self.shown || !self.active || self.items.is_empty() {
+        if self.shown || !(self.active || self.view) || (self.items.is_empty() && !self.view) {
             return;
         }
         self.shown = true;
@@ -373,11 +499,53 @@ impl Switcher {
             self.hovered = h;
             self.dirty = true;
         }
+        let spot = self.spot(x, y).filter(|s| !matches!(s, Spot::Card(_)));
+        if spot != self.desk_hover {
+            self.desk_hover = spot;
+            self.dirty = true;
+        }
+    }
+
+    /// A click in Task View.
+    pub fn on_click_view(&mut self, x: i32, y: i32) -> Option<ViewAction> {
+        Some(match self.spot(x, y)? {
+            Spot::Card(i) => ViewAction::Focus(self.items.get(i)?.window),
+            Spot::Desk(i) => ViewAction::Desktop(i),
+            Spot::Plus => ViewAction::NewDesktop,
+        })
+    }
+
+    /// A key in Task View: arrows move between windows, Enter picks one.
+    pub fn on_key_view(&mut self, vk: u16) -> Option<ViewAction> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        let n = self.items.len();
+        let (cols, ..) = self.layout();
+        let key = VIRTUAL_KEY(vk);
+        if key == VK_ESCAPE {
+            return Some(ViewAction::Close);
+        }
+        if n == 0 {
+            return None;
+        }
+        let s = self.selected;
+        self.selected = match key {
+            VK_RETURN | VK_SPACE => return self.items.get(s).map(|i| ViewAction::Focus(i.window)),
+            VK_RIGHT | VK_TAB => (s + 1) % n,
+            VK_LEFT => (s + n - 1) % n,
+            VK_DOWN if s + cols < n => s + cols,
+            VK_UP if s >= cols => s - cols,
+            VK_HOME => 0,
+            VK_END => n - 1,
+            _ => return None,
+        };
+        self.dirty = true;
+        None
     }
 
     pub fn on_leave(&mut self) {
         self.tracking = false;
         self.hovered = None;
+        self.desk_hover = None;
         self.dirty = true;
     }
 
@@ -424,13 +592,30 @@ impl Switcher {
                 let hov = it.hov.value.clamp(0.0, 1.0) * (1.0 - sel);
                 let fill = 0.05 + 0.07 * sel + 0.03 * hov;
                 p.rrect(cx, cy, CARD_W, CARD_H, r, Color::white(fill * a));
-                p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, CARD_H - 1.0, r, Color::white(0.07 * a * (1.0 - sel)), 1.0);
+                p.stroke_rrect(
+                    cx + 0.5,
+                    cy + 0.5,
+                    CARD_W - 1.0,
+                    CARD_H - 1.0,
+                    r,
+                    Color::white(0.07 * a * (1.0 - sel)),
+                    1.0,
+                );
                 match &icons[i] {
                     Some(bmp) => p.icon(bmp, cx + 22.0, cy + TITLE_H / 2.0, a),
                     None => p.rrect(cx + 14.0, cy + TITLE_H / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15 * a)),
                 }
                 let title = if it.title.is_empty() { "Window" } else { &it.title };
-                p.text(title, &f.label, cx + 40.0, cy + 4.0, CARD_W - 52.0, TITLE_H - 8.0, Align::Left, Color::white(0.93 * a));
+                p.text(
+                    title,
+                    &f.label,
+                    cx + 40.0,
+                    cy + 4.0,
+                    CARD_W - 52.0,
+                    TITLE_H - 8.0,
+                    Align::Left,
+                    Color::white(0.93 * a),
+                );
                 let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
                 p.hole(tx, ty, tw, th);
                 if it.thumb == 0 {
@@ -440,6 +625,38 @@ impl Switcher {
                         p.icon(bmp, tx + tw / 2.0, ty + th / 2.0, a);
                     }
                 }
+            }
+            if self.view {
+                if self.items.is_empty() {
+                    let (cw, ch) = (w - 2.0 * PAD, CARD_H);
+                    let c = Color::white(0.55 * open);
+                    p.text("No windows on this desktop", &f.body, PAD, PAD, cw, ch, Align::Center, c);
+                }
+                // The desktops: the one you're on lit, and a button for a new one.
+                let (desks, plus) = self.strip();
+                for (i, &(bx, by, bw)) in desks.iter().enumerate() {
+                    let current = i == self.desks.current;
+                    let hot = self.desk_hover == Some(Spot::Desk(i));
+                    let fill = if current {
+                        0.14
+                    } else if hot {
+                        0.10
+                    } else {
+                        0.05
+                    };
+                    p.rrect(bx, by, bw, DESK_H, r, Color::white(fill * open));
+                    if current {
+                        p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent().alpha(open), 2.0);
+                    }
+                    let name = &self.desks.names[i];
+                    p.text(name, &f.label, bx + 8.0, by, bw - 16.0, DESK_H, Align::Center, Color::white(0.92 * open));
+                }
+                let (bx, by, bw) = plus;
+                let hot = self.desk_hover == Some(Spot::Plus);
+                p.rrect(bx, by, bw, DESK_H, r, Color::white(if hot { 0.12 } else { 0.06 } * open));
+                let (cx, cy, c) = (bx + bw / 2.0, by + DESK_H / 2.0, Color::white(0.85 * open));
+                p.line(cx - 6.0, cy, cx + 6.0, cy, c, 1.6);
+                p.line(cx, cy - 6.0, cx, cy + 6.0, c, 1.6);
             }
             // The selection ring glides from card to card.
             if let Some(it) = self.items.get(self.selected) {

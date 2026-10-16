@@ -172,7 +172,16 @@ impl State {
         self.last = None;
     }
 
-    fn make_strip(&mut self, rect: RECT, src: usize, dst: usize, side_by_side: bool, near_start: bool, edge: i32, align: Align) {
+    fn make_strip(
+        &mut self,
+        rect: RECT,
+        src: usize,
+        dst: usize,
+        side_by_side: bool,
+        near_start: bool,
+        edge: i32,
+        align: Align,
+    ) {
         unsafe {
             let Ok(instance) = GetModuleHandleW(None) else { return };
             let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
@@ -273,7 +282,8 @@ impl State {
         let now = Instant::now();
         // The first look after a gap is the pointer arriving from the other
         // screen; later ones are it moving about inside the strip.
-        let fresh = self.last.is_none_or(|(h, t)| h != hwnd.0 as isize || now.duration_since(t) > Duration::from_millis(120));
+        let fresh =
+            self.last.is_none_or(|(h, t)| h != hwnd.0 as isize || now.duration_since(t) > Duration::from_millis(120));
         self.last = Some((hwnd.0 as isize, now));
         if !fresh || self.paused {
             return;
@@ -300,7 +310,13 @@ impl State {
 /// Where `pos` (on screen `a`, along the edge) lands on screen `b`.
 fn remap(a: &Screen, b: &Screen, pos: i32, side_by_side: bool, align: Align) -> i32 {
     // Along the edge: heights for side-by-side screens, widths for stacked ones.
-    let span = |s: &Screen| if side_by_side { (s.rect.top, s.rect.bottom, s.ppm_y) } else { (s.rect.left, s.rect.right, s.ppm_x) };
+    let span = |s: &Screen| {
+        if side_by_side {
+            (s.rect.top, s.rect.bottom, s.ppm_y)
+        } else {
+            (s.rect.left, s.rect.right, s.ppm_x)
+        }
+    };
     let (a_lo, a_hi, a_ppm) = span(a);
     let (b_lo, b_hi, b_ppm) = span(b);
     let align = match align {

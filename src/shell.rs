@@ -383,6 +383,12 @@ pub fn close_start_menu() {
     send_keys(&[(VK_ESCAPE, false), (VK_ESCAPE, true)]);
 }
 
+/// Pastes into the window in front (Ctrl+V).
+pub fn paste() {
+    const VK_V: u16 = 0x56;
+    send_keys(&[(VK_CONTROL, false), (VK_V, false), (VK_V, true), (VK_CONTROL, true)]);
+}
+
 /// Opens the real Windows Start menu (Ctrl+Esc).
 pub fn open_start_menu() {
     send_keys(&[(VK_CONTROL, false), (VK_ESCAPE, false), (VK_ESCAPE, true), (VK_CONTROL, true)]);
@@ -473,6 +479,19 @@ pub fn work_area() -> RECT {
         );
     }
     r
+}
+
+/// The work area of the screen at `monitor` (the screen less taskbars).
+pub fn work_area_of(monitor: RECT) -> RECT {
+    unsafe {
+        let mon = MonitorFromRect(&monitor, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            monitor
+        }
+    }
 }
 
 // ------------------------------------------------------------------ menu --

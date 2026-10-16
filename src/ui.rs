@@ -10,7 +10,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, PCWSTR};
+use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, ENUM_DATE_FORMATS_FLAGS, TIME_NOSECONDS};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
@@ -31,14 +31,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
+use crate::calendar;
+use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
+use crate::desktops::{self, Desktops};
+use crate::devices::{self, Device};
 use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
 use crate::helper;
 use crate::icons::{self, IconResult};
+use crate::ics::{self, DAY};
 use crate::keyhook;
 use crate::launcher::{self, AppEntry, Launcher};
 use crate::media::{self, Art, MediaCmd, MediaInfo};
+use crate::mixer::Mixer;
 use crate::mouseedge;
 use crate::msg;
 use crate::notifications::{self, NotifCmd};
@@ -50,7 +56,7 @@ use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::spring::Spring;
 use crate::switcher::Switcher;
-use crate::sysmon::Sampler;
+use crate::sysmon::{self, Readings, StatsCmd};
 use crate::systray::{self, Flyout, Systray};
 use crate::theme;
 use crate::update;
@@ -72,7 +78,6 @@ const TIMER_TICK: usize = 4;
 const TIMER_FLYOUT: usize = 5;
 const TIMER_POMODORO: usize = 6;
 const TIMER_KEYFIX: usize = 7;
-const TIMER_STATS: usize = 8;
 const TIMER_SWITCH: usize = 9;
 // Dock timers (on the dock window).
 const TIMER_SCAN: usize = 10;
@@ -85,14 +90,21 @@ const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
 /// Refreshes clear glass's bent edges (see `lens`).
 const TIMER_LENS: usize = 19;
+/// Pastes a clipboard item once the app it's for is in front again.
+const TIMER_PASTE: usize = 20;
+/// The next moment the calendar needs a look: a countdown to show or step,
+/// or an event starting.
+const TIMER_CAL: usize = 21;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The Windows accent colour changed (Tinted Glass follows it).
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_DEVICECHANGE: u32 = 0x0219;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const EVENT_OBJECT_SHOW: u32 = 0x8002;
@@ -126,6 +138,86 @@ enum PeekKind {
     Timer,
     /// A short status line (`App::message`), e.g. update progress.
     Message,
+    /// A USB device came or went (`App::device`); clicking opens its app.
+    Device,
+}
+
+/// The surfaces `perf_log` times.
+#[derive(Clone, Copy)]
+enum Surface {
+    Notch,
+    Dock,
+    /// The other screens' taskbars, together.
+    Screens,
+    Launcher,
+    Flyout,
+    Quick,
+    Widgets,
+    Switcher,
+    Clipboard,
+}
+
+const SURFACES: [&str; 9] =
+    ["notch", "dock", "screens", "launcher", "flyout", "quick", "widgets", "switcher", "clipboard"];
+
+/// Each surface's render time and frame count, written to the log about once
+/// a second while `perf_log` is on (and nothing at all while it's off).
+struct Perf {
+    on: bool,
+    since: Instant,
+    total: [Duration; SURFACES.len()],
+    frames: [u32; SURFACES.len()],
+}
+
+impl Perf {
+    fn new(on: bool) -> Self {
+        Self { on, since: Instant::now(), total: [Duration::ZERO; SURFACES.len()], frames: [0; SURFACES.len()] }
+    }
+
+    fn start(&self) -> Option<Instant> {
+        self.on.then(Instant::now)
+    }
+
+    fn end(&mut self, s: Surface, started: Option<Instant>) {
+        if let Some(t) = started {
+            self.total[s as usize] += t.elapsed();
+            self.frames[s as usize] += 1;
+        }
+    }
+
+    /// "perf: notch 0.42 ms 60 fps | dock 1.80 ms 30 fps", for the surfaces drawn.
+    fn flush(&mut self) {
+        if !self.on {
+            return;
+        }
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let parts: Vec<String> = (0..SURFACES.len())
+            .filter(|&i| self.frames[i] > 0)
+            .map(|i| {
+                let ms = self.total[i].as_secs_f64() * 1000.0 / self.frames[i] as f64;
+                format!("{} {ms:.2} ms {:.0} fps", SURFACES[i], self.frames[i] as f64 / secs)
+            })
+            .collect();
+        if !parts.is_empty() {
+            config::log(&format!("perf: {}", parts.join(" | ")));
+        }
+        *self = Self::new(true);
+    }
+}
+
+/// A USB device being announced in the notch.
+struct DeviceNote {
+    device: Device,
+    /// The serial port it got, once Windows says.
+    port: Option<String>,
+    /// It was unplugged rather than plugged in.
+    removed: bool,
+    at: Instant,
+    /// The pointer is on the pop-up.
+    hot: bool,
 }
 
 /// Clickable things in the open notch.
@@ -140,6 +232,12 @@ enum Hot {
     Notifications,
     VolumeBar,
     BrightnessBar,
+    /// The mixer: the output device (opens the list of them), one of them,
+    /// an app's name (mutes it) and its volume.
+    Output,
+    OutputItem(usize),
+    AppMute(usize),
+    AppBar(usize),
     PomoToggle,
     PomoReset,
     PomoSkip,
@@ -239,6 +337,15 @@ struct App {
     content_w: f32,
 
     dock: Dock,
+    /// Taskbars on the other screens, left to right.
+    screens: Vec<Dock>,
+    /// The taskbar (0: the main one, then `screens`) the open pop-up belongs
+    /// to: the Start menu, widgets panel or Win+X menu.
+    pop: usize,
+    /// The taskbar the window previews are open over.
+    preview_dock: usize,
+    /// The taskbar an app's right-click menu came from.
+    menu_dock: usize,
     preview: Preview,
     hooks: Vec<HWINEVENTHOOK>,
     taskbar_hidden: bool,
@@ -252,11 +359,20 @@ struct App {
     flyout: Flyout,
     /// The Win+X menu.
     quick: QuickMenu,
+    /// The Win+V menu (made the first time it's opened), its reader, and the
+    /// window it pastes into.
+    clips: Option<ClipMenu>,
+    clip_tx: Sender<ClipCmd>,
+    clip_target: HWND,
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
     /// System stats, sampled only while a stats widget is on screen.
-    sysmon: Sampler,
-    stats_on: bool,
+    /// The latest stats readings, from the reader thread (see `sysmon`).
+    sysmon: Readings,
+    stats_tx: Sender<StatsCmd>,
+    /// How the reader was last started (its pace in ms, and whether it reads
+    /// the GPU and disk counters), or None while it's stopped.
+    stats_on: Option<(u32, bool)>,
     widgets: Widgets,
     widgets_seen: bool,
     /// Window changes come from the shell's own notifications (few) rather
@@ -281,6 +397,29 @@ struct App {
 
     message: String,
     message_color: Color,
+    /// Render times, logged with `perf_log`.
+    perf: Perf,
+    /// The Controls tab's volume mixer (read as Controls opens), and whether
+    /// its list of outputs is open.
+    mixer: Mixer,
+    outputs_open: bool,
+    /// Whether the theme bends light, and whether its refresh timer runs.
+    lens_wanted: bool,
+    lens_on: bool,
+    /// The USB device the notch is announcing.
+    device: Option<DeviceNote>,
+    /// Files being dragged over a taskbar app: (taskbar, app, since when,
+    /// whether its window was brought up).
+    drag: Option<(usize, usize, Instant, bool)>,
+    /// Windows' virtual desktops (see `desktops`).
+    desks: Desktops,
+    /// Your calendar's events (this month and the next six weeks), the
+    /// reader, the link it was last given, and what's been announced:
+    /// (event start, 0 coming up / 1 starting).
+    events: Vec<ics::Event>,
+    cal_tx: Sender<String>,
+    cal_url: String,
+    cal_said: Vec<(i64, u8)>,
     update_available: Option<u32>,
     updating: bool,
 }
@@ -385,6 +524,20 @@ pub fn run() -> Result<()> {
         APP.with(|c| c.borrow_mut().take());
     }
     Ok(())
+}
+
+/// Files dragged over taskbar `di` at screen point (x, y) (see `drop`).
+pub(crate) fn drag_over(di: usize, x: i32, y: i32) -> bool {
+    with_app(|a| a.on_drag(di, x, y)).unwrap_or(false)
+}
+
+pub(crate) fn drag_leave(di: usize) {
+    with_app(|a| a.on_drag_leave(di));
+}
+
+/// Files dropped on taskbar `di`; true if an app took them.
+pub(crate) fn drop_files(di: usize, x: i32, y: i32, files: Vec<String>) -> bool {
+    with_app(move |a| a.on_drop(di, x, y, files)).unwrap_or(false)
 }
 
 unsafe extern "system" fn win_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, object: i32, child: i32, _: u32, _: u32) {
@@ -497,6 +650,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         msg::ICON => {
             let icon = Box::from_raw(lp.0 as *mut IconResult);
             with_app(move |a| {
+                for d in &mut a.screens {
+                    d.on_icon((*icon).clone());
+                }
                 a.dock.on_icon(*icon);
                 a.launcher.dirty = true;
             });
@@ -510,6 +666,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
                     a.flyout.dirty = true;
                 }
             });
+            return LRESULT(0);
+        }
+        msg::DESKTOPS => {
+            with_app(|a| a.on_desktops());
+            return LRESULT(0);
+        }
+        msg::CALENDAR => {
+            let events = Box::from_raw(lp.0 as *mut Vec<ics::Event>);
+            with_app(move |a| a.on_events(*events));
+            return LRESULT(0);
+        }
+        msg::CLIPS => {
+            let c = Box::from_raw(lp.0 as *mut clipboard::Clips);
+            with_app(move |a| {
+                if let Some(m) = &mut a.clips {
+                    m.set(*c);
+                }
+            });
+            return LRESULT(0);
+        }
+        msg::RECENT => {
+            let list = Box::from_raw(lp.0 as *mut Vec<launcher::RecentFile>);
+            with_app(move |a| a.launcher.set_recent(*list));
+            return LRESULT(0);
+        }
+        msg::STATS => {
+            let r = Box::from_raw(lp.0 as *mut Readings);
+            with_app(move |a| a.on_stats(*r));
             return LRESULT(0);
         }
         msg::NOTIFS => {
@@ -597,6 +781,58 @@ fn date_text(format: PCWSTR) -> String {
     }
 }
 
+/// Local-seconds time `t` (see `ics`) in a date `format` ("ddd", "d MMM").
+fn date_at(t: i64, format: PCWSTR) -> String {
+    let st = calendar::system_time(t);
+    let mut d = [0u16; 64];
+    unsafe {
+        let n = GetDateFormatEx(
+            PCWSTR::null(),
+            ENUM_DATE_FORMATS_FLAGS(0),
+            Some(&st as *const SYSTEMTIME),
+            format,
+            Some(&mut d),
+            PCWSTR::null(),
+        );
+        String::from_utf16_lossy(&d[..(n.max(1) - 1) as usize])
+    }
+}
+
+/// The time of day of `t`, as the clock shows it ("10:30", "10:30 am").
+fn time_at(t: i64) -> String {
+    let st = calendar::system_time(t);
+    let mut b = [0u16; 32];
+    unsafe {
+        let n = GetTimeFormatEx(
+            PCWSTR::null(),
+            TIME_NOSECONDS,
+            Some(&st as *const SYSTEMTIME),
+            PCWSTR::null(),
+            Some(&mut b),
+        );
+        String::from_utf16_lossy(&b[..(n.max(1) - 1) as usize])
+    }
+}
+
+/// When an event is, for the agenda: "Now", "Today 10:30", "Tomorrow",
+/// "Fri 9:00".
+fn when(e: &ics::Event, now: i64) -> String {
+    if e.start <= now && e.end > now && !e.all_day {
+        return "Now".into();
+    }
+    let days = e.start.div_euclid(DAY) - now.div_euclid(DAY);
+    let day = match days {
+        ..=0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        _ => date_at(e.start, w!("ddd")),
+    };
+    if e.all_day {
+        day
+    } else {
+        format!("{day} {}", time_at(e.start))
+    }
+}
+
 fn clock() -> (String, String) {
     let mut t = [0u16; 64];
     unsafe {
@@ -612,6 +848,35 @@ fn battery() -> Option<(u8, bool)> {
         return None;
     }
     Some((s.BatteryLifePercent, s.ACLineStatus == 1))
+}
+
+unsafe extern "system" fn collect_monitor(h: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+    (*(out.0 as *mut Vec<HMONITOR>)).push(h);
+    true.into()
+}
+
+/// Every screen but the main one, left to right: (its rect, its DPI scale).
+fn other_screens() -> Vec<(RECT, f32)> {
+    let mut mons: Vec<HMONITOR> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(collect_monitor), LPARAM(&mut mons as *mut _ as isize));
+    }
+    let main = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    let mut out: Vec<(RECT, f32)> = mons
+        .into_iter()
+        .filter(|&m| m != main)
+        .filter_map(|m| unsafe {
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(m, &mut mi).as_bool() {
+                return None;
+            }
+            let (mut dx, mut dy) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            Some((mi.rcMonitor, dx.max(48) as f32 / 96.0))
+        })
+        .collect();
+    out.sort_by_key(|(r, _)| (r.left, r.top));
+    out
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -649,6 +914,7 @@ impl App {
         let media_tx = media::spawn();
         brightness::spawn_watcher();
         brightness::listen(hwnd);
+        devices::listen(hwnd);
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
         if cfg.weather {
@@ -721,6 +987,10 @@ impl App {
             origin_y: 0.0,
             content_w: 0.0,
             dock: Dock::new(dock_hwnd, trigger, icons::spawn(), dock_backdrops),
+            screens: Vec::new(),
+            pop: 0,
+            preview_dock: 0,
+            menu_dock: 0,
             preview: Preview::new(preview_hwnd),
             hooks: Vec::new(),
             taskbar_hidden: false,
@@ -732,14 +1002,18 @@ impl App {
             switcher: Switcher::new(switcher_hwnd, switcher_backdrop),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
+            clips: None,
+            clip_tx: clipboard::spawn(),
+            clip_target: HWND::default(),
             tray_rect: RECT::default(),
             outside_close: None,
             shell_msg: unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) },
             shell_hooked: false,
             taskbar_hook: None,
             edge_key: String::new(),
-            sysmon: Sampler::new(),
-            stats_on: false,
+            sysmon: Readings::default(),
+            stats_tx: sysmon::spawn(),
+            stats_on: None,
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
             widgets_seen: false,
             dock_held: false,
@@ -748,6 +1022,18 @@ impl App {
             tray_syncs: 0,
             message: String::new(),
             message_color: theme::accent(),
+            device: None,
+            drag: None,
+            desks: desktops::read(),
+            events: Vec::new(),
+            cal_tx: calendar::spawn(),
+            cal_url: String::new(),
+            cal_said: Vec::new(),
+            perf: Perf::new(cfg.perf_log),
+            mixer: Mixer::default(),
+            outputs_open: false,
+            lens_wanted: false,
+            lens_on: false,
             update_available: None,
             updating: false,
             cfg,
@@ -757,6 +1043,12 @@ impl App {
     fn start(&mut self) {
         shell::ensure_shortcuts();
         launcher::spawn_scan();
+        crate::drop::register(self.dock.hwnd, 0);
+        self.apply_calendar();
+        desktops::watch();
+        if self.cfg.launcher && self.cfg.start_show_recent {
+            launcher::spawn_recent();
+        }
         if self.cfg.update_check {
             update::spawn_checker(self.cfg.github_token.clone());
         }
@@ -795,7 +1087,11 @@ impl App {
             self.shell_hooked = false;
         }
         self.preview.hide();
+        crate::drop::revoke(self.dock.hwnd);
         self.dock.shutdown();
+        for d in &mut self.screens {
+            d.shutdown();
+        }
         shell::unregister_appbar(self.hwnd);
         self.tray = None;
         if self.flyout_hidden {
@@ -863,6 +1159,8 @@ impl App {
             let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
             let ranges = [
                 (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+                // A window dragged to another screen (its taskbar shows it).
+                (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
                 (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
                 (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
             ];
@@ -903,11 +1201,17 @@ impl App {
         if !self.cfg.launcher {
             self.launcher.hide();
         }
-        self.dock.configure(&self.cfg, self.monitor, self.dpi);
-        self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
+        self.configure_docks();
+        self.show_docks();
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.quick.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        if let Some(c) = &mut self.clips {
+            c.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            if !self.cfg.shortcut_win_v {
+                c.hide();
+            }
+        }
         self.widgets.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.switcher.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.notch_blur = theme::style_backdrop(
@@ -940,7 +1244,7 @@ impl App {
             _ => {}
         }
         if self.cfg.dock {
-            self.dock.scan();
+            self.scan_docks();
         } else {
             self.preview.hide();
         }
@@ -958,7 +1262,7 @@ impl App {
             View::Peek
         } else if self.expanded {
             View::Expanded
-        } else if self.cfg.live_activity && (self.playing() || self.pomo.running()) {
+        } else if self.cfg.live_activity && (self.playing() || self.pomo.running() || self.countdown().is_some()) {
             View::Live
         } else {
             View::Idle
@@ -1002,13 +1306,14 @@ impl App {
             View::Live => (iw + 104.0, ih, ih * 0.42),
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek if self.peek == Some(PeekKind::Message) => (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4),
+            View::Peek if self.peek == Some(PeekKind::Device) => (iw + 250.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek => (iw + 110.0, ih + 12.0, (ih + 12.0) * 0.4),
             // Every tab is as wide, so the tab bar under them holds still.
             View::Expanded => match self.mode {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
-                Mode::Controls => (420.0, 154.0 + TAB_BAR, 30.0),
-                Mode::Calendar => (420.0, 194.0 + TAB_BAR, 30.0),
+                Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
+                Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
         };
         (w, h, if lip { self.lip_radius() } else { r })
@@ -1100,6 +1405,9 @@ impl App {
     fn set_mode(&mut self, mode: Mode) {
         if mode != self.mode {
             self.mode = mode;
+            if mode == Mode::Controls {
+                self.read_mixer();
+            }
             self.tab.set(MODES.iter().position(|&m| m == mode).unwrap_or(0) as f32);
             self.hovered = None;
             self.fade.snap(0.0);
@@ -1115,7 +1423,7 @@ impl App {
         let value = match kind {
             PeekKind::Volume => self.vol.0,
             PeekKind::Brightness => self.brightness as f32 / 100.0,
-            PeekKind::Timer | PeekKind::Message => 0.0,
+            PeekKind::Timer | PeekKind::Message | PeekKind::Device => 0.0,
         };
         let again = self.peek == Some(kind) && self.view == View::Peek;
         if self.peek != Some(kind) {
@@ -1126,6 +1434,7 @@ impl App {
         unsafe {
             let ms = match kind {
                 PeekKind::Timer | PeekKind::Message => 4000,
+                PeekKind::Device => 6000,
                 _ => PEEK_MS,
             };
             SetTimer(Some(self.hwnd), TIMER_PEEK, ms, None);
@@ -1162,18 +1471,33 @@ impl App {
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
         }
+        if self.clips.as_ref().is_some_and(|c| c.hwnd == hwnd) {
+            return self.handle_clips(m, wp, lp);
+        }
         if hwnd == self.widgets.hwnd {
             return self.handle_widgets(m, wp, lp);
         }
         if hwnd == self.switcher.overlay {
-            return self.handle_switcher(m, lp);
+            return self.handle_switcher(m, wp, lp);
         }
         if m == msg::APPBAR {
+            if let Some(i) = self.screens.iter().position(|d| d.hwnd == hwnd) {
+                // Another screen's taskbar: only that screen is affected.
+                match wp.0 as u32 {
+                    ABN_FULLSCREENAPP => {
+                        self.screens[i].fullscreen = lp.0 != 0;
+                        self.show_docks();
+                    }
+                    ABN_POSCHANGED => self.screens[i].reposition(),
+                    _ => {}
+                }
+                return Some(LRESULT(0));
+            }
             match wp.0 as u32 {
                 ABN_FULLSCREENAPP => {
                     self.fullscreen = lp.0 != 0;
                     self.retarget();
-                    self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen) || self.launcher.open);
+                    self.show_docks();
                     self.sync_visualizer();
                     if self.fullscreen {
                         self.preview.hide();
@@ -1209,7 +1533,7 @@ impl App {
                 shell::hide_taskbar();
             }
             self.hook_taskbar();
-            self.dock.configure(&self.cfg, self.monitor, self.dpi);
+            self.configure_docks();
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
@@ -1220,7 +1544,11 @@ impl App {
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 self.update_display();
                 self.apply_edges(true);
-                self.dock.configure(&self.cfg, self.monitor, self.dpi);
+                self.configure_docks();
+                self.show_docks();
+                if self.cfg.dock {
+                    self.scan_docks();
+                }
                 self.retarget();
                 return Some(LRESULT(0));
             }
@@ -1234,6 +1562,9 @@ impl App {
             }
             WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETWORKAREA.0 => {
                 self.dock.refresh_bottom();
+                for d in &mut self.screens {
+                    d.refresh_bottom();
+                }
                 if hwnd == self.hwnd {
                     // A taskbar came or went: the notch keeps clear of it.
                     self.update_display();
@@ -1242,8 +1573,8 @@ impl App {
             }
             _ => {}
         }
-        if self.dock.is(hwnd) {
-            return self.handle_dock(hwnd, m, wp, lp);
+        if let Some(i) = self.dock_index(hwnd) {
+            return self.handle_dock(i, hwnd, m, wp, lp);
         }
         if hwnd == self.preview.hwnd {
             return self.handle_preview(m, lp);
@@ -1323,6 +1654,21 @@ impl App {
                 self.dirty = true;
             }
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
+            msg::CLIP_PASTE => {
+                // The item is on the clipboard: back to the app, then paste.
+                if wp.0 == 1 && !self.clip_target.is_invalid() {
+                    dock::focus_window(self.clip_target);
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_PASTE, 60, None);
+                    }
+                }
+            }
+            WM_DEVICECHANGE => {
+                if let Some(c) = unsafe { devices::parse(wp, lp) } {
+                    self.on_device(c);
+                }
+                return Some(LRESULT(1));
+            }
             msg::RADIOS => {
                 self.radios = Radios::unpack(wp.0);
                 self.dirty = true;
@@ -1360,6 +1706,158 @@ impl App {
                 MessageBoxW(None, &windows::core::HSTRING::from(text), w!("Cascade"), MB_OK | MB_ICONINFORMATION);
             });
         }
+    }
+
+    /// A USB device or serial port came or went (see `devices`).
+    fn on_device(&mut self, change: devices::Change) {
+        let all = match self.cfg.usb_popups.as_str() {
+            "off" => return,
+            mode => mode == "all",
+        };
+        match change {
+            devices::Change::Arrived(path) => {
+                if let Some(device) = devices::describe(&path, all) {
+                    self.device =
+                        Some(DeviceNote { device, port: None, removed: false, at: Instant::now(), hot: false });
+                    self.show_peek(PeekKind::Device);
+                }
+            }
+            devices::Change::Removed(path) if self.cfg.usb_unplug => {
+                if let Some(device) = devices::describe(&path, all) {
+                    self.device =
+                        Some(DeviceNote { device, port: None, removed: true, at: Instant::now(), hot: false });
+                    self.show_peek(PeekKind::Device);
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_PEEK, 2500, None);
+                    }
+                }
+            }
+            devices::Change::Removed(_) => {}
+            // The serial port the device just plugged in got (it comes a moment later).
+            devices::Change::Port(port) => {
+                let fresh = |d: &DeviceNote| {
+                    d.device.serial && !d.removed && d.port.is_none() && d.at.elapsed() < Duration::from_secs(10)
+                };
+                if let Some(d) = self.device.as_mut().filter(|d| fresh(d)) {
+                    d.port = Some(port);
+                    if self.peek == Some(PeekKind::Device) {
+                        self.dirty = true;
+                    } else {
+                        self.show_peek(PeekKind::Device);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hands the calendar reader its link when it changed (empty stops it).
+    fn apply_calendar(&mut self) {
+        if self.cfg.calendar_url.trim() != self.cal_url {
+            self.cal_url = self.cfg.calendar_url.trim().to_string();
+            let _ = self.cal_tx.send(self.cal_url.clone());
+            if self.cal_url.is_empty() {
+                self.events.clear();
+                self.retarget();
+                self.arm_calendar();
+            }
+        }
+    }
+
+    fn on_events(&mut self, events: Vec<ics::Event>) {
+        if self.cal_url.is_empty() {
+            return; // read before the link was taken away
+        }
+        self.events = events;
+        self.retarget();
+        self.arm_calendar();
+    }
+
+    /// The event counted down to on the closed notch: the next one starting
+    /// within `calendar_soon` minutes, and how far through that wait it is.
+    fn countdown(&self) -> Option<(&ics::Event, f32)> {
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        if soon == 0 || self.cal_url.is_empty() {
+            return None;
+        }
+        let now = calendar::now();
+        let e = self.events.iter().find(|e| !e.all_day && e.start > now && e.start - now <= soon)?;
+        Some((e, 1.0 - (e.start - now) as f32 / soon as f32))
+    }
+
+    /// Says in the notch when an event is coming up, and when it starts.
+    fn announce_events(&mut self) {
+        let now = calendar::now();
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        let mut say = None;
+        for e in self.events.iter().filter(|e| !e.all_day) {
+            let key = |k: u8| (e.start, k);
+            if e.start <= now && now - e.start < 120 && !self.cal_said.contains(&key(1)) {
+                say = Some((key(1), format!("{} \u{2014} now", e.title)));
+                break;
+            }
+            if soon > 0 && e.start > now && e.start - now <= soon && !self.cal_said.contains(&key(0)) {
+                let mins = ((e.start - now) as f32 / 60.0).round().max(1.0);
+                say = Some((key(0), format!("{} in {mins:.0} min", e.title)));
+                break;
+            }
+        }
+        if let Some((key, text)) = say {
+            self.cal_said.push(key);
+            // Only today's are worth remembering.
+            self.cal_said.retain(|(t, _)| now - t < DAY);
+            self.notify(text, theme::accent(), false);
+        }
+    }
+
+    /// Wakes up at the calendar's next moment: every 30 s while counting
+    /// down (to move the line), else when the next countdown or event starts.
+    fn arm_calendar(&mut self) {
+        let now = calendar::now();
+        let soon = self.cfg.calendar_soon as i64 * 60;
+        let next = self
+            .events
+            .iter()
+            .filter(|e| !e.all_day)
+            .flat_map(|e| [e.start - soon, e.start])
+            .filter(|&t| t > now)
+            .min();
+        unsafe {
+            match next {
+                _ if self.countdown().is_some() => {
+                    SetTimer(Some(self.hwnd), TIMER_CAL, 30_000, None);
+                }
+                Some(t) => {
+                    let ms = ((t - now).clamp(1, 3600) * 1000) as u32;
+                    SetTimer(Some(self.hwnd), TIMER_CAL, ms, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_CAL);
+                }
+            }
+        }
+    }
+
+    /// The next few events, for the Calendar tab.
+    fn agenda(&self) -> Vec<&ics::Event> {
+        let now = calendar::now();
+        let until = (now.div_euclid(DAY) + 7) * DAY;
+        calendar::upcoming(&self.events, now).filter(|e| e.start < until).take(3).collect()
+    }
+
+    /// Room for the agenda under the month.
+    fn agenda_h(&self) -> f32 {
+        match self.agenda().len() {
+            0 => 0.0,
+            n => 10.0 + n as f32 * 22.0,
+        }
+    }
+
+    fn device_hot(&self) -> bool {
+        self.device.as_ref().is_some_and(|d| d.hot)
+    }
+
+    fn device_removed(&self) -> bool {
+        self.device.as_ref().is_some_and(|d| d.removed)
     }
 
     fn on_update(&mut self, outcome: usize, build: u32) {
@@ -1403,6 +1901,9 @@ impl App {
 
     fn on_media(&mut self, info: Option<MediaInfo>) {
         self.media = info;
+        // A new song, its art, or play / pause on the music widget.
+        self.dock.dirty = true;
+        self.widgets.dirty = true;
         self.retarget();
     }
 
@@ -1418,6 +1919,17 @@ impl App {
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
             let _ = KillTimer(Some(self.hwnd), TIMER_COLLAPSE);
+            if self.peek == Some(PeekKind::Device) && !self.expanded {
+                // A device pop-up stays while pointed at, to be clicked.
+                let _ = KillTimer(Some(self.hwnd), TIMER_PEEK);
+                if !self.device_hot() {
+                    if let Some(d) = &mut self.device {
+                        d.hot = true;
+                        self.dirty = true;
+                    }
+                }
+                return;
+            }
             if !self.expanded && !self.expand_pending {
                 self.expand_pending = true;
                 SetTimer(Some(self.hwnd), TIMER_EXPAND, self.cfg.expand_delay_ms.max(1), None);
@@ -1439,6 +1951,16 @@ impl App {
         if self.dragging.is_some() {
             return;
         }
+        if self.peek == Some(PeekKind::Device) && !self.expanded {
+            if let Some(d) = &mut self.device {
+                d.hot = false;
+            }
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PEEK, 2500, None);
+            }
+            self.dirty = true;
+            return;
+        }
         self.expand_pending = false;
         self.hovered = None;
         unsafe {
@@ -1454,7 +1976,7 @@ impl App {
         if !self.expanded {
             return;
         }
-        if let Some(bar @ (Hot::VolumeBar | Hot::BrightnessBar)) = self.hit(x, y) {
+        if let Some(bar @ (Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_))) = self.hit(x, y) {
             if bar == Hot::BrightnessBar && !self.brightness_ok {
                 return;
             }
@@ -1470,6 +1992,28 @@ impl App {
     fn slider_value(&self, x: i32) -> f32 {
         let (x0, x1) = (50.0, self.content_w - 60.0);
         ((x as f32 / self.k - self.origin - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    }
+
+    /// The same for an app's slider in the mixer.
+    fn app_slider_value(&self, x: i32) -> f32 {
+        let (x0, x1) = (MIX_SLIDER_X, self.content_w - 60.0);
+        ((x as f32 / self.k - self.origin - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    }
+
+    /// Reads the mixer (the apps playing and the outputs) for Controls.
+    fn read_mixer(&mut self) {
+        self.outputs_open = false;
+        self.mixer = if self.cfg.controls_mixer { Mixer::read() } else { Mixer::default() };
+    }
+
+    /// The mixer's rows: the output (and the list of them when open), then
+    /// up to `MIX_APPS` apps.
+    fn mixer_h(&self) -> f32 {
+        if self.mixer.outputs.is_empty() {
+            return 0.0;
+        }
+        let list = if self.outputs_open { self.mixer.outputs.len() as f32 * MIX_ITEM_H } else { 0.0 };
+        MIX_GAP + MIX_ROW + list + self.mixer.apps.len().min(MIX_APPS) as f32 * MIX_ROW
     }
 
     fn drag_to(&mut self, bar: Hot, x: i32) {
@@ -1491,6 +2035,10 @@ impl App {
                     let _ = self.brightness_tx.send(b);
                 }
             }
+            Hot::AppBar(i) => {
+                let v = self.app_slider_value(x);
+                self.mixer.set_level(i, v);
+            }
             _ => {}
         }
         self.dirty = true;
@@ -1501,6 +2049,18 @@ impl App {
             unsafe {
                 let _ = ReleaseCapture();
             }
+            return;
+        }
+        if self.peek == Some(PeekKind::Device) && !self.expanded {
+            // Opens what the device goes with (Betaflight for a flight controller).
+            if let Some(open) =
+                self.device.as_ref().and_then(|d| d.device.open.clone()).filter(|_| !self.device_removed())
+            {
+                shell::open(&open);
+            }
+            self.device = None;
+            self.peek = None;
+            self.retarget();
             return;
         }
         if !self.expanded {
@@ -1574,7 +2134,16 @@ impl App {
                     let _ = KillTimer(Some(self.hwnd), TIMER_POMODORO);
                 }
             }
-            Hot::VolumeBar | Hot::BrightnessBar => {}
+            Hot::Output => self.outputs_open = !self.outputs_open && self.mixer.outputs.len() > 1,
+            Hot::OutputItem(i) => {
+                if i != self.mixer.current && self.mixer.set_output(i) {
+                    // The apps now play through the new device.
+                    self.read_mixer();
+                }
+                self.outputs_open = false;
+            }
+            Hot::AppMute(i) => self.mixer.toggle_mute(i),
+            Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_) => {}
         }
         self.retarget();
     }
@@ -1598,7 +2167,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if ![TIMER_TICK, TIMER_POMODORO, TIMER_STATS, TIMER_SWITCH, TIMER_LENS].contains(&id) {
+            if ![TIMER_TICK, TIMER_POMODORO, TIMER_SWITCH, TIMER_LENS].contains(&id) {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -1616,11 +2185,28 @@ impl App {
                 self.retarget();
             }
             TIMER_PEEK => {
+                if self.peek == Some(PeekKind::Device) {
+                    self.device = None;
+                }
                 self.peek = None;
                 self.retarget();
             }
             TIMER_TICK => self.dirty = true,
-            TIMER_LENS => crate::lens::refresh(),
+            TIMER_PASTE => shell::paste(),
+            TIMER_CAL => {
+                self.announce_events();
+                self.retarget();
+                self.arm_calendar();
+            }
+            TIMER_LENS => {
+                // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
+                if !crate::lens::refresh() {
+                    self.lens_on = false;
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                    }
+                }
+            }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
@@ -1643,7 +2229,6 @@ impl App {
                     }
                 }
             }
-            TIMER_STATS => self.sample_stats(),
             TIMER_SWITCH => {
                 self.switcher.show_now();
                 // Alt let go without the hook seeing it (an admin window took the
@@ -1721,9 +2306,19 @@ impl App {
         }
         let rescan = match event {
             EVENT_SYSTEM_FOREGROUND => {
-                self.dock.foreground = hwnd;
-                self.dock.dirty = true;
-                !self.dock.tracks(hwnd)
+                let mut known = false;
+                let mut moved = false;
+                for d in std::iter::once(&mut self.dock).chain(self.screens.iter_mut()) {
+                    d.foreground = hwnd;
+                    d.dirty = true;
+                    known |= d.tracks(hwnd);
+                    moved |= d.misplaced(hwnd);
+                }
+                !known || moved
+            }
+            EVENT_SYSTEM_MOVESIZEEND => {
+                std::iter::once(&self.dock).chain(self.screens.iter()).any(|d| d.misplaced(hwnd))
+                    || (self.cfg.taskbar_screens == "all" && self.cfg.taskbar_screen_apps == "screen")
             }
             _ => unsafe { GetAncestor(hwnd, GA_PARENT) == GetDesktopWindow() },
         };
@@ -1749,7 +2344,9 @@ impl App {
                     SetTimer(Some(dock), TIMER_SCAN, 300, None);
                     SetTimer(Some(dock), TIMER_SCAN2, 1500, None);
                 }
-                HSHELL_WINDOWDESTROYED if self.dock.tracks(hwnd) => {
+                HSHELL_WINDOWDESTROYED
+                    if std::iter::once(&self.dock).chain(self.screens.iter()).any(|d| d.tracks(hwnd)) =>
+                {
                     SetTimer(Some(dock), TIMER_SCAN, 120, None);
                 }
                 _ => {}
@@ -1795,19 +2392,25 @@ impl App {
         if hwnd == self.widgets.hwnd || hwnd == self.switcher.overlay {
             return RightClick::Nothing;
         }
+        if self.clips.as_ref().is_some_and(|c| c.hwnd == hwnd) {
+            return RightClick::Nothing;
+        }
         if hwnd == self.flyout.hwnd {
             if let Some(i) = self.flyout.hovered() {
                 self.systray.click(i, true);
             }
             return RightClick::Nothing;
         }
-        if hwnd == self.dock.hwnd {
-            if let Some(dock::Hot::TrayIcon(i)) = self.dock.hovered {
+        let on_dock = self.screens.iter().position(|d| d.hwnd == hwnd).map(|i| i + 1);
+        let on_dock = if hwnd == self.dock.hwnd { Some(0) } else { on_dock };
+        if let Some(di) = on_dock {
+            let hovered = self.dock_ref(di).hovered;
+            if let Some(dock::Hot::TrayIcon(i)) = hovered {
                 self.systray.click(i, true);
                 return RightClick::Nothing;
             }
             // Right-clicking Start opens the Win+X menu, as in Windows.
-            if self.dock.hovered == Some(dock::Hot::Start) && self.cfg.shortcut_win_x {
+            if hovered == Some(dock::Hot::Start) && self.cfg.shortcut_win_x {
                 self.open_quick(false);
                 return RightClick::Nothing;
             }
@@ -1829,15 +2432,14 @@ impl App {
         if self.settings.as_ref().is_some_and(|s| s.hwnd == hwnd) {
             return RightClick::Nothing;
         }
-        if hwnd == self.dock.hwnd {
-            if let Some(i) = self.dock.hovered_app() {
-                let a = &self.dock.apps[i];
-                return RightClick::App {
-                    id: a.id.clone(),
-                    name: self.dock.name(i),
-                    pinned: a.pinned,
-                    windows: a.windows.len(),
-                };
+        if let Some(di) = on_dock {
+            let d = self.dock_ref(di);
+            if let Some(i) = d.hovered_app() {
+                let a = &d.apps[i];
+                let target =
+                    RightClick::App { id: a.id.clone(), name: d.name(i), pinned: a.pinned, windows: a.windows.len() };
+                self.menu_dock = di;
+                return target;
             }
         }
         RightClick::General
@@ -1930,6 +2532,8 @@ impl App {
             }
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
+        self.perf = Perf::new(self.cfg.perf_log);
+        self.apply_calendar();
         self.update_display();
         self.apply_taskbar();
         self.apply_flyout();
@@ -1942,19 +2546,26 @@ impl App {
     }
 
     /// Keeps clear glass's bent edges up to date with what's behind them, a
-    /// few times a second, while the theme bends light.
+    /// few times a second, while the theme bends light and a ring is on
+    /// screen (`frame` starts it again when one comes back).
     fn arm_lens(&mut self) {
-        unsafe {
-            if theme::refracts(self.cfg.acrylic) {
-                SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
-            } else {
-                let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+        self.lens_wanted = theme::refracts(self.cfg.acrylic);
+        let on = self.lens_wanted && crate::lens::active();
+        if on != self.lens_on {
+            self.lens_on = on;
+            unsafe {
+                if on {
+                    SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                }
             }
         }
     }
 
     /// Redraws every surface, e.g. after the theme changed.
     fn restyle(&mut self) {
+        self.gfx.clear_cache();
         self.arm_lens();
         self.dirty = true;
         self.dock.dirty = true;
@@ -1985,6 +2596,10 @@ impl App {
             self.quick.hide();
             closed = true;
         }
+        if let Some(c) = self.clips.as_mut().filter(|c| c.open) {
+            c.hide();
+            closed = true;
+        }
         if self.widgets.open {
             self.widgets.hide();
             closed = true;
@@ -2012,19 +2627,25 @@ impl App {
             return;
         }
         self.preview.hide();
+        // On the screen the pointer is on, over its taskbar.
+        self.pop = self.dock_under_cursor();
         // The taskbar comes up with the menu, even if it was hidden for a
         // fullscreen app or is set to auto-hide.
-        self.dock.set_visible(true);
+        self.pd_mut().set_visible(true);
         self.dock_held = true;
-        self.dock.set_held(true);
-        self.launcher.show(self.dpi, self.dock.pinned_apps());
+        self.pd_mut().set_held(true);
+        let k = self.pd().k();
+        self.launcher.show(k, self.dock.pinned_apps());
     }
 
     fn launcher_bottom(&self) -> i32 {
-        if self.dock.shown {
-            self.dock.panel_top()
-        } else {
+        let d = self.pd();
+        if d.shown {
+            d.panel_top()
+        } else if self.pop == 0 {
             shell::work_area().bottom
+        } else {
+            shell::work_area_of(d.monitor()).bottom
         }
     }
 
@@ -2035,6 +2656,10 @@ impl App {
                 self.launcher.hide();
             }
             launcher::Action::Close => self.launcher.hide(),
+            launcher::Action::Copy(text) => {
+                clipboard::copy(&text);
+                self.launcher.hide();
+            }
             launcher::Action::Settings => {
                 self.launcher.hide();
                 self.open_settings();
@@ -2141,6 +2766,7 @@ impl App {
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
             Change::Action("open_config") => shell::open_file(&config::path()),
             Change::Action("open_folder") => shell::open_file(&config::dir()),
+            Change::Action("edit_devices") => devices::edit_list(),
             Change::Action(_) => {}
         }
         if let Some(s) = &self.settings {
@@ -2215,16 +2841,18 @@ impl App {
     }
 
     fn on_app_cmd(&mut self, id: &str, cmd: AppCmd) {
-        let Some(i) = self.dock.apps.iter().position(|a| a.id == id) else { return };
+        let di = self.menu_dock;
+        let d = self.dock_mut(di);
+        let Some(i) = d.apps.iter().position(|a| a.id == id) else { return };
         match cmd {
-            AppCmd::NewWindow => self.dock.launch_new(i),
-            AppCmd::TogglePin => self.dock.toggle_pin(i),
+            AppCmd::NewWindow => d.launch_new(i),
+            AppCmd::TogglePin => d.toggle_pin(i),
             AppCmd::CloseAll => {
-                self.dock.close_all(i);
+                d.close_all(i);
                 self.preview.hide();
             }
             AppCmd::ForceClose => {
-                self.dock.force_close(i);
+                d.force_close(i);
                 self.preview.hide();
             }
             AppCmd::None => {}
@@ -2233,40 +2861,52 @@ impl App {
 
     // ------------------------------------------------------- dock glue --
 
-    fn handle_dock(&mut self, hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
-        let dock = self.dock.hwnd;
+    /// Events for taskbar `di` (0: the main one, then `screens`).
+    fn handle_dock(&mut self, di: usize, hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let dock = self.dock_ref(di).hwnd;
         unsafe {
             match m {
-                WM_MOUSEMOVE if hwnd == self.dock.trigger => {
-                    self.dock.show_now();
+                WM_MOUSEMOVE if hwnd == self.dock_ref(di).trigger => {
+                    self.dock_mut(di).show_now();
                     SetTimer(Some(dock), TIMER_DOCK_HIDE, 1500, None);
                 }
                 WM_MOUSEMOVE => {
                     let _ = KillTimer(Some(dock), TIMER_DOCK_HIDE);
-                    let _ = KillTimer(Some(dock), TIMER_PREVIEW_HIDE);
+                    let _ = KillTimer(Some(self.dock_ref(self.preview_dock).hwnd), TIMER_PREVIEW_HIDE);
                     let (x, y) = lparam_xy(lp);
-                    if self.dock.on_move(x, y) {
-                        self.schedule_preview();
+                    if self.dock_mut(di).on_move(x, y) {
+                        self.schedule_preview(di);
                     }
                 }
                 WM_MOUSELEAVE => {
-                    self.dock.on_leave();
+                    self.dock_mut(di).on_leave();
                     SetTimer(Some(dock), TIMER_DOCK_HIDE, 600, None);
                     if self.preview.visible() {
                         SetTimer(Some(dock), TIMER_PREVIEW_HIDE, 300, None);
                     }
                     let _ = KillTimer(Some(dock), TIMER_PREVIEW_SHOW);
                 }
-                WM_LBUTTONDOWN => self.dock.on_down(lparam_xy(lp).0),
+                WM_LBUTTONDOWN => self.dock_mut(di).on_down(lparam_xy(lp).0),
                 WM_LBUTTONUP => {
-                    if let Some(hot) = self.dock.on_up() {
+                    if let Some(hot) = self.dock_mut(di).on_up() {
                         self.preview.hide();
-                        self.on_dock_click(hot);
+                        self.on_dock_click(di, hot);
                     }
                 }
+                // Scrolling over the desktops widget goes to the next or previous desktop.
+                WM_MOUSEWHEEL => {
+                    if self.dock_ref(di).hovered != Some(DockHot::Chip(dock::Chip::Desktops)) {
+                        return None;
+                    }
+                    let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
+                    let (n, cur) = (self.desks.names.len(), self.desks.current);
+                    let to = if delta < 0 { (cur + 1).min(n.saturating_sub(1)) } else { cur.saturating_sub(1) };
+                    desktops::switch(cur, to);
+                }
                 WM_MBUTTONUP => {
-                    if let Some(i) = self.dock.hovered_app() {
-                        self.dock.launch_new(i);
+                    let d = self.dock_mut(di);
+                    if let Some(i) = d.hovered_app() {
+                        d.launch_new(i);
                     }
                 }
                 WM_TIMER => {
@@ -2276,20 +2916,23 @@ impl App {
                             if self.systray.prune() {
                                 self.dock.dirty = true;
                             }
-                            self.dock.scan();
+                            self.scan_docks();
                             self.refresh_preview();
                         }
                         TIMER_DOCK_HIDE => {
-                            if self.preview.visible() {
+                            if self.preview.visible() && self.preview_dock == di {
                                 SetTimer(Some(dock), TIMER_DOCK_HIDE, 600, None);
                             } else {
-                                self.dock.hide_if_idle();
+                                self.dock_mut(di).hide_if_idle();
                             }
                         }
                         TIMER_PREVIEW_SHOW => self.show_preview(),
                         TIMER_PREVIEW_HIDE => self.preview.hide(),
                         TIMER_CLOCK => {
                             self.dock.dirty = true;
+                            for d in &mut self.screens {
+                                d.dirty = true;
+                            }
                             self.arm_clock();
                         }
                         _ => {}
@@ -2301,7 +2944,197 @@ impl App {
         Some(LRESULT(0))
     }
 
-    fn on_dock_click(&mut self, hot: DockHot) {
+    // ----------------------------------------------- dropping files --
+
+    /// The app under screen point (x, y) on taskbar `di`, lit as if hovered,
+    /// and its front window.
+    fn app_at(&mut self, di: usize, x: i32, y: i32) -> Option<(usize, Option<HWND>)> {
+        let d = self.dock_mut(di);
+        let mut p = POINT { x, y };
+        unsafe {
+            let _ = ScreenToClient(d.hwnd, &mut p);
+        }
+        d.on_move(p.x, p.y);
+        let i = d.hovered_app()?;
+        Some((i, d.apps[i].windows.first().copied()))
+    }
+
+    /// Files dragged over taskbar `di`: true over an app (which takes them).
+    /// Held over an app with windows for a moment, its window comes up.
+    fn on_drag(&mut self, di: usize, x: i32, y: i32) -> bool {
+        let Some((i, window)) = self.app_at(di, x, y) else {
+            self.drag = None;
+            return false;
+        };
+        match &mut self.drag {
+            Some((d, a, since, raised)) if *d == di && *a == i => {
+                if !*raised && since.elapsed() > Duration::from_millis(700) {
+                    *raised = true;
+                    if let Some(w) = window {
+                        dock::focus_window(w);
+                    }
+                }
+            }
+            _ => self.drag = Some((di, i, Instant::now(), false)),
+        }
+        true
+    }
+
+    fn on_drag_leave(&mut self, di: usize) {
+        self.drag = None;
+        self.dock_mut(di).on_leave();
+    }
+
+    /// Files dropped on taskbar `di`: opened with the app they're on.
+    fn on_drop(&mut self, di: usize, x: i32, y: i32, files: Vec<String>) -> bool {
+        self.drag = None;
+        let app = self.app_at(di, x, y);
+        self.dock_mut(di).on_leave();
+        let Some((i, _)) = app else { return false };
+        let id = self.dock_ref(di).apps[i].id.clone();
+        if id.to_ascii_lowercase().ends_with(".exe") {
+            let args: Vec<String> = files.iter().map(|f| format!("\"{f}\"")).collect();
+            shell::launch(&id, &args.join(" "), false);
+        } else {
+            // A Store app can't be handed files this way: open them as usual.
+            for f in &files {
+                shell::open(f);
+            }
+        }
+        true
+    }
+
+    // ------------------------------------------------- other screens --
+
+    fn dock_ref(&self, di: usize) -> &Dock {
+        match di.checked_sub(1) {
+            Some(i) if i < self.screens.len() => &self.screens[i],
+            _ => &self.dock,
+        }
+    }
+
+    fn dock_mut(&mut self, di: usize) -> &mut Dock {
+        match di.checked_sub(1) {
+            Some(i) if i < self.screens.len() => &mut self.screens[i],
+            _ => &mut self.dock,
+        }
+    }
+
+    /// Which taskbar `hwnd` is (or its auto-hide strip): 0 the main one.
+    fn dock_index(&self, hwnd: HWND) -> Option<usize> {
+        if self.dock.is(hwnd) {
+            return Some(0);
+        }
+        self.screens.iter().position(|d| d.is(hwnd)).map(|i| i + 1)
+    }
+
+    /// The taskbar the open pop-up belongs to.
+    fn pd(&self) -> &Dock {
+        self.dock_ref(self.pop)
+    }
+
+    fn pd_mut(&mut self) -> &mut Dock {
+        let i = self.pop;
+        self.dock_mut(i)
+    }
+
+    /// The taskbar on the screen the pointer is on (the main one if that
+    /// screen has none).
+    fn dock_under_cursor(&self) -> usize {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        let inside = |r: RECT| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+        self.screens.iter().position(|d| d.shown && inside(d.monitor())).map_or(0, |i| i + 1)
+    }
+
+    /// Applies the config to the main taskbar, and makes, fits or takes away
+    /// the other screens' ones to match the screens there are.
+    fn configure_docks(&mut self) {
+        self.dock.configure(&self.cfg, self.monitor, self.dpi);
+        let want = if self.cfg.dock && self.cfg.taskbar_screens == "all" { other_screens() } else { Vec::new() };
+        let before = self.screens.len();
+        if self.screens.len() > want.len() {
+            for d in self.screens.drain(want.len()..) {
+                d.destroy();
+            }
+        }
+        while self.screens.len() < want.len() {
+            match self.make_screen_dock() {
+                Some(d) => {
+                    crate::drop::register(d.hwnd, self.screens.len() + 1);
+                    self.screens.push(d);
+                }
+                None => break,
+            }
+        }
+        for (d, &(monitor, dpi)) in self.screens.iter_mut().zip(&want) {
+            d.configure(&self.cfg, monitor, dpi);
+        }
+        if self.screens.len() != before {
+            self.pop = 0;
+            self.preview_dock = 0;
+            self.menu_dock = 0;
+            if self.screens.len() > before {
+                self.scan_docks();
+            }
+        }
+    }
+
+    fn make_screen_dock(&self) -> Option<Dock> {
+        let class = w!("CascadeWindow");
+        let layered = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        let hwnd = create_window(class, self.instance, layered).ok()?;
+        let Ok(trigger) = create_window(class, self.instance, layered) else {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return None;
+        };
+        let backdrops = (0..4).filter_map(|_| Backdrop::create(self.instance).ok()).collect();
+        Some(Dock::new_secondary(hwnd, trigger, self.dock.icon_sender(), backdrops))
+    }
+
+    /// Shows each taskbar unless a fullscreen app is in front on its screen
+    /// (or a pop-up from it is open).
+    fn show_docks(&mut self) {
+        let hide = self.cfg.hide_in_fullscreen;
+        let held = self.launcher.open || self.widgets.open || self.quick.open;
+        let pop = self.pop;
+        let main = !(hide && self.fullscreen) || (held && pop == 0);
+        self.dock.set_visible(main);
+        for (i, d) in self.screens.iter_mut().enumerate() {
+            let on = !(hide && d.fullscreen) || (held && pop == i + 1);
+            d.set_visible(on);
+        }
+    }
+
+    fn scan_docks(&mut self) {
+        self.dock.scan();
+        for d in &mut self.screens {
+            d.scan();
+        }
+    }
+
+    /// Pinning, unpinning or reordering on one taskbar does the same on the others.
+    fn sync_pins(&mut self) {
+        let from = if self.dock.take_pins_changed() {
+            Some(0)
+        } else {
+            self.screens.iter_mut().position(|d| d.take_pins_changed()).map(|i| i + 1)
+        };
+        let Some(from) = from else { return };
+        let ids = self.dock_ref(from).pinned_ids();
+        for (i, d) in std::iter::once(&mut self.dock).chain(self.screens.iter_mut()).enumerate() {
+            if i != from {
+                d.adopt_pins(&ids);
+                d.take_pins_changed();
+            }
+        }
+    }
+
+    fn on_dock_click(&mut self, di: usize, hot: DockHot) {
         match hot {
             DockHot::Start | DockHot::Search => {
                 if self.just_closed() {
@@ -2312,7 +3145,7 @@ impl App {
                     shell::open_start_menu();
                 }
             }
-            DockHot::App(i) => self.dock.activate(i),
+            DockHot::App(i) => self.dock_mut(di).activate(i),
             DockHot::Weather => {
                 let q = if self.cfg.weather_location.trim().is_empty() {
                     "weather".to_string()
@@ -2332,6 +3165,7 @@ impl App {
             }
             DockHot::Tray => self.toggle_flyout(),
             DockHot::TrayIcon(i) => self.systray.click(i, false),
+            DockHot::Chip(dock::Chip::Desktops) => self.toggle_task_view(),
             DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
             DockHot::MusicToggle => self.toggle_play(),
             DockHot::Status => self.on_status_click(),
@@ -2362,6 +3196,7 @@ impl App {
         self.expand_pending = false;
         self.pinned = true;
         self.mode = Mode::Controls;
+        self.read_mixer();
         self.tab.snap(1.0);
         self.hovered = None;
         unsafe {
@@ -2425,13 +3260,31 @@ impl App {
         }
     }
 
-    fn handle_switcher(&mut self, m: u32, lp: LPARAM) -> Option<LRESULT> {
+    fn handle_switcher(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match m {
             WM_MOUSEMOVE => {
                 let (x, y) = lparam_xy(lp);
                 self.switcher.on_move(x, y);
             }
             WM_MOUSELEAVE => self.switcher.on_leave(),
+            // Task View: clicking anywhere else closes it.
+            WM_ACTIVATE if self.switcher.view => {
+                if wp.0 & 0xFFFF == 0 {
+                    self.switcher.hide();
+                }
+                return None;
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN if self.switcher.view => {
+                if let Some(a) = self.switcher.on_key_view(wp.0 as u16) {
+                    self.run_view(a);
+                }
+            }
+            WM_LBUTTONUP if self.switcher.view => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(a) = self.switcher.on_click_view(x, y) {
+                    self.run_view(a);
+                }
+            }
             WM_LBUTTONUP => {
                 let (x, y) = lparam_xy(lp);
                 if let Some(h) = self.switcher.on_click(x, y) {
@@ -2444,6 +3297,42 @@ impl App {
             _ => return None,
         }
         Some(LRESULT(0))
+    }
+
+    /// Win+Tab: Task View on the screen the pointer is on.
+    fn toggle_task_view(&mut self) {
+        if self.switcher.view {
+            self.switcher.hide();
+            return;
+        }
+        let d = self.dock_ref(self.dock_under_cursor());
+        let (k, monitor) = (d.k(), d.monitor());
+        let (k, monitor) = if monitor.right > monitor.left { (k, monitor) } else { (self.dpi, self.monitor) };
+        self.preview.hide();
+        self.launcher.hide();
+        self.desks = desktops::read();
+        self.switcher.begin_view(k, monitor, self.desks.clone());
+    }
+
+    fn run_view(&mut self, action: crate::switcher::ViewAction) {
+        use crate::switcher::ViewAction;
+        self.switcher.hide();
+        match action {
+            ViewAction::Focus(h) => dock::focus_window(h),
+            ViewAction::Desktop(i) => desktops::switch(self.desks.current, i),
+            ViewAction::NewDesktop => desktops::create(),
+            ViewAction::Close => {}
+        }
+    }
+
+    /// The desktops changed (one added, closed, renamed or switched to).
+    fn on_desktops(&mut self) {
+        let desks = desktops::read();
+        if desks != self.desks {
+            self.desks = desks;
+            self.dock.dirty = true;
+            self.switcher.set_desktops(self.desks.clone());
+        }
     }
 
     fn toggle_play(&mut self) {
@@ -2467,14 +3356,17 @@ impl App {
             return;
         }
         self.preview.hide();
+        self.pop = self.dock_under_cursor();
         self.dock_held = true;
-        self.dock.set_held(true);
-        let right = self.dock.bar_rect().right;
-        let bottom = self.dock.panel_top() - (8.0 * self.dpi) as i32;
-        let max_h = bottom - self.monitor.top - (8.0 * self.dpi) as i32;
+        self.pd_mut().set_held(true);
+        let d = self.pd();
+        let k = d.k();
+        let right = d.bar_rect().right;
+        let bottom = d.panel_top() - (8.0 * k) as i32;
+        let max_h = bottom - d.monitor().top - (8.0 * k) as i32;
         let notifications = self.cfg.widgets_notifications;
         let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
-        self.widgets.show(panel, notifications, columns, right, bottom, max_h, self.dpi);
+        self.widgets.show(panel, notifications, columns, right, bottom, max_h, k);
         self.arm_stats();
         if notifications {
             // Read now, then every few seconds while the panel stays open.
@@ -2554,27 +3446,29 @@ impl App {
     fn arm_stats(&mut self) {
         let chips = ["cpu", "ram", "gpu", "net"].iter().any(|n| self.cfg.placed(n));
         let want = (self.cfg.dock && self.dock.shown && chips) || self.widgets.open;
-        unsafe {
-            if want {
-                let ms = if self.widgets.open { 1000 } else { self.cfg.stats_seconds.max(1) * 1000 };
-                if !self.stats_on {
-                    self.stats_on = true;
-                    self.sample_stats(); // the first reading is only a baseline
-                }
-                SetTimer(Some(self.hwnd), TIMER_STATS, ms, None);
-            } else if self.stats_on {
-                self.stats_on = false;
-                let _ = KillTimer(Some(self.hwnd), TIMER_STATS);
-                self.sysmon.reset();
-            }
+        // GPU and disk load cost a bit more: only when they are shown.
+        let pace = want.then(|| {
+            let ms = if self.widgets.open { 1000 } else { self.cfg.stats_seconds.max(1) * 1000 };
+            (ms, self.cfg.placed("gpu") || self.widgets.open)
+        });
+        if pace != self.stats_on {
+            self.stats_on = pace;
+            let cmd = match pace {
+                Some((ms, counters)) => StatsCmd::Start { every: Duration::from_millis(ms as u64), counters },
+                None => StatsCmd::Stop,
+            };
+            let _ = self.stats_tx.send(cmd);
         }
     }
 
-    fn sample_stats(&mut self) {
-        let before = self.sysmon.stats.signature();
-        // GPU and disk load cost a bit more: only when they are shown.
-        self.sysmon.sample(self.cfg.placed("gpu") || self.widgets.open);
-        if self.sysmon.stats.signature() != before {
+    /// A reading from the stats thread.
+    fn on_stats(&mut self, readings: Readings) {
+        if self.stats_on.is_none() {
+            return; // one still on its way when the reader was stopped
+        }
+        let before = self.sysmon.signature();
+        self.sysmon = readings;
+        if self.sysmon.signature() != before {
             self.dock.dirty = true;
         }
         if self.widgets.open {
@@ -2634,6 +3528,11 @@ impl App {
             b'N' => self.toggle_widgets(),
             b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
             b'A' => self.open_controls(),
+            b'\t' => self.toggle_task_view(),
+            b'V' => match &mut self.clips {
+                Some(c) if c.open => c.hide(),
+                _ => self.open_clips(),
+            },
             _ => {}
         }
     }
@@ -2645,15 +3544,126 @@ impl App {
         self.launcher.hide();
         self.flyout.hide();
         self.widgets.hide();
-        let gap = (8.0 * self.dpi) as i32;
-        let (left, bottom) = if self.cfg.dock && self.dock.visible() {
-            (self.dock.start_x(), self.dock.panel_top() - gap)
+        self.pop = self.dock_under_cursor();
+        let d = self.pd();
+        let k = d.k();
+        let gap = (8.0 * k) as i32;
+        let (left, bottom, monitor) = if self.cfg.dock && d.visible() {
+            (d.start_x(), d.panel_top() - gap, d.monitor())
         } else {
             let work = shell::work_area();
-            (work.left + gap, work.bottom - gap)
+            (work.left + gap, work.bottom - gap, self.monitor)
         };
         let laptop = battery().is_some();
-        self.quick.show(left, bottom, self.monitor, laptop, keyboard, self.dpi);
+        self.quick.show(left, bottom, monitor, laptop, keyboard, k);
+    }
+
+    /// The Win+V menu, by the text cursor in the app in front (or the pointer
+    /// when the app doesn't say where its cursor is).
+    fn open_clips(&mut self) {
+        let fg = unsafe { GetForegroundWindow() };
+        if self.clips.as_ref().is_none_or(|c| c.hwnd != fg) {
+            self.clip_target = fg;
+        }
+        if self.clips.is_none() {
+            let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+            let (Ok(hwnd), Ok(backdrop)) =
+                (create_window(w!("CascadeWindow"), self.instance, ex), Backdrop::create(self.instance))
+            else {
+                return;
+            };
+            let mut menu = ClipMenu::new(hwnd, backdrop);
+            menu.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            self.clips = Some(menu);
+        }
+        let at = clipboard::caret().unwrap_or_else(|| {
+            let mut p = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+            }
+            p
+        });
+        let bounds = shell::work_area_of(RECT { left: at.x, top: at.y, right: at.x + 1, bottom: at.y + 1 });
+        let k = unsafe {
+            let mon = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
+            let (mut dx, mut dy) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            dx.max(48) as f32 / 96.0
+        };
+        self.preview.hide();
+        self.launcher.hide();
+        self.quick.hide();
+        if let Some(c) = &mut self.clips {
+            c.show(at.x, at.y, bounds, k);
+        }
+        // Read once it's in front: Windows only hands the history to the app in front.
+        let _ = self.clip_tx.send(ClipCmd::Refresh);
+    }
+
+    fn run_clip(&mut self, action: clipboard::Action) {
+        use clipboard::Action;
+        let close = |a: &mut Self| {
+            if let Some(c) = &mut a.clips {
+                c.hide();
+            }
+        };
+        match action {
+            Action::Paste(id) => {
+                close(self);
+                let _ = self.clip_tx.send(ClipCmd::Paste(id));
+            }
+            Action::Delete(id) => {
+                let _ = self.clip_tx.send(ClipCmd::Delete(id));
+            }
+            Action::Clear => {
+                let _ = self.clip_tx.send(ClipCmd::Clear);
+            }
+            Action::Settings => {
+                close(self);
+                shell::open("ms-settings:clipboard");
+            }
+            Action::Windows => {
+                close(self);
+                shell::win_combo(b'V' as u16);
+            }
+            Action::Close => close(self),
+        }
+    }
+
+    fn handle_clips(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let c = self.clips.as_mut()?;
+        let action = match m {
+            WM_ACTIVATE => {
+                // Clicking anywhere else closes it.
+                if wp.0 & 0xFFFF == 0 {
+                    c.hide();
+                }
+                return None;
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                c.on_move(x, y);
+                None
+            }
+            WM_MOUSELEAVE => {
+                c.on_leave();
+                None
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                c.on_click(x, y)
+            }
+            WM_MOUSEWHEEL => {
+                c.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+                None
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => c.on_key(wp.0 as u16),
+            _ => return None,
+        };
+        if let Some(a) = action {
+            self.run_clip(a);
+        }
+        Some(LRESULT(0))
     }
 
     fn run_quick(&mut self, action: quickmenu::Action) {
@@ -2705,11 +3715,16 @@ impl App {
     }
 
     /// Opens (after a short hover) or retargets the preview for the hovered app.
-    fn schedule_preview(&mut self) {
-        let dock = self.dock.hwnd;
-        let has_windows = self.dock.hovered_app().is_some_and(|i| !self.dock.apps[i].windows.is_empty());
+    fn schedule_preview(&mut self, di: usize) {
+        let d = self.dock_ref(di);
+        let dock = d.hwnd;
+        let has_windows = d.hovered_app().is_some_and(|i| !d.apps[i].windows.is_empty());
         unsafe {
             if has_windows {
+                if self.preview_dock != di {
+                    let _ = KillTimer(Some(self.dock_ref(self.preview_dock).hwnd), TIMER_PREVIEW_SHOW);
+                    self.preview_dock = di;
+                }
                 let delay = if self.preview.visible() { 1 } else { 450 };
                 SetTimer(Some(dock), TIMER_PREVIEW_SHOW, delay, None);
             } else {
@@ -2722,33 +3737,37 @@ impl App {
     }
 
     fn show_preview(&mut self) {
-        let Some(i) = self.dock.hovered_app() else { return };
-        let app = &self.dock.apps[i];
+        let d = self.dock_ref(self.preview_dock);
+        let Some(i) = d.hovered_app() else { return };
+        let app = &d.apps[i];
         if app.windows.is_empty() {
             return;
         }
         let (id, windows) = (app.id.clone(), app.windows.clone());
-        let x = self.dock.app_screen_x(i);
-        let bottom = self.dock.panel_top() - (6.0 * self.dpi) as i32;
-        self.preview.show(&id, &windows, x, bottom, self.monitor, self.dpi);
+        let x = d.app_screen_x(i);
+        let bottom = d.panel_top() - (6.0 * d.k()) as i32;
+        let (monitor, k) = (d.monitor(), d.k());
+        self.preview.show(&id, &windows, x, bottom, monitor, k);
     }
 
     /// After a rescan, keeps an open preview in sync with the app's windows.
     fn refresh_preview(&mut self) {
         let Some(id) = self.preview.app.clone() else { return };
-        match self.dock.apps.iter().position(|a| a.id == id) {
-            Some(i) if !self.dock.apps[i].windows.is_empty() => {
-                let windows = self.dock.apps[i].windows.clone();
-                let x = self.dock.app_screen_x(i);
-                let bottom = self.dock.panel_top() - (6.0 * self.dpi) as i32;
-                self.preview.show(&id, &windows, x, bottom, self.monitor, self.dpi);
+        let d = self.dock_ref(self.preview_dock);
+        match d.apps.iter().position(|a| a.id == id) {
+            Some(i) if !d.apps[i].windows.is_empty() => {
+                let windows = d.apps[i].windows.clone();
+                let x = d.app_screen_x(i);
+                let bottom = d.panel_top() - (6.0 * d.k()) as i32;
+                let (monitor, k) = (d.monitor(), d.k());
+                self.preview.show(&id, &windows, x, bottom, monitor, k);
             }
             _ => self.preview.hide(),
         }
     }
 
     fn handle_preview(&mut self, m: u32, lp: LPARAM) -> Option<LRESULT> {
-        let dock = self.dock.hwnd;
+        let dock = self.dock_ref(self.preview_dock).hwnd;
         unsafe {
             match m {
                 WM_MOUSEMOVE => {
@@ -2771,7 +3790,7 @@ impl App {
                         }
                         Some(preview::Action::Close(w)) => {
                             let _ = PostMessageW(Some(w), WM_CLOSE, WPARAM(0), LPARAM(0));
-                            SetTimer(Some(dock), TIMER_SCAN, 300, None);
+                            SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 300, None);
                         }
                         None => {}
                     }
@@ -2819,9 +3838,11 @@ impl App {
         self.notch_wants()
             || (self.widget_bars && self.bars_moving())
             || self.dock.wants_frame()
+            || self.screens.iter().any(|d| d.wants_frame())
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
             || self.quick.wants_frame()
+            || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
     }
@@ -2846,11 +3867,13 @@ impl App {
                 }
                 if self.dock_bars && now.duration_since(self.dock_bars_at) >= Duration::from_millis(33) {
                     self.dock_bars_at = now;
-                    self.dock.dirty = true;
+                    // Only the music widget is redrawn for them.
+                    self.dock.bars_dirty = true;
                 }
             }
         }
 
+        self.sync_pins();
         let mut fast = false;
         if self.notch_wants() {
             fast |= self.w.step(dt);
@@ -2861,7 +3884,9 @@ impl App {
             self.tabs_fade.step(dt);
             fast |= self.level.step(dt);
             self.dirty = false;
+            let t = self.perf.start();
             let _ = self.render();
+            self.perf.end(Surface::Notch, t);
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
@@ -2871,8 +3896,17 @@ impl App {
             let weather = self.weather.as_ref().filter(|_| self.cfg.weather);
             let art = self.art.as_ref().map(|(_, b, _)| b.clone());
             let bars = (self.widget_bars && self.dock_bars).then(|| (self.levels(), self.accent()));
-            let data = dock::WidgetData { stats: &self.sysmon.stats, media: self.media.as_ref(), art, bars };
+            let data = dock::WidgetData {
+                stats: &self.sysmon.stats,
+                gpus: &self.sysmon.gpus,
+                desks: (self.desks.names.len(), self.desks.current),
+                media: self.media.as_ref(),
+                art,
+                bars,
+            };
+            let t = self.perf.start();
             let _ = self.dock.render(&mut self.gfx, &status, weather, &mut self.systray, &data);
+            self.perf.end(Surface::Dock, t);
             if let Some(h) = self.systray.hwnd {
                 let r = self.dock.bar_rect();
                 if r != self.tray_rect {
@@ -2881,17 +3915,49 @@ impl App {
                 }
             }
         }
+        if self.screens.iter().any(|d| d.wants_frame()) {
+            // The other screens' taskbars: apps and the clock, no widgets.
+            let status = dock::Status::default();
+            let data = dock::WidgetData {
+                stats: &self.sysmon.stats,
+                gpus: &[],
+                desks: (0, 0),
+                media: None,
+                art: None,
+                bars: None,
+            };
+            for d in &mut self.screens {
+                if d.wants_frame() {
+                    fast |= d.step(dt);
+                    let t = self.perf.start();
+                    let _ = d.render(&mut self.gfx, &status, None, &mut self.systray, &data);
+                    self.perf.end(Surface::Screens, t);
+                }
+            }
+        }
         if self.flyout.wants_frame() {
             fast |= self.flyout.step(dt);
+            let t = self.perf.start();
             let _ = self.flyout.render(&mut self.gfx, &mut self.systray);
+            self.perf.end(Surface::Flyout, t);
         }
         if self.quick.wants_frame() {
             fast |= self.quick.step(dt);
+            let t = self.perf.start();
             let _ = self.quick.render(&mut self.gfx);
+            self.perf.end(Surface::Quick, t);
+        }
+        if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
+            fast |= c.step(dt);
+            let t = self.perf.start();
+            let _ = c.render(&mut self.gfx);
+            self.perf.end(Surface::Clipboard, t);
         }
         if self.switcher.wants_frame() {
             fast |= self.switcher.animate(dt);
+            let t = self.perf.start();
             let _ = self.switcher.render(&mut self.gfx, &mut self.dock);
+            self.perf.end(Surface::Switcher, t);
         }
         if self.widgets.wants_frame() {
             fast |= self.widgets.step(dt);
@@ -2906,7 +3972,9 @@ impl App {
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
             };
+            let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);
+            self.perf.end(Surface::Widgets, t);
         }
         // Stats are read faster while the panel is open.
         if self.widgets.open != self.widgets_seen {
@@ -2921,19 +3989,34 @@ impl App {
             self.dock_held = hold;
             if !hold {
                 // Back to hidden if a fullscreen app is still in front.
-                self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen));
+                self.show_docks();
             }
-            if self.dock.set_held(hold) {
-                unsafe {
-                    SetTimer(Some(self.dock.hwnd), TIMER_DOCK_HIDE, 500, None);
+            if hold {
+                self.pd_mut().set_held(true);
+            } else {
+                for d in std::iter::once(&mut self.dock).chain(self.screens.iter_mut()) {
+                    if d.set_held(false) {
+                        unsafe {
+                            SetTimer(Some(d.hwnd), TIMER_DOCK_HIDE, 500, None);
+                        }
+                    }
                 }
             }
         }
         if self.launcher.wants_frame() {
             fast |= self.launcher.step(dt);
             let bottom = self.launcher_bottom();
-            let anchor = if self.dock.shown { self.dock.start_anchor() } else { None };
-            let _ = self.launcher.render(&mut self.gfx, &mut self.dock, self.monitor, bottom, anchor);
+            let d = self.pd();
+            let anchor = if d.shown { d.start_anchor() } else { None };
+            let monitor = if self.pop == 0 { self.monitor } else { d.monitor() };
+            let t = self.perf.start();
+            let _ = self.launcher.render(&mut self.gfx, &mut self.dock, monitor, bottom, anchor);
+            self.perf.end(Surface::Launcher, t);
+        }
+        self.perf.flush();
+        // A ring of bent light came on screen (or went): refresh it, or stop.
+        if self.lens_wanted && crate::lens::active() != self.lens_on {
+            self.arm_lens();
         }
 
         // Full rate while shapes morph or a level moves; the visualizer and
@@ -3093,6 +4176,7 @@ impl App {
                     View::Peek if matches!(self.peek, Some(PeekKind::Timer | PeekKind::Message)) => {
                         self.draw_timer_peek(&p, alpha)
                     }
+                    View::Peek if self.peek == Some(PeekKind::Device) => self.draw_device_peek(&p, alpha),
                     View::Peek => {
                         self.draw_level_row(&p, self.origin + 16.0, th / 2.0, tw - 32.0, self.peek, alpha);
                     }
@@ -3140,6 +4224,14 @@ impl App {
                 }
                 out.push((Hot::VolumeBar, 44.0, 84.0, tw - 98.0, 24.0));
                 out.push((Hot::BrightnessBar, 44.0, 118.0, tw - 98.0, 24.0));
+                for (hot, y, h) in self.mixer_rows() {
+                    let (x, w) = match hot {
+                        Hot::AppMute(_) => (18.0, MIX_SLIDER_X - 26.0),
+                        Hot::AppBar(_) => (MIX_SLIDER_X - 6.0, tw - 60.0 - MIX_SLIDER_X + 12.0),
+                        _ => (18.0, tw - 36.0),
+                    };
+                    out.push((hot, x, y, w, h));
+                }
             }
             Mode::Calendar => {
                 for (h, cx) in [(Hot::PomoReset, 274.0), (Hot::PomoToggle, 314.0), (Hot::PomoSkip, 354.0)] {
@@ -3186,6 +4278,23 @@ impl App {
             let (bar, gap) = (3.0, 2.2);
             let bars_w = BANDS as f32 * bar + (BANDS - 1) as f32 * gap;
             self.draw_bars(p, ox + tw - 12.0 - bars_w, th / 2.0, bar, gap, th - 12.0, alpha);
+        } else if let Some((e, _)) = self.countdown().filter(|_| !self.pomo.running()) {
+            // The event coming up, and how long until it starts.
+            let mins = ((e.start - calendar::now()) as f32 / 60.0).ceil().max(1.0);
+            p.circle(ox + 16.0, th / 2.0, 4.0, theme::accent().alpha(alpha));
+            let fonts = &self.gfx.fonts;
+            let left = format!("{mins:.0} min");
+            p.text(
+                &e.title,
+                &fonts.label,
+                ox + 26.0,
+                0.0,
+                tw - 26.0 - 62.0,
+                th,
+                Align::Left,
+                Color::white(0.95 * alpha),
+            );
+            p.text(&left, &fonts.num, ox + tw - 60.0, 0.0, 48.0, th, Align::Right, Color::white(0.7 * alpha));
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
             let (cx, cy, r) = (ox + 22.0, th / 2.0, (th / 2.0 - 6.0).max(5.0));
@@ -3238,6 +4347,13 @@ impl App {
             centred(lw * bass, c.alpha(0.95 * alpha));
         } else if self.playing() {
             line(lw, self.accent().alpha(0.9 * alpha));
+        } else if let Some((_, frac)) = self.countdown().filter(|_| !self.pomo.running()) {
+            // Fills up over the minutes before the event starts.
+            line(lw, Color::white(0.14 * alpha));
+            let done = lw * frac.clamp(0.0, 1.0);
+            if done > 0.5 {
+                line(done.max(t), theme::accent().alpha(alpha));
+            }
         } else {
             let c = if self.pomo.focus { theme::accent() } else { GREEN };
             line(lw, Color::white(0.14 * alpha));
@@ -3268,6 +4384,41 @@ impl App {
             Align::Left,
             Color::white(0.95 * alpha),
         );
+    }
+
+    /// A USB device plugged in: a plug, its name (and serial port), and what
+    /// clicking opens; or that it was unplugged.
+    fn draw_device_peek(&self, p: &Painter, alpha: f32) {
+        let Some(d) = &self.device else { return };
+        let (tw, th, _) = self.size_of(View::Peek);
+        let ox = self.origin;
+        let cy = th / 2.0;
+        let c = if d.removed { Color::white(0.5 * alpha) } else { theme::accent().alpha(alpha) };
+        // A plug: its body, two prongs and the cable.
+        let px = ox + 22.0;
+        p.rrect(px - 5.0, cy - 2.0, 10.0, 8.0, 2.0, c);
+        p.rrect(px - 3.5, cy - 7.0, 2.0, 5.0, 0.8, c);
+        p.rrect(px + 1.5, cy - 7.0, 2.0, 5.0, 0.8, c);
+        p.rrect(px - 1.0, cy + 6.0, 2.0, 4.0, 0.8, c);
+        let fonts = &self.gfx.fonts;
+        let open = d.device.open_label.as_ref().filter(|_| !d.removed && d.device.open.is_some());
+        let action = open.map(|l| format!("Open {l}"));
+        let chip_w = action.as_ref().map_or(0.0, |a| self.gfx.measure(a, &fonts.small) + 22.0);
+        let mut text = d.device.name.clone();
+        if d.removed {
+            text += " unplugged";
+        } else if let Some(port) = &d.port {
+            text += &format!(" on {port}");
+        }
+        let text_w = tw - 34.0 - 14.0 - if chip_w > 0.0 { chip_w + 8.0 } else { 0.0 };
+        let white = Color::white(if d.removed { 0.6 } else { 0.95 } * alpha);
+        p.text(&text, &fonts.label, ox + 36.0, 0.0, text_w, th, Align::Left, white);
+        if let Some(a) = action {
+            let (cx, ch) = (ox + tw - 14.0 - chip_w, 24.0);
+            let bg = if d.hot { theme::accent_hover() } else { theme::accent() };
+            p.rrect(cx, cy - ch / 2.0, chip_w, ch, ch / 2.0, bg.alpha(alpha));
+            p.text(&a, &fonts.small, cx, cy - ch / 2.0, chip_w, ch, Align::Center, Color::white(alpha));
+        }
     }
 
     /// Icon, level bar and percentage for volume or brightness.
@@ -3538,6 +4689,97 @@ impl App {
             };
             p.text(&pct, &fonts.num, ox + tw - 54.0, cy - 10.0, 36.0, 20.0, Align::Right, white);
         }
+        self.draw_mixer(p, alpha);
+    }
+
+    /// Where the mixer's rows are: (what, top, height). An app's row is its
+    /// name (to mute it) and its slider.
+    fn mixer_rows(&self) -> Vec<(Hot, f32, f32)> {
+        let mut out = Vec::new();
+        if self.mixer.outputs.is_empty() {
+            return out;
+        }
+        let mut y = MIX_TOP + MIX_GAP;
+        out.push((Hot::Output, y, MIX_ROW));
+        y += MIX_ROW;
+        if self.outputs_open {
+            for i in 0..self.mixer.outputs.len() {
+                out.push((Hot::OutputItem(i), y, MIX_ITEM_H));
+                y += MIX_ITEM_H;
+            }
+        }
+        for i in 0..self.mixer.apps.len().min(MIX_APPS) {
+            out.push((Hot::AppMute(i), y, MIX_ROW));
+            out.push((Hot::AppBar(i), y, MIX_ROW));
+            y += MIX_ROW;
+        }
+        out
+    }
+
+    /// The mixer under the sliders: the output device (a list of them to
+    /// pick from when open), then each app with its own volume.
+    fn draw_mixer(&self, p: &Painter, alpha: f32) {
+        let ox = self.origin;
+        let tw = self.content_w;
+        let fonts = &self.gfx.fonts;
+        let white = Color::white(0.95 * alpha);
+        let dim = Color::white(0.55 * alpha);
+        if !self.mixer.outputs.is_empty() {
+            p.rrect(ox + 18.0, MIX_TOP + MIX_GAP / 2.0, tw - 36.0, 1.0, 0.0, Color::white(0.08 * alpha));
+        }
+        for (hot, y, h) in self.mixer_rows() {
+            let cy = y + h / 2.0;
+            let hovered = self.hovered == Some(hot);
+            match hot {
+                Hot::Output => {
+                    if hovered && self.mixer.outputs.len() > 1 {
+                        p.rrect(ox + 14.0, y + 1.0, tw - 28.0, h - 2.0, 7.0, Color::white(0.07 * alpha));
+                    }
+                    speaker(p, ox + 27.0, cy, 15.0, 1.0, false, dim);
+                    let name = self.mixer.outputs.get(self.mixer.current).map_or("Output", |o| o.name.as_str());
+                    p.text(name, &fonts.label, ox + 46.0, y, tw - 46.0 - 44.0, h, Align::Left, white);
+                    if self.mixer.outputs.len() > 1 {
+                        // Down when the list is closed, up when it's open.
+                        let (cx, s) = (ox + tw - 30.0, if self.outputs_open { -1.0 } else { 1.0 });
+                        p.line(cx - 4.0, cy - 2.0 * s, cx, cy + 2.0 * s, dim, 1.4);
+                        p.line(cx, cy + 2.0 * s, cx + 4.0, cy - 2.0 * s, dim, 1.4);
+                    }
+                }
+                Hot::OutputItem(i) => {
+                    if hovered {
+                        p.rrect(ox + 30.0, y + 1.0, tw - 48.0, h - 2.0, 6.0, Color::white(0.08 * alpha));
+                    }
+                    if i == self.mixer.current {
+                        p.circle(ox + 40.0, cy, 3.0, theme::accent().alpha(alpha));
+                    }
+                    let name = &self.mixer.outputs[i].name;
+                    p.text(name, &fonts.small, ox + 52.0, y, tw - 52.0 - 24.0, h, Align::Left, white);
+                }
+                Hot::AppMute(i) => {
+                    let a = &self.mixer.apps[i];
+                    if hovered {
+                        p.rrect(ox + 14.0, y + 2.0, MIX_SLIDER_X - 22.0, h - 4.0, 6.0, Color::white(0.07 * alpha));
+                    }
+                    let c = if a.muted { dim } else { white };
+                    speaker(p, ox + 27.0, cy, 13.0, a.level, a.muted, c);
+                    p.text(&a.name, &fonts.small, ox + 42.0, y, MIX_SLIDER_X - 54.0, h, Align::Left, c);
+                }
+                Hot::AppBar(i) => {
+                    let a = &self.mixer.apps[i];
+                    let (x0, x1) = (ox + MIX_SLIDER_X, ox + tw - 60.0);
+                    let track = if hovered || self.dragging == Some(hot) { 8.0 } else { 6.0 };
+                    p.rrect(x0, cy - track / 2.0, x1 - x0, track, track / 2.0, Color::white(0.15 * alpha));
+                    let fill = (x1 - x0) * a.level.clamp(0.0, 1.0);
+                    if fill > 0.5 {
+                        let c = Color::white(if a.muted { 0.35 } else { 0.9 } * alpha);
+                        p.rrect(x0, cy - track / 2.0, fill.max(track), track, track / 2.0, c);
+                    }
+                    let pct = format!("{}", (a.level * 100.0).round() as i32);
+                    p.text(&pct, &fonts.small, ox + tw - 54.0, y, 36.0, h, Align::Right, dim);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn draw_calendar(&self, p: &Painter, alpha: f32) {
@@ -3549,6 +4791,17 @@ impl App {
         let col0 = (first_dow + 6) % 7; // Monday first
         let cell = 27.0;
         let gx = ox + 18.0;
+        // Days this month with something on.
+        let month_start = ics::days_from_civil(year, month, 1);
+        let busy: Vec<u32> = self
+            .events
+            .iter()
+            .flat_map(|e| {
+                let last = if e.end > e.start { (e.end - 1).div_euclid(DAY) } else { e.start.div_euclid(DAY) };
+                e.start.div_euclid(DAY)..=last
+            })
+            .filter_map(|d| (d >= month_start).then_some((d - month_start + 1) as u32))
+            .collect();
 
         p.text(
             &date_text(w!("MMMM yyyy")),
@@ -3582,6 +4835,28 @@ impl App {
             };
             let font = if is_today { &fonts.label } else { &fonts.small };
             p.text(&day.to_string(), font, cx, cy, cell, 22.0, Align::Center, Color::white(a * alpha));
+            if busy.contains(&day) {
+                let c = if is_today { Color::white(alpha) } else { theme::accent().alpha(alpha) };
+                p.circle(cx + cell / 2.0, cy + 19.5, 1.6, c);
+            }
+        }
+
+        // What's coming up: the next few events this week.
+        let agenda = self.agenda();
+        if !agenda.is_empty() {
+            let tw = self.content_w;
+            let now = calendar::now();
+            p.rrect(gx, 198.0, tw - 36.0, 1.0, 0.0, Color::white(0.08 * alpha));
+            for (i, e) in agenda.iter().enumerate() {
+                let y = 202.0 + i as f32 * 22.0;
+                let on = e.start <= now && e.end > now;
+                let c = if on { theme::accent() } else { Color::white(0.6) };
+                p.text(&when(e, now), &fonts.small, gx + 4.0, y, 112.0, 22.0, Align::Left, c.alpha(alpha));
+                let what =
+                    if e.location.is_empty() { e.title.clone() } else { format!("{} \u{b7} {}", e.title, e.location) };
+                let x = gx + 120.0;
+                p.text(&what, &fonts.small, x, y, ox + tw - 18.0 - x, 22.0, Align::Left, Color::white(0.92 * alpha));
+            }
         }
 
         // Focus timer.
@@ -3622,6 +4897,16 @@ impl App {
 }
 
 // --------------------------------------------------------------- tab bar --
+
+/// The mixer on the Controls tab: where it starts (under the sliders), the
+/// gap above it, its rows (the output, each app), the rows of the list of
+/// outputs, where the apps' sliders start, and the most apps it lists.
+const MIX_TOP: f32 = 148.0;
+const MIX_GAP: f32 = 10.0;
+const MIX_ROW: f32 = 28.0;
+const MIX_ITEM_H: f32 = 26.0;
+const MIX_SLIDER_X: f32 = 160.0;
+const MIX_APPS: usize = 5;
 
 /// Height of the open notch's tab bar, and the room it takes at the bottom.
 const TAB_H: f32 = 30.0;

@@ -61,6 +61,15 @@ brightness_osd = true
 hide_windows_flyout = true
 # Scroll over the closed notch to change volume.
 scroll_volume = true
+# The notch's Controls also list each app playing sound, with its own
+# volume, and the output device to pick.
+controls_mixer = true
+# Say so in the notch when a USB device is plugged in: known (flight
+# controllers, radios, headsets, phones and the ones in devices.txt), all
+# (any device) or off. Clicking the pop-up opens what the device goes with.
+usb_popups = known
+# ...and when one is unplugged.
+usb_unplug = true
 expand_delay_ms = 120
 collapse_delay_ms = 300
 # Resting size of the classic notch in pixels at 100% scaling, and an overall
@@ -107,6 +116,13 @@ tray_icons = true
 dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
+# Other screens: all = a taskbar on every screen, main = only the main one.
+taskbar_screens = all
+# Which windows each screen's taskbar shows: all, or screen (only the ones on
+# that screen; pinned apps show everywhere).
+taskbar_screen_apps = all
+# The clock on the other screens' taskbars.
+taskbar_screen_clock = true
 
 # ---- Screens ----
 # Keep the pointer's height true when it crosses between screens of different
@@ -124,10 +140,11 @@ alt_tab = true
 
 # ---- Widgets ----
 # Widgets on the taskbar, left to right on each side. Any of: weather, music,
-# cpu, ram, gpu, net, widgets (the button that opens the panel). Put a name in
+# cpu, ram, gpu, net, desktops (a dot per virtual desktop, shown with more
+# than one) or widgets (the button that opens the panel). Put a name in
 # either list, or leave it out of both to hide it. Click one to open the panel.
 taskbar_left = weather
-taskbar_right = music,cpu,ram,widgets
+taskbar_right = music,cpu,ram,desktops,widgets
 # The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar.
 widgets_panel = media,system,weather,calendar
 # Windows' notifications as a card at the top of the panel (also opened by the clock).
@@ -152,6 +169,10 @@ shortcut_win_x = true
 shortcut_win_n = true
 # Win+A: the notch's Controls instead of Windows' quick settings.
 shortcut_win_a = false
+# Win+V: your clipboard history (Windows' own) by the text cursor.
+shortcut_win_v = true
+# Win+Tab: Task View, the windows of this desktop and your virtual desktops.
+shortcut_win_tab = true
 # Where the Start menu opens: auto (follows the taskbar), center or left.
 start_position = auto
 start_height = 620
@@ -177,6 +198,10 @@ start_place_music = true
 start_place_videos = true
 start_place_network = true
 start_show_all_apps = true
+# Typing in Start also answers sums (12*4), converts units (10 km to mi),
+# finds commands (lock, restart, bluetooth) and offers a web search with
+# google, bing, duckduckgo or none.
+start_web_search = google
 # Tint over the blur behind the Start menu (0 = clear glass, 1 = solid).
 start_opacity = 0.55
 # A small helper with admin rights, so the Win key works over apps run as
@@ -186,6 +211,15 @@ admin_helper = false
 # ---- Focus timer ----
 focus_minutes = 25
 break_minutes = 5
+
+# ---- Calendar ----
+# Your calendar's private iCal (.ics) link, for its events in the notch: the
+# Calendar tab's agenda and dots, and a countdown on the closed notch before
+# each event. Google Calendar: Settings > your calendar > Secret address in
+# iCal format. Outlook: Settings > Calendar > Shared calendars > Publish.
+calendar_url =
+# Minutes before an event that the countdown starts (0 = none).
+calendar_soon = 10
 
 # ---- Weather (Open-Meteo, no account needed) ----
 weather = true
@@ -209,6 +243,9 @@ github_token =
 # ---- General ----
 # Frame-rate cap while animating (also capped to your refresh rate).
 max_fps = 144
+# Write each surface's render time and frame rate to cascade.log about once a
+# second while something animates (for measuring; costs nothing when off).
+perf_log = false
 ";
 
 #[derive(Clone, Debug)]
@@ -234,6 +271,9 @@ pub struct Config {
     pub brightness_osd: bool,
     pub hide_windows_flyout: bool,
     pub scroll_volume: bool,
+    pub controls_mixer: bool,
+    pub usb_popups: String,
+    pub usb_unplug: bool,
     pub expand_delay_ms: u32,
     pub collapse_delay_ms: u32,
     pub idle_width: f32,
@@ -244,6 +284,9 @@ pub struct Config {
     pub hide_taskbar: bool,
     pub dock_icon_size: f32,
     pub dock_magnify: f32,
+    pub taskbar_screens: String,
+    pub taskbar_screen_apps: String,
+    pub taskbar_screen_clock: bool,
     pub taskbar_style: String,
     pub taskbar_align: String,
     pub taskbar_start: String,
@@ -273,6 +316,8 @@ pub struct Config {
     pub shortcut_win_x: bool,
     pub shortcut_win_n: bool,
     pub shortcut_win_a: bool,
+    pub shortcut_win_v: bool,
+    pub shortcut_win_tab: bool,
     pub admin_helper: bool,
     pub start_position: String,
     pub start_height: f32,
@@ -287,9 +332,12 @@ pub struct Config {
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
     pub start_places: [bool; 8],
     pub start_show_all_apps: bool,
+    pub start_web_search: String,
     pub start_opacity: f32,
     pub focus_minutes: u32,
     pub break_minutes: u32,
+    pub calendar_url: String,
+    pub calendar_soon: u32,
     pub weather: bool,
     pub weather_location: String,
     pub weather_click: String,
@@ -298,6 +346,7 @@ pub struct Config {
     pub update_check: bool,
     pub github_token: String,
     pub max_fps: u32,
+    pub perf_log: bool,
 }
 
 impl Default for Config {
@@ -324,6 +373,9 @@ impl Default for Config {
             brightness_osd: true,
             hide_windows_flyout: true,
             scroll_volume: true,
+            controls_mixer: true,
+            usb_popups: "known".into(),
+            usb_unplug: true,
             expand_delay_ms: 120,
             collapse_delay_ms: 300,
             idle_width: 180.0,
@@ -334,6 +386,9 @@ impl Default for Config {
             hide_taskbar: true,
             dock_icon_size: 24.0,
             dock_magnify: 0.0,
+            taskbar_screens: "all".into(),
+            taskbar_screen_apps: "all".into(),
+            taskbar_screen_clock: true,
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
             taskbar_start: "with_apps".into(),
@@ -361,13 +416,14 @@ impl Default for Config {
             start_show_cascade: true,
             start_places: [true; 8],
             start_show_all_apps: true,
+            start_web_search: "google".into(),
             start_opacity: 0.55,
             alt_tab: true,
             mouse_match: false,
             mouse_align: "auto".into(),
             screen_inches: String::new(),
             taskbar_left: "weather".into(),
-            taskbar_right: "music,cpu,ram,widgets".into(),
+            taskbar_right: "music,cpu,ram,desktops,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
             widgets_columns: 1,
             widgets_notifications: true,
@@ -377,8 +433,12 @@ impl Default for Config {
             shortcut_win_x: true,
             shortcut_win_n: true,
             shortcut_win_a: false,
+            shortcut_win_v: true,
+            shortcut_win_tab: true,
             focus_minutes: 25,
             break_minutes: 5,
+            calendar_url: String::new(),
+            calendar_soon: 10,
             weather: true,
             weather_location: String::new(),
             weather_click: "panel".into(),
@@ -387,6 +447,7 @@ impl Default for Config {
             update_check: true,
             github_token: String::new(),
             max_fps: 144,
+            perf_log: false,
         }
     }
 }
@@ -537,6 +598,9 @@ impl Config {
                 "brightness_osd" => set_b(&mut c.brightness_osd),
                 "hide_windows_flyout" => set_b(&mut c.hide_windows_flyout),
                 "scroll_volume" => set_b(&mut c.scroll_volume),
+                "controls_mixer" => set_b(&mut c.controls_mixer),
+                "usb_popups" if matches!(v, "known" | "all" | "off") => c.usb_popups = v.into(),
+                "usb_unplug" => set_b(&mut c.usb_unplug),
                 "expand_delay_ms" => set_u(&mut c.expand_delay_ms, 0.0, 5000.0),
                 "collapse_delay_ms" => set_u(&mut c.collapse_delay_ms, 0.0, 5000.0),
                 "idle_width" => set_f(&mut c.idle_width, 60.0, 400.0),
@@ -547,6 +611,9 @@ impl Config {
                 "hide_taskbar" => set_b(&mut c.hide_taskbar),
                 "dock_icon_size" => set_f(&mut c.dock_icon_size, 16.0, 48.0),
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
+                "taskbar_screens" if matches!(v, "all" | "main") => c.taskbar_screens = v.into(),
+                "taskbar_screen_apps" if matches!(v, "all" | "screen") => c.taskbar_screen_apps = v.into(),
+                "taskbar_screen_clock" => set_b(&mut c.taskbar_screen_clock),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
                 "taskbar_start" if matches!(v, "with_apps" | "left") => c.taskbar_start = v.into(),
@@ -573,6 +640,9 @@ impl Config {
                     }
                 }
                 "start_show_all_apps" => set_b(&mut c.start_show_all_apps),
+                "start_web_search" if matches!(v, "google" | "bing" | "duckduckgo" | "none") => {
+                    c.start_web_search = v.into()
+                }
                 "start_opacity" => set_f(&mut c.start_opacity, 0.0, 1.0),
                 "taskbar_corners" if matches!(v, "round" | "small" | "square") => c.taskbar_corners = v.into(),
                 "acrylic" => set_b(&mut c.acrylic),
@@ -596,8 +666,12 @@ impl Config {
                 "shortcut_win_x" => set_b(&mut c.shortcut_win_x),
                 "shortcut_win_n" => set_b(&mut c.shortcut_win_n),
                 "shortcut_win_a" => set_b(&mut c.shortcut_win_a),
+                "shortcut_win_v" => set_b(&mut c.shortcut_win_v),
+                "shortcut_win_tab" => set_b(&mut c.shortcut_win_tab),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
+                "calendar_url" => c.calendar_url = v.trim_matches('"').to_string(),
+                "calendar_soon" => set_u(&mut c.calendar_soon, 0.0, 60.0),
                 "weather" => set_b(&mut c.weather),
                 "weather_location" => c.weather_location = v.trim_matches('"').to_string(),
                 "weather_click" if matches!(v, "panel" | "google" | "bing" | "custom" | "none") => {
@@ -608,6 +682,7 @@ impl Config {
                 "update_check" => set_b(&mut c.update_check),
                 "github_token" => c.github_token = v.trim_matches('"').to_string(),
                 "max_fps" => set_u(&mut c.max_fps, 15.0, 500.0),
+                "perf_log" => set_b(&mut c.perf_log),
                 _ => {}
             }
         }
@@ -664,6 +739,9 @@ impl Config {
             "brightness_osd" => b(self.brightness_osd),
             "hide_windows_flyout" => b(self.hide_windows_flyout),
             "scroll_volume" => b(self.scroll_volume),
+            "controls_mixer" => b(self.controls_mixer),
+            "usb_popups" => self.usb_popups.clone(),
+            "usb_unplug" => b(self.usb_unplug),
             "expand_delay_ms" => self.expand_delay_ms.to_string(),
             "collapse_delay_ms" => self.collapse_delay_ms.to_string(),
             "idle_width" => self.idle_width.to_string(),
@@ -674,6 +752,9 @@ impl Config {
             "hide_taskbar" => b(self.hide_taskbar),
             "dock_icon_size" => self.dock_icon_size.to_string(),
             "dock_magnify" => self.dock_magnify.to_string(),
+            "taskbar_screens" => self.taskbar_screens.clone(),
+            "taskbar_screen_apps" => self.taskbar_screen_apps.clone(),
+            "taskbar_screen_clock" => b(self.taskbar_screen_clock),
             "taskbar_style" => self.taskbar_style.clone(),
             "taskbar_align" => self.taskbar_align.clone(),
             "taskbar_start" => self.taskbar_start.clone(),
@@ -694,6 +775,7 @@ impl Config {
             "start_show_cascade" => b(self.start_show_cascade),
             _ if place_index(key).is_some() => b(self.start_places[place_index(key).unwrap_or(0)]),
             "start_show_all_apps" => b(self.start_show_all_apps),
+            "start_web_search" => self.start_web_search.clone(),
             "start_opacity" => self.start_opacity.to_string(),
             "taskbar_corners" => self.taskbar_corners.clone(),
             "acrylic" => b(self.acrylic),
@@ -718,8 +800,12 @@ impl Config {
             "shortcut_win_x" => b(self.shortcut_win_x),
             "shortcut_win_n" => b(self.shortcut_win_n),
             "shortcut_win_a" => b(self.shortcut_win_a),
+            "shortcut_win_v" => b(self.shortcut_win_v),
+            "shortcut_win_tab" => b(self.shortcut_win_tab),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
+            "calendar_url" => self.calendar_url.clone(),
+            "calendar_soon" => self.calendar_soon.to_string(),
             "weather" => b(self.weather),
             "weather_location" => self.weather_location.clone(),
             "weather_click" => self.weather_click.clone(),
@@ -728,6 +814,7 @@ impl Config {
             "update_check" => b(self.update_check),
             "github_token" => self.github_token.clone(),
             "max_fps" => self.max_fps.to_string(),
+            "perf_log" => b(self.perf_log),
             _ => String::new(),
         }
     }

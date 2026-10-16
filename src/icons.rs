@@ -24,6 +24,7 @@ pub const ICON_SIZE: u32 = 96;
 const PKEY_LINK_TARGET: PROPERTYKEY =
     PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25), pid: 2 };
 
+#[derive(Clone)]
 pub struct IconResult {
     pub id: String,
     pub name: String,
@@ -261,6 +262,11 @@ unsafe fn display_name(id: &str, item: Option<&IShellItem>) -> String {
         }
     }
     id.rsplit(['\\', '/']).next().unwrap_or(id).trim_end_matches(".exe").to_string()
+}
+
+/// An exe's "File description" ("Google Chrome"), if it has one.
+pub fn exe_description(path: &str) -> Option<String> {
+    unsafe { file_description(path) }
 }
 
 unsafe fn file_description(path: &str) -> Option<String> {

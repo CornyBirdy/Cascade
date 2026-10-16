@@ -13,6 +13,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, DATE_SHORTDATE, TIME_NOSECONDS};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{MonitorFromRect, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -26,9 +27,10 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
 use crate::config::{self, Config};
-use crate::gfx::{Align, Color, Gfx, Layer, Painter};
+use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::media::MediaInfo;
+use crate::nvml::Gpu;
 use crate::shell;
 use crate::spring::Spring;
 use crate::sysmon::{self, Stats};
@@ -51,6 +53,8 @@ const STATUS_ICON: f32 = 24.0;
 /// Space between floating islands.
 const ISLAND_GAP: f32 = 8.0;
 const CHIP_STAT_W: f32 = 48.0;
+/// Each NVIDIA card's column on the GPU widget (its load and temperature).
+const CHIP_GPU_W: f32 = 66.0;
 const CHIP_NET_W: f32 = 84.0;
 /// The music widget's album art and the space around it, left of the text.
 const MUSIC_LEAD: f32 = 40.0;
@@ -65,6 +69,16 @@ const MUSIC_TEXT_MAX: f32 = 170.0;
 const WIDGETS_BTN_W: f32 = 28.0;
 /// Space between widgets on the same side.
 const ITEM_GAP: f32 = 2.0;
+/// The desktops widget's dots, and the longer one for the desktop you're on.
+const DESK_DOT: f32 = 6.0;
+const DESK_CURRENT_W: f32 = 16.0;
+const DESK_DOT_GAP: f32 = 4.0;
+
+/// How wide the desktops widget's dots are for `n` desktops.
+fn desk_dots_w(n: usize) -> f32 {
+    let n = n.max(1) as f32;
+    DESK_CURRENT_W + (n - 1.0) * DESK_DOT + (n - 1.0) * DESK_DOT_GAP
+}
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
@@ -134,6 +148,8 @@ pub enum Chip {
     Net,
     /// The button that opens the widgets panel.
     Widgets,
+    /// A dot per virtual desktop, the one you're on lit (opens Task View).
+    Desktops,
 }
 
 impl Chip {
@@ -146,6 +162,7 @@ impl Chip {
             "gpu" => Chip::Gpu,
             "net" | "network" => Chip::Net,
             "widgets" => Chip::Widgets,
+            "desktops" | "desktop" => Chip::Desktops,
             _ => return None,
         })
     }
@@ -167,6 +184,10 @@ fn parse_chips(list: &str) -> Vec<Chip> {
 /// What the taskbar widgets show.
 pub struct WidgetData<'a> {
     pub stats: &'a Stats,
+    /// Each NVIDIA card's own readings (the GPU widget shows one column each).
+    pub gpus: &'a [Gpu],
+    /// How many virtual desktops there are, and which one you're on.
+    pub desks: (usize, usize),
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
     /// The music visualizer's bands and colour, if the music widget shows it.
@@ -262,6 +283,11 @@ pub struct Dock {
     pub reveal: Spring,
     /// The music widget's width, easing to fit each song.
     music_w: Spring,
+    /// The song (title, artist) and the weather (temperature, description)
+    /// last measured, with their text's width, so it's measured once per
+    /// change rather than every frame.
+    music_text: Option<(String, String, f32)>,
+    weather_text: Option<(String, String, f32)>,
     reserved: bool,
     reserve_slot: Option<RECT>,
 
@@ -301,8 +327,20 @@ pub struct Dock {
     held: bool,
     pub foreground: HWND,
     pub dirty: bool,
+    /// Only the music widget's bars moved since the last frame (see `render_bars`).
+    pub bars_dirty: bool,
     /// Last frame's window rect in screen pixels.
     pub screen: RECT,
+    /// A taskbar on another screen than the main one: Start, search, apps
+    /// and the clock, without the widgets, tray and status icons.
+    pub secondary: bool,
+    /// Shows only the windows on its own screen (and the pinned apps).
+    own_screen: bool,
+    /// A fullscreen app is in front on this taskbar's screen (only tracked
+    /// for the other screens' taskbars; the main one follows the notch).
+    pub fullscreen: bool,
+    /// The pinned apps changed here, for the other screens' taskbars to follow.
+    pins_changed: bool,
 }
 
 fn pinned_path() -> std::path::PathBuf {
@@ -470,13 +508,17 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
 }
 
 /// How wide a widget is, or None if it has nothing to show right now. The
-/// music and weather widgets fit what they show (`music` and `weather`).
-fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>) -> Option<f32> {
+/// music and weather widgets fit what they show (`music` and `weather`), and
+/// the GPU widget has a column for each of the `gpus` NVIDIA cards.
+fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize, desks: usize) -> Option<f32> {
     match c {
         Chip::Weather => weather,
         Chip::Music => music,
         Chip::Net => Some(CHIP_NET_W),
         Chip::Widgets => Some(WIDGETS_BTN_W),
+        // Only with more than one desktop.
+        Chip::Desktops => (desks > 1).then(|| desk_dots_w(desks) + 16.0),
+        Chip::Gpu if gpus > 0 => Some(CHIP_GPU_W * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
     }
 }
@@ -502,6 +544,8 @@ impl Dock {
             hide_taskbar: false,
             reveal: Spring::new(0.0, 300.0, 30.0),
             music_w: Spring::new(0.0, 300.0, 34.0),
+            music_text: None,
+            weather_text: None,
             reserved: false,
             reserve_slot: None,
             full: true,
@@ -534,7 +578,12 @@ impl Dock {
             held: false,
             foreground: HWND::default(),
             dirty: true,
+            bars_dirty: false,
             screen: RECT::default(),
+            secondary: false,
+            own_screen: false,
+            fullscreen: false,
+            pins_changed: false,
         };
         for id in load_pinned() {
             let mut app = DockApp::new(id, true);
@@ -545,8 +594,97 @@ impl Dock {
         d
     }
 
+    /// A taskbar for another screen (see `secondary`).
+    pub fn new_secondary(hwnd: HWND, trigger: HWND, icon_tx: Sender<String>, backdrops: Vec<Backdrop>) -> Self {
+        let mut d = Self::new(hwnd, trigger, icon_tx, backdrops);
+        d.secondary = true;
+        d
+    }
+
     pub fn is(&self, h: HWND) -> bool {
         h == self.hwnd || h == self.trigger
+    }
+
+    /// For a taskbar on another screen to load its icons the same way.
+    pub fn icon_sender(&self) -> Sender<String> {
+        self.icon_tx.clone()
+    }
+
+    /// Physical pixels per layout unit on this taskbar's screen.
+    pub fn k(&self) -> f32 {
+        self.k
+    }
+
+    /// The screen this taskbar is on.
+    pub fn monitor(&self) -> RECT {
+        self.monitor
+    }
+
+    fn hmonitor(&self) -> HMONITOR {
+        unsafe { MonitorFromRect(&self.monitor, MONITOR_DEFAULTTONEAREST) }
+    }
+
+    /// Whether it shows window `h`, but `h` has since moved to another screen.
+    pub fn misplaced(&self, h: HWND) -> bool {
+        self.own_screen
+            && self.tracks(h)
+            && unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) } != self.hmonitor()
+    }
+
+    /// The pinned apps, in order.
+    pub fn pinned_ids(&self) -> Vec<String> {
+        self.apps.iter().filter(|a| a.pinned).map(|a| a.id.clone()).collect()
+    }
+
+    /// Whether the pinned apps changed since the last call.
+    pub fn take_pins_changed(&mut self) -> bool {
+        std::mem::take(&mut self.pins_changed)
+    }
+
+    /// Takes on the pinned apps (and their order) another screen's taskbar
+    /// changed to. Running apps that aren't pinned keep their places after them.
+    pub fn adopt_pins(&mut self, ids: &[String]) {
+        let mut rest: Vec<DockApp> = std::mem::take(&mut self.apps);
+        let mut apps = Vec::with_capacity(rest.len() + ids.len());
+        for id in ids {
+            let app = match rest.iter().position(|a| a.id.eq_ignore_ascii_case(id)) {
+                Some(i) => rest.remove(i),
+                None => {
+                    let mut a = DockApp::new(id.clone(), true);
+                    a.presence.snap(1.0);
+                    self.request_icon(id);
+                    a
+                }
+            };
+            apps.push(app);
+        }
+        for a in &mut apps {
+            a.pinned = true;
+            a.presence.set(1.0);
+        }
+        for mut a in rest {
+            a.pinned = false;
+            a.presence.set(if a.windows.is_empty() { 0.0 } else { 1.0 });
+            apps.push(a);
+        }
+        self.apps = apps;
+        self.hovered = None;
+        self.dragging = None;
+        self.pressed = None;
+        self.dirty = true;
+    }
+
+    /// Takes the taskbar and its windows down for good (its screen went away).
+    pub fn destroy(mut self) {
+        self.shutdown();
+        crate::drop::revoke(self.hwnd);
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.trigger);
+            for b in &self.backdrops {
+                let _ = DestroyWindow(b.hwnd);
+            }
+        }
     }
 
     pub fn hovered_app(&self) -> Option<usize> {
@@ -617,10 +755,11 @@ impl Dock {
             .unwrap_or_else(|| id.rsplit(['\\', '/']).next().unwrap_or(id).trim_end_matches(".exe").to_string())
     }
 
-    fn save_pinned(&self) {
+    fn save_pinned(&mut self) {
         let list: Vec<&str> = self.apps.iter().filter(|a| a.pinned).map(|a| a.id.as_str()).collect();
         let _ = std::fs::create_dir_all(config::dir());
         let _ = std::fs::write(pinned_path(), list.join("\r\n") + "\r\n");
+        self.pins_changed = true;
     }
 
     // ------------------------------------------------------------ placement --
@@ -653,6 +792,16 @@ impl Dock {
         self.show_tray = cfg.tray_icons;
         self.left_cfg = parse_chips(&cfg.taskbar_left);
         self.right_cfg = parse_chips(&cfg.taskbar_right);
+        self.own_screen = cfg.taskbar_screens == "all" && cfg.taskbar_screen_apps == "screen";
+        if self.secondary {
+            // The widgets, tray and status icons stay on the main screen.
+            self.show_status = false;
+            self.show_tray = false;
+            self.show_weather = false;
+            self.show_clock = cfg.taskbar_screen_clock;
+            self.left_cfg.clear();
+            self.right_cfg.clear();
+        }
         self.monitor = monitor;
         self.k = k;
         for b in &self.backdrops {
@@ -684,6 +833,8 @@ impl Dock {
         self.bottom = match self.reserve_slot {
             Some(slot) => slot.bottom,
             None if self.hide_taskbar => self.monitor.bottom,
+            // Above Windows' own taskbar on that screen, if it shows one.
+            None if self.secondary => shell::work_area_of(self.monitor).bottom.min(self.monitor.bottom),
             None => {
                 let taskbar = shell::bottom_taskbar_top(self.monitor).unwrap_or(i32::MAX);
                 shell::work_area().bottom.min(self.monitor.bottom).min(taskbar)
@@ -814,8 +965,13 @@ impl Dock {
         for a in &mut self.apps {
             a.windows.clear();
         }
+        let screen = self.own_screen.then(|| self.hmonitor());
         for h in all {
             if !is_app_window(h, own) {
+                continue;
+            }
+            // (A minimised window counts where it will come back.)
+            if screen.is_some_and(|m| unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) } != m) {
                 continue;
             }
             let mut pid = 0u32;
@@ -887,6 +1043,8 @@ impl Dock {
         overflow: bool,
         music: Option<f32>,
         weather: Option<f32>,
+        gpus: usize,
+        desks: usize,
     ) -> Geo {
         let b = self.button();
         let pad = self.edge();
@@ -908,7 +1066,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, music, weather) {
+            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -954,7 +1112,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, music, weather) {
+            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1213,6 +1371,7 @@ impl Dock {
         self.shown
             && self.window_visible
             && (self.dirty
+                || self.bars_dirty
                 || !self.reveal.settled()
                 || !self.music_w.settled()
                 || self.apps.iter().any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled()))
@@ -1257,7 +1416,7 @@ impl Dock {
         tray: &mut Systray,
         wd: &WidgetData,
     ) -> Result<()> {
-        self.dirty = false;
+        let was_dirty = std::mem::take(&mut self.dirty);
         if !self.shown || !self.window_visible {
             return Ok(());
         }
@@ -1292,11 +1451,25 @@ impl Dock {
         // Auto-hide fades the bar while it sinks a little.
         let hidden_px = (14.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
+        // Only the music widget's bars moved: redraw and upload just that.
+        let bars_only = std::mem::take(&mut self.bars_dirty) && !was_dirty && self.settled() && self.layer.ready();
+        let same_place = self.screen == (RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph });
+        if bars_only && same_place && self.render_bars(gfx, wd, pos, pw, ph)? {
+            return Ok(());
+        }
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         // The music and weather widgets fit their text.
         let small = &gfx.fonts.small;
         let music_w = wd.media.map(|m| {
-            let text = gfx.measure(&m.title, small).max(gfx.measure(&m.artist, small));
+            // Measured once per song, not every frame.
+            let text = match &self.music_text {
+                Some((title, artist, w)) if *title == m.title && *artist == m.artist => *w,
+                _ => {
+                    let w = gfx.measure(&m.title, small).max(gfx.measure(&m.artist, small));
+                    self.music_text = Some((m.title.clone(), m.artist.clone(), w));
+                    w
+                }
+            };
             let bars = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
             let w = MUSIC_LEAD + text.clamp(MUSIC_TEXT_MIN, MUSIC_TEXT_MAX).ceil() + bars + MUSIC_BUTTON;
             if self.music_w.value < 1.0 {
@@ -1311,11 +1484,19 @@ impl Dock {
         }
         let weather_w = weather.filter(|_| self.show_weather).map(|wx| {
             let unit = if wx.fahrenheit { "F" } else { "C" };
-            let temp = gfx.measure(&format!("{:.0}\u{b0}{unit}", wx.temp), &gfx.fonts.label);
-            let text = temp.max(gfx.measure(wx.describe(), small)).min(WEATHER_TEXT_MAX);
-            (WEATHER_ICON_W + text + 10.0).ceil()
+            let temp = format!("{:.0}\u{b0}{unit}", wx.temp);
+            let text = match &self.weather_text {
+                Some((t, d, w)) if *t == temp && d == wx.describe() => *w,
+                _ => {
+                    let w = gfx.measure(&temp, &gfx.fonts.label).max(gfx.measure(wx.describe(), small));
+                    self.weather_text = Some((temp, wx.describe().to_string(), w));
+                    w
+                }
+            };
+            (WEATHER_ICON_W + text.min(WEATHER_TEXT_MAX) + 10.0).ceil()
         });
-        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w);
+        let desks = wd.desks.0;
+        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len(), desks);
         let g = &self.geo;
 
         // Blur behind each island, just under this window (placed once the
@@ -1487,6 +1668,20 @@ impl Dock {
                         );
                         p.text(wx.describe(), &f.small, tx, mid_y, tw, 15.0, Align::Left, Color::white(0.6));
                     }
+                    Chip::Desktops => {
+                        // A dot per desktop; the one you're on a longer, lit one.
+                        let (n, current) = wd.desks;
+                        let mut x = s.centre() - desk_dots_w(n) / 2.0;
+                        for i in 0..n {
+                            let (dw, c) = if i == current {
+                                (DESK_CURRENT_W, theme::accent())
+                            } else {
+                                (DESK_DOT, Color::white(0.55))
+                            };
+                            p.rrect(x, mid_y - DESK_DOT / 2.0, dw, DESK_DOT, DESK_DOT / 2.0, c);
+                            x += dw + DESK_DOT_GAP;
+                        }
+                    }
                     Chip::Widgets => {
                         let c = Color::white(0.85);
                         for (dx, dy) in [(-4.5, -4.5), (0.5, -4.5), (-4.5, 0.5), (0.5, 0.5)] {
@@ -1495,6 +1690,24 @@ impl Dock {
                     }
                     Chip::Cpu => two("CPU", &format!("{:.0}%", st.cpu), grey, white, &f.label),
                     Chip::Ram => two("RAM", &format!("{:.0}%", st.ram), grey, white, &f.label),
+                    // One column per NVIDIA card: its load, under its number and temperature.
+                    Chip::Gpu if !wd.gpus.is_empty() => {
+                        let n = wd.gpus.len();
+                        for (i, g) in wd.gpus.iter().enumerate() {
+                            let cx = s.x + i as f32 * CHIP_GPU_W;
+                            let name = if n > 1 { format!("GPU {}", i + 1) } else { "GPU".to_string() };
+                            let top = match g.temp {
+                                Some(t) => format!("{name} \u{b7} {t:.0}\u{b0}"),
+                                None => name,
+                            };
+                            let (load, c) = match g.load {
+                                Some(l) => (format!("{l:.0}%"), white),
+                                None => ("\u{2014}".to_string(), grey),
+                            };
+                            p.text(&top, &f.small, cx, mid_y - 16.0, CHIP_GPU_W, 16.0, Align::Center, grey);
+                            p.text(&load, &f.label, cx, mid_y, CHIP_GPU_W, 16.0, Align::Center, c);
+                        }
+                    }
                     Chip::Gpu => match st.gpu {
                         Some(g) => two("GPU", &format!("{g:.0}%"), grey, white, &f.label),
                         None => two("GPU", "\u{2014}", grey, grey, &f.label),
@@ -1508,34 +1721,7 @@ impl Dock {
                             &f.small,
                         );
                     }
-                    Chip::Music => {
-                        let Some(m) = wd.media else { continue };
-                        let art = 28.0;
-                        match &wd.art {
-                            Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
-                            None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
-                        }
-                        // Bars moving with the music, between the title and the button.
-                        let viz = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
-                        let tw = s.w - MUSIC_LEAD - MUSIC_BUTTON - viz;
-                        if let Some((levels, c)) = &wd.bars {
-                            let x = s.x + s.w - MUSIC_BUTTON - viz + 2.0;
-                            crate::ui::spectrum(&p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
-                        }
-                        p.text(&m.title, &f.small, s.x + MUSIC_LEAD, mid_y - 16.0, tw, 16.0, Align::Left, white);
-                        p.text(&m.artist, &f.small, s.x + MUSIC_LEAD, mid_y, tw, 16.0, Align::Left, grey);
-                        // Play / pause.
-                        let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
-                        if self.hovered == Some(Hot::MusicToggle) {
-                            p.circle(bx, mid_y, 12.0, Color::white(0.10));
-                        }
-                        if m.playing {
-                            p.rrect(bx - 4.5, mid_y - 5.5, 3.2, 11.0, 1.0, c);
-                            p.rrect(bx + 1.3, mid_y - 5.5, 3.2, 11.0, 1.0, c);
-                        } else {
-                            p.polygon(&[(bx - 3.5, mid_y - 6.0), (bx - 3.5, mid_y + 6.0), (bx + 5.5, mid_y)], c);
-                        }
-                    }
+                    Chip::Music => self.draw_music(&p, f, s, mid_y, wd),
                 }
             }
 
@@ -1621,6 +1807,98 @@ impl Dock {
             self.hide_window();
         }
         Ok(())
+    }
+
+    /// The music widget at `s`: art, title and artist, the visualizer's bars
+    /// and the play / pause button.
+    fn draw_music(&self, p: &Painter, f: &Fonts, s: Span, mid_y: f32, wd: &WidgetData) {
+        let Some(m) = wd.media else { return };
+        let (white, grey) = (Color::white(0.95), Color::white(0.55));
+        let art = 28.0;
+        match &wd.art {
+            Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
+            None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
+        }
+        // Bars moving with the music, between the title and the button.
+        let viz = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
+        let tw = s.w - MUSIC_LEAD - MUSIC_BUTTON - viz;
+        if let Some((levels, c)) = &wd.bars {
+            let x = s.x + s.w - MUSIC_BUTTON - viz + 2.0;
+            crate::ui::spectrum(p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
+        }
+        p.text(&m.title, &f.small, s.x + MUSIC_LEAD, mid_y - 16.0, tw, 16.0, Align::Left, white);
+        p.text(&m.artist, &f.small, s.x + MUSIC_LEAD, mid_y, tw, 16.0, Align::Left, grey);
+        // Play / pause.
+        let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
+        if self.hovered == Some(Hot::MusicToggle) {
+            p.circle(bx, mid_y, 12.0, Color::white(0.10));
+        }
+        if m.playing {
+            p.rrect(bx - 4.5, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+            p.rrect(bx + 1.3, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+        } else {
+            p.polygon(&[(bx - 3.5, mid_y - 6.0), (bx - 3.5, mid_y + 6.0), (bx + 5.5, mid_y)], c);
+        }
+    }
+
+    /// Whether anything but the visualizer's bars could look different from
+    /// the last frame (a spring still moving, or something marked dirty).
+    fn settled(&self) -> bool {
+        self.reveal.settled()
+            && self.music_w.settled()
+            && self.apps.iter().all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled())
+    }
+
+    /// Redraws only the music widget, for the visualizer's bars: its patch of
+    /// the island behind it and the widget, uploaded as that rect alone.
+    /// False if there's no music widget on the last frame to redraw.
+    fn render_bars(&mut self, gfx: &mut Gfx, wd: &WidgetData, pos: POINT, pw: i32, ph: i32) -> Result<bool> {
+        let g = &self.geo;
+        let Some(&(_, s)) = g.left.iter().chain(g.right.iter()).find(|(c, _)| *c == Chip::Music) else {
+            return Ok(false);
+        };
+        let Some(&(x0, x1)) = g.islands.iter().find(|(x0, x1)| s.x >= *x0 && s.x + s.w <= *x1) else {
+            return Ok(false);
+        };
+        let k = self.k;
+        let bh = g.y1 - g.y0;
+        let b = self.button();
+        let by = g.y0 + (bh - b) / 2.0;
+        let part = RECT {
+            left: ((s.x * k).floor() as i32).max(0),
+            top: ((by * k).floor() as i32).max(0),
+            right: (((s.x + s.w) * k).ceil() as i32).min(pw),
+            bottom: (((by + b) * k).ceil() as i32).min(ph),
+        };
+        if part.right <= part.left || part.bottom <= part.top {
+            return Ok(false);
+        }
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        gfx.begin_part(&mut self.layer, pw, ph, part, k)?;
+        {
+            let p = gfx.painter();
+            let g = &self.geo;
+            // The same island and hover as in a full frame, so the pixels match.
+            let r = self.radius;
+            theme::panel(&p, x0, g.y0, x1 - x0, bh, r, glass, self.opacity, 0.6 + 0.4 * self.opacity, 1.0);
+            let pressed = self.pressed.map(|p| p.0);
+            let hover = [Hot::Chip(Chip::Music), Hot::MusicToggle].into_iter().find_map(|h| {
+                if pressed == Some(h) {
+                    Some(Color::white(0.05))
+                } else if self.hovered == Some(h) {
+                    Some(Color::white(0.08))
+                } else {
+                    None
+                }
+            });
+            if let Some(c) = hover {
+                p.rrect(s.x, by, s.w, b, 5.0, c);
+            }
+            self.draw_music(&p, &gfx.fonts, s, g.y0 + bh / 2.0, wd);
+        }
+        let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
+        gfx.present_part(&self.layer, self.hwnd, pos, pw, ph, alpha, part)?;
+        Ok(true)
     }
 
     /// Screen x of app `i`'s centre (for anchoring the preview).

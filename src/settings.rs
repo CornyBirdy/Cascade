@@ -165,6 +165,7 @@ impl Board {
                 ("ram", "Memory"),
                 ("gpu", "GPU"),
                 ("net", "Network"),
+                ("desktops", "Desktops"),
                 ("widgets", "Widgets"),
             ],
             Board::Panel => {
@@ -259,6 +260,11 @@ fn drop_slot(area: (f32, f32, f32, f32), lanes: &[Vec<&'static str>], x: f32, y:
 /// The little picture on a board tile.
 fn tile_icon(p: &Painter, item: &str, cx: f32, cy: f32, c: Color) {
     match item {
+        "desktops" => {
+            // Two desktops, one behind the other.
+            p.stroke_rrect(cx - 7.0, cy - 6.0, 11.0, 8.0, 1.5, c, 1.2);
+            p.rrect(cx - 3.0, cy - 2.0, 11.0, 8.0, 1.5, c);
+        }
         "weather" => crate::ui::weather_icon(p, cx, cy, 17.0, 2, true, c.3),
         "music" | "media" => {
             p.circle(cx - 2.4, cy + 4.0, 2.8, c);
@@ -479,6 +485,25 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row("scroll_volume", "Scroll to change volume", "Scroll over the closed notch.", Toggle),
+            row(
+                "controls_mixer",
+                "Volume mixer",
+                "Each app playing sound on Controls, with its own volume, and the output device to pick.",
+                Toggle,
+            ),
+            row(
+                "usb_popups",
+                "USB devices",
+                "Say when one is plugged in: flight controllers, radios, headsets, phones and your list, or any device.",
+                Choice(&[("known", "Known"), ("all", "Any"), ("off", "Off")]),
+            ),
+            row("usb_unplug", "Unplugging too", "Also say when one is unplugged.", Toggle),
+            row(
+                "edit_devices",
+                "Your devices",
+                "Names, and what clicking the pop-up opens (devices.txt).",
+                Button("Edit list"),
+            ),
             row("scale", "Size", "Scales the whole notch.", slider(0.6, 2.0, 0.05, Unit::Times)),
             row(
                 "idle_width",
@@ -555,6 +580,20 @@ fn rows(section: usize) -> Vec<Row> {
                 "Grow icons under the cursor (0 for the Windows look).",
                 slider(0.0, 1.0, 0.05, Unit::Percent),
             ),
+            heading("h_screens", "Other screens"),
+            row(
+                "taskbar_screens",
+                "Taskbar on",
+                "With more than one screen: a taskbar on each, or on the main one only.",
+                Choice(&[("all", "Every screen"), ("main", "Main screen")]),
+            ),
+            row(
+                "taskbar_screen_apps",
+                "Apps on each taskbar",
+                "Every open window, or only the ones on that screen. Pinned apps show on all of them.",
+                Choice(&[("all", "All windows"), ("screen", "That screen's")]),
+            ),
+            row("taskbar_screen_clock", "Clock on other screens", "The widgets and tray stay on the main screen.", Toggle),
         ],
         4 => vec![
             heading("h_open", "Opening"),
@@ -574,6 +613,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("auto", "Auto"), ("center", "Centre"), ("left", "Left")]),
             ),
             row("start_height", "Height", "How tall the menu is.", slider(500.0, 800.0, 10.0, Unit::Px)),
+            row(
+                "start_web_search",
+                "Web search",
+                "Offered under your search. Sums, unit conversions and commands are answered either way.",
+                Choice(&[("google", "Google"), ("bing", "Bing"), ("duckduckgo", "DuckDuckGo"), ("none", "None")]),
+            ),
             heading("h_parts", "What it shows"),
             row("start_show_pinned", "Pinned apps", "The grid of pinned apps at the top.", Toggle),
             row("start_columns", "Pinned columns", "Apps per row in Pinned.", slider(3.0, 6.0, 1.0, Unit::Count)),
@@ -618,6 +663,18 @@ fn rows(section: usize) -> Vec<Row> {
                 "shortcut_win_a",
                 "Win+A",
                 "The notch's Controls (Wi-Fi, Bluetooth, volume, brightness) instead of Windows' quick settings.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_v",
+                "Win+V",
+                "Your clipboard history (Windows' own, pins and all) by the text cursor. Click an item or press Enter to paste it.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_tab",
+                "Win+Tab",
+                "Task View: this desktop's windows to pick from, and your virtual desktops to switch to or add.",
                 Toggle,
             ),
             row(
@@ -707,6 +764,19 @@ fn rows(section: usize) -> Vec<Row> {
                 ]),
             ),
             row("weather_url", "Custom page", "Used by Custom. {q} is replaced by the search.", Text { secret: false }),
+            heading("h_calendar", "Calendar"),
+            row(
+                "calendar_url",
+                "Calendar link",
+                "Your calendar's private iCal address (Google: its settings > Secret address in iCal format).",
+                Text { secret: true },
+            ),
+            row(
+                "calendar_soon",
+                "Countdown",
+                "How long before an event the closed notch starts counting down to it.",
+                slider(0.0, 30.0, 1.0, Unit::Min),
+            ),
         ],
         9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
@@ -748,10 +818,12 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         // The line only shows on a slim strip, and only with Live activity.
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
+        (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
         // Taskbar.
         (3, "dock") => true,
         (3, _) if !on("dock") => false,
         (3, "status_click") => on("show_status"),
+        (3, "taskbar_screen_apps" | "taskbar_screen_clock") => get("taskbar_screens") == "all",
         // Start menu: the helper also serves Alt+Tab and the shortcuts.
         (4, "launcher" | "admin_helper") => true,
         (4, _) if !on("launcher") => false,
@@ -773,6 +845,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         // Weather.
         (8, "weather_location" | "fahrenheit" | "weather_click") => on("weather"),
         (8, "weather_url") => on("weather") && get("weather_click") == "custom",
+        (8, "calendar_soon") => !get("calendar_url").trim().is_empty(),
         _ => true,
     }
 }
@@ -1925,7 +1998,10 @@ mod tests {
             _ => String::new(),
         };
         let lanes = Board::Taskbar.read(&get);
-        assert_eq!(lanes, vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "widgets"]]);
+        assert_eq!(
+            lanes,
+            vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "widgets"]]
+        );
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
         assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather"]]);
     }
