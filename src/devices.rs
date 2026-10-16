@@ -183,29 +183,33 @@ struct Rule {
 
 const BETAFLIGHT: &str = "https://app.betaflight.com";
 
-/// FPV gear, headsets and phones: (vid, pid, name, open, serial).
-const KNOWN: &[(u16, Option<u16>, &str, Option<&str>, bool)] = &[
+/// A device on the built-in list: ids (PID None = any), name, what clicking
+/// opens, and whether it talks over a serial port.
+struct Known(u16, Option<u16>, &'static str, Option<&'static str>, bool);
+
+/// FPV gear, headsets and phones.
+const KNOWN: &[Known] = &[
     // STM32 and AT32 flight controllers (Betaflight, INAV, EdgeTX radios in VCP mode).
-    (0x0483, Some(0x5740), "Flight controller (STM32)", Some(BETAFLIGHT), true),
-    (0x2E3C, Some(0x5740), "Flight controller (AT32)", Some(BETAFLIGHT), true),
-    (0x0483, Some(0xDF11), "Flight controller in DFU mode", Some(BETAFLIGHT), false),
-    (0x2E3C, Some(0xDF11), "Flight controller in DFU mode (AT32)", Some(BETAFLIGHT), false),
+    Known(0x0483, Some(0x5740), "Flight controller (STM32)", Some(BETAFLIGHT), true),
+    Known(0x2E3C, Some(0x5740), "Flight controller (AT32)", Some(BETAFLIGHT), true),
+    Known(0x0483, Some(0xDF11), "Flight controller in DFU mode", Some(BETAFLIGHT), false),
+    Known(0x2E3C, Some(0xDF11), "Flight controller in DFU mode (AT32)", Some(BETAFLIGHT), false),
     // ArduPilot boards (ChibiOS).
-    (0x1209, Some(0x5740), "Flight controller (ArduPilot)", None, true),
-    (0x1209, Some(0x5741), "Flight controller (ArduPilot)", None, true),
+    Known(0x1209, Some(0x5740), "Flight controller (ArduPilot)", None, true),
+    Known(0x1209, Some(0x5741), "Flight controller (ArduPilot)", None, true),
     // EdgeTX / OpenTX radios plugged in as a joystick, for simulators.
-    (0x1209, Some(0x4F54), "Radio as a joystick", Some("joy.cpl"), false),
+    Known(0x1209, Some(0x4F54), "Radio as a joystick", Some("joy.cpl"), false),
     // USB-serial bridges on ExpressLRS modules and receivers, and ESP32 boards.
-    (0x10C4, Some(0xEA60), "USB serial (CP210x)", None, true),
-    (0x1A86, Some(0x7523), "USB serial (CH340)", None, true),
-    (0x1A86, Some(0x55D4), "USB serial (CH9102)", None, true),
-    (0x303A, None, "ESP32 board", None, true),
+    Known(0x10C4, Some(0xEA60), "USB serial (CP210x)", None, true),
+    Known(0x1A86, Some(0x7523), "USB serial (CH340)", None, true),
+    Known(0x1A86, Some(0x55D4), "USB serial (CH9102)", None, true),
+    Known(0x303A, None, "ESP32 board", None, true),
     // Headsets and goggles.
-    (0x2833, None, "Meta Quest", None, false),
-    (0x2CA3, None, "DJI device", None, false),
+    Known(0x2833, None, "Meta Quest", None, false),
+    Known(0x2CA3, None, "DJI device", None, false),
     // Phones.
-    (0x04E8, Some(0x6860), "Samsung phone", None, false),
-    (0x18D1, None, "Android phone", None, false),
+    Known(0x04E8, Some(0x6860), "Samsung phone", None, false),
+    Known(0x18D1, None, "Android phone", None, false),
 ];
 
 fn list_path() -> std::path::PathBuf {

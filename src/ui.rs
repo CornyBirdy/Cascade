@@ -1557,7 +1557,7 @@ impl App {
                 let fresh = |d: &DeviceNote| {
                     d.device.serial && !d.removed && d.port.is_none() && d.at.elapsed() < Duration::from_secs(10)
                 };
-                if let Some(d) = self.device.as_mut().filter(|d| fresh(&**d)) {
+                if let Some(d) = self.device.as_mut().filter(|d| fresh(d)) {
                     d.port = Some(port);
                     if self.peek == Some(PeekKind::Device) {
                         self.dirty = true;
