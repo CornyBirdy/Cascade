@@ -479,6 +479,19 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row("scroll_volume", "Scroll to change volume", "Scroll over the closed notch.", Toggle),
+            row(
+                "usb_popups",
+                "USB devices",
+                "Say when one is plugged in: flight controllers, radios, headsets, phones and your list, or any device.",
+                Choice(&[("known", "Known"), ("all", "Any"), ("off", "Off")]),
+            ),
+            row("usb_unplug", "Unplugging too", "Also say when one is unplugged.", Toggle),
+            row(
+                "edit_devices",
+                "Your devices",
+                "Names, and what clicking the pop-up opens (devices.txt).",
+                Button("Edit list"),
+            ),
             row("scale", "Size", "Scales the whole notch.", slider(0.6, 2.0, 0.05, Unit::Times)),
             row(
                 "idle_width",
@@ -762,6 +775,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         // The line only shows on a slim strip, and only with Live activity.
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
+        (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
         // Taskbar.
         (3, "dock") => true,
         (3, _) if !on("dock") => false,

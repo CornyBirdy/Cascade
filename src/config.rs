@@ -61,6 +61,12 @@ brightness_osd = true
 hide_windows_flyout = true
 # Scroll over the closed notch to change volume.
 scroll_volume = true
+# Say so in the notch when a USB device is plugged in: known (flight
+# controllers, radios, headsets, phones and the ones in devices.txt), all
+# (any device) or off. Clicking the pop-up opens what the device goes with.
+usb_popups = known
+# ...and when one is unplugged.
+usb_unplug = true
 expand_delay_ms = 120
 collapse_delay_ms = 300
 # Resting size of the classic notch in pixels at 100% scaling, and an overall
@@ -241,6 +247,8 @@ pub struct Config {
     pub brightness_osd: bool,
     pub hide_windows_flyout: bool,
     pub scroll_volume: bool,
+    pub usb_popups: String,
+    pub usb_unplug: bool,
     pub expand_delay_ms: u32,
     pub collapse_delay_ms: u32,
     pub idle_width: f32,
@@ -334,6 +342,8 @@ impl Default for Config {
             brightness_osd: true,
             hide_windows_flyout: true,
             scroll_volume: true,
+            usb_popups: "known".into(),
+            usb_unplug: true,
             expand_delay_ms: 120,
             collapse_delay_ms: 300,
             idle_width: 180.0,
@@ -550,6 +560,8 @@ impl Config {
                 "brightness_osd" => set_b(&mut c.brightness_osd),
                 "hide_windows_flyout" => set_b(&mut c.hide_windows_flyout),
                 "scroll_volume" => set_b(&mut c.scroll_volume),
+                "usb_popups" if matches!(v, "known" | "all" | "off") => c.usb_popups = v.into(),
+                "usb_unplug" => set_b(&mut c.usb_unplug),
                 "expand_delay_ms" => set_u(&mut c.expand_delay_ms, 0.0, 5000.0),
                 "collapse_delay_ms" => set_u(&mut c.collapse_delay_ms, 0.0, 5000.0),
                 "idle_width" => set_f(&mut c.idle_width, 60.0, 400.0),
@@ -680,6 +692,8 @@ impl Config {
             "brightness_osd" => b(self.brightness_osd),
             "hide_windows_flyout" => b(self.hide_windows_flyout),
             "scroll_volume" => b(self.scroll_volume),
+            "usb_popups" => self.usb_popups.clone(),
+            "usb_unplug" => b(self.usb_unplug),
             "expand_delay_ms" => self.expand_delay_ms.to_string(),
             "collapse_delay_ms" => self.collapse_delay_ms.to_string(),
             "idle_width" => self.idle_width.to_string(),

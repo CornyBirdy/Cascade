@@ -32,6 +32,7 @@ use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
 use crate::config::{self, Config};
+use crate::devices::{self, Device};
 use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
 use crate::helper;
@@ -91,6 +92,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The Windows accent colour changed (Tinted Glass follows it).
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_DEVICECHANGE: u32 = 0x0219;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
@@ -127,6 +129,20 @@ enum PeekKind {
     Timer,
     /// A short status line (`App::message`), e.g. update progress.
     Message,
+    /// A USB device came or went (`App::device`); clicking opens its app.
+    Device,
+}
+
+/// A USB device being announced in the notch.
+struct DeviceNote {
+    device: Device,
+    /// The serial port it got, once Windows says.
+    port: Option<String>,
+    /// It was unplugged rather than plugged in.
+    removed: bool,
+    at: Instant,
+    /// The pointer is on the pop-up.
+    hot: bool,
 }
 
 /// Clickable things in the open notch.
@@ -291,6 +307,8 @@ struct App {
 
     message: String,
     message_color: Color,
+    /// The USB device the notch is announcing.
+    device: Option<DeviceNote>,
     update_available: Option<u32>,
     updating: bool,
 }
@@ -691,6 +709,7 @@ impl App {
         let media_tx = media::spawn();
         brightness::spawn_watcher();
         brightness::listen(hwnd);
+        devices::listen(hwnd);
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
         if cfg.weather {
@@ -794,6 +813,7 @@ impl App {
             tray_syncs: 0,
             message: String::new(),
             message_color: theme::accent(),
+            device: None,
             update_available: None,
             updating: false,
             cfg,
@@ -1053,6 +1073,7 @@ impl App {
             View::Live => (iw + 104.0, ih, ih * 0.42),
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek if self.peek == Some(PeekKind::Message) => (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4),
+            View::Peek if self.peek == Some(PeekKind::Device) => (iw + 250.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek => (iw + 110.0, ih + 12.0, (ih + 12.0) * 0.4),
             // Every tab is as wide, so the tab bar under them holds still.
             View::Expanded => match self.mode {
@@ -1166,7 +1187,7 @@ impl App {
         let value = match kind {
             PeekKind::Volume => self.vol.0,
             PeekKind::Brightness => self.brightness as f32 / 100.0,
-            PeekKind::Timer | PeekKind::Message => 0.0,
+            PeekKind::Timer | PeekKind::Message | PeekKind::Device => 0.0,
         };
         let again = self.peek == Some(kind) && self.view == View::Peek;
         if self.peek != Some(kind) {
@@ -1177,6 +1198,7 @@ impl App {
         unsafe {
             let ms = match kind {
                 PeekKind::Timer | PeekKind::Message => 4000,
+                PeekKind::Device => 6000,
                 _ => PEEK_MS,
             };
             SetTimer(Some(self.hwnd), TIMER_PEEK, ms, None);
@@ -1393,6 +1415,12 @@ impl App {
                 self.dirty = true;
             }
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
+            WM_DEVICECHANGE => {
+                if let Some(c) = unsafe { devices::parse(wp, lp) } {
+                    self.on_device(c);
+                }
+                return Some(LRESULT(1));
+            }
             msg::RADIOS => {
                 self.radios = Radios::unpack(wp.0);
                 self.dirty = true;
@@ -1430,6 +1458,56 @@ impl App {
                 MessageBoxW(None, &windows::core::HSTRING::from(text), w!("Cascade"), MB_OK | MB_ICONINFORMATION);
             });
         }
+    }
+
+    /// A USB device or serial port came or went (see `devices`).
+    fn on_device(&mut self, change: devices::Change) {
+        let all = match self.cfg.usb_popups.as_str() {
+            "off" => return,
+            mode => mode == "all",
+        };
+        match change {
+            devices::Change::Arrived(path) => {
+                if let Some(device) = devices::describe(&path, all) {
+                    self.device =
+                        Some(DeviceNote { device, port: None, removed: false, at: Instant::now(), hot: false });
+                    self.show_peek(PeekKind::Device);
+                }
+            }
+            devices::Change::Removed(path) if self.cfg.usb_unplug => {
+                if let Some(device) = devices::describe(&path, all) {
+                    self.device =
+                        Some(DeviceNote { device, port: None, removed: true, at: Instant::now(), hot: false });
+                    self.show_peek(PeekKind::Device);
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_PEEK, 2500, None);
+                    }
+                }
+            }
+            devices::Change::Removed(_) => {}
+            // The serial port the device just plugged in got (it comes a moment later).
+            devices::Change::Port(port) => {
+                let fresh = |d: &DeviceNote| {
+                    d.device.serial && !d.removed && d.port.is_none() && d.at.elapsed() < Duration::from_secs(10)
+                };
+                if let Some(d) = self.device.as_mut().filter(|d| fresh(&**d)) {
+                    d.port = Some(port);
+                    if self.peek == Some(PeekKind::Device) {
+                        self.dirty = true;
+                    } else {
+                        self.show_peek(PeekKind::Device);
+                    }
+                }
+            }
+        }
+    }
+
+    fn device_hot(&self) -> bool {
+        self.device.as_ref().is_some_and(|d| d.hot)
+    }
+
+    fn device_removed(&self) -> bool {
+        self.device.as_ref().is_some_and(|d| d.removed)
     }
 
     fn on_update(&mut self, outcome: usize, build: u32) {
@@ -1488,6 +1566,17 @@ impl App {
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
             let _ = KillTimer(Some(self.hwnd), TIMER_COLLAPSE);
+            if self.peek == Some(PeekKind::Device) && !self.expanded {
+                // A device pop-up stays while pointed at, to be clicked.
+                let _ = KillTimer(Some(self.hwnd), TIMER_PEEK);
+                if !self.device_hot() {
+                    if let Some(d) = &mut self.device {
+                        d.hot = true;
+                        self.dirty = true;
+                    }
+                }
+                return;
+            }
             if !self.expanded && !self.expand_pending {
                 self.expand_pending = true;
                 SetTimer(Some(self.hwnd), TIMER_EXPAND, self.cfg.expand_delay_ms.max(1), None);
@@ -1507,6 +1596,16 @@ impl App {
     fn on_mouse_leave(&mut self) {
         self.tracking = false;
         if self.dragging.is_some() {
+            return;
+        }
+        if self.peek == Some(PeekKind::Device) && !self.expanded {
+            if let Some(d) = &mut self.device {
+                d.hot = false;
+            }
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PEEK, 2500, None);
+            }
+            self.dirty = true;
             return;
         }
         self.expand_pending = false;
@@ -1571,6 +1670,18 @@ impl App {
             unsafe {
                 let _ = ReleaseCapture();
             }
+            return;
+        }
+        if self.peek == Some(PeekKind::Device) && !self.expanded {
+            // Opens what the device goes with (Betaflight for a flight controller).
+            if let Some(open) =
+                self.device.as_ref().and_then(|d| d.device.open.clone()).filter(|_| !self.device_removed())
+            {
+                shell::open(&open);
+            }
+            self.device = None;
+            self.peek = None;
+            self.retarget();
             return;
         }
         if !self.expanded {
@@ -1686,6 +1797,9 @@ impl App {
                 self.retarget();
             }
             TIMER_PEEK => {
+                if self.peek == Some(PeekKind::Device) {
+                    self.device = None;
+                }
                 self.peek = None;
                 self.retarget();
             }
@@ -2231,6 +2345,7 @@ impl App {
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
             Change::Action("open_config") => shell::open_file(&config::path()),
             Change::Action("open_folder") => shell::open_file(&config::dir()),
+            Change::Action("edit_devices") => devices::edit_list(),
             Change::Action(_) => {}
         }
         if let Some(s) = &self.settings {
@@ -3359,6 +3474,7 @@ impl App {
                     View::Peek if matches!(self.peek, Some(PeekKind::Timer | PeekKind::Message)) => {
                         self.draw_timer_peek(&p, alpha)
                     }
+                    View::Peek if self.peek == Some(PeekKind::Device) => self.draw_device_peek(&p, alpha),
                     View::Peek => {
                         self.draw_level_row(&p, self.origin + 16.0, th / 2.0, tw - 32.0, self.peek, alpha);
                     }
@@ -3534,6 +3650,41 @@ impl App {
             Align::Left,
             Color::white(0.95 * alpha),
         );
+    }
+
+    /// A USB device plugged in: a plug, its name (and serial port), and what
+    /// clicking opens; or that it was unplugged.
+    fn draw_device_peek(&self, p: &Painter, alpha: f32) {
+        let Some(d) = &self.device else { return };
+        let (tw, th, _) = self.size_of(View::Peek);
+        let ox = self.origin;
+        let cy = th / 2.0;
+        let c = if d.removed { Color::white(0.5 * alpha) } else { theme::accent().alpha(alpha) };
+        // A plug: its body, two prongs and the cable.
+        let px = ox + 22.0;
+        p.rrect(px - 5.0, cy - 2.0, 10.0, 8.0, 2.0, c);
+        p.rrect(px - 3.5, cy - 7.0, 2.0, 5.0, 0.8, c);
+        p.rrect(px + 1.5, cy - 7.0, 2.0, 5.0, 0.8, c);
+        p.rrect(px - 1.0, cy + 6.0, 2.0, 4.0, 0.8, c);
+        let fonts = &self.gfx.fonts;
+        let open = d.device.open_label.as_ref().filter(|_| !d.removed && d.device.open.is_some());
+        let action = open.map(|l| format!("Open {l}"));
+        let chip_w = action.as_ref().map_or(0.0, |a| self.gfx.measure(a, &fonts.small) + 22.0);
+        let mut text = d.device.name.clone();
+        if d.removed {
+            text += " unplugged";
+        } else if let Some(port) = &d.port {
+            text += &format!(" on {port}");
+        }
+        let text_w = tw - 34.0 - 14.0 - if chip_w > 0.0 { chip_w + 8.0 } else { 0.0 };
+        let white = Color::white(if d.removed { 0.6 } else { 0.95 } * alpha);
+        p.text(&text, &fonts.label, ox + 36.0, 0.0, text_w, th, Align::Left, white);
+        if let Some(a) = action {
+            let (cx, ch) = (ox + tw - 14.0 - chip_w, 24.0);
+            let bg = if d.hot { theme::accent_hover() } else { theme::accent() };
+            p.rrect(cx, cy - ch / 2.0, chip_w, ch, ch / 2.0, bg.alpha(alpha));
+            p.text(&a, &fonts.small, cx, cy - ch / 2.0, chip_w, ch, Align::Center, Color::white(alpha));
+        }
     }
 
     /// Icon, level bar and percentage for volume or brightness.

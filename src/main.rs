@@ -8,6 +8,7 @@ mod audio;
 mod backdrop;
 mod brightness;
 mod config;
+mod devices;
 mod dock;
 mod gfx;
 mod helper;

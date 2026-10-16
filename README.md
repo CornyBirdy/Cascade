@@ -14,6 +14,7 @@ The notch lives at the top centre of your main screen. Turn it off in the right-
   - **Controls:** Wi-Fi and Bluetooth toggles, a notifications button (opens the widgets panel), and volume and brightness sliders. Brightness works on laptop screens and on external monitors that support DDC/CI.
   - **Calendar:** the current month, plus a focus/break timer (25/5 minutes by default).
 - **Volume and brightness changes** show in the notch instead of the Windows flyout. Scroll over the closed notch to change volume.
+- **USB devices:** plug in a flight controller and the notch says *Flight controller (STM32) on COM5* with an *Open Betaflight* button (it opens the web configurator, which talks to the board over Web Serial). It knows STM32 and AT32 flight controllers (also in DFU mode), ArduPilot boards, EdgeTX/OpenTX radios plugged in as a joystick, the USB-serial chips on ExpressLRS gear, ESP32 boards, Meta Quest headsets, DJI gear and Android phones. Name your own devices and pick what clicking opens in `devices.txt` (Settings → Notch → *Your devices*), set it to announce any device, and choose whether unplugging shows too (`usb_popups = known | all | off`, `usb_unplug`). Windows tells Cascade when a device comes or goes; nothing is polled.
 - **Fullscreen apps and games:** the notch and taskbar hide automatically.
 
 ## Themes
@@ -160,6 +161,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |
 | `src/spring.rs` | Spring physics behind every animation |
 | `src/media.rs` | Now playing + album art (event-driven, own thread) |
+| `src/devices.rs` | USB devices plugged in or out, and the device list |
 | `src/audio.rs` | Volume callbacks, loopback visualizer + FFT |
 | `src/brightness.rs` | Brightness events (WMI) and setting (WMI + DDC/CI) |
 | `src/radios.rs` | Wi-Fi / Bluetooth toggles |
