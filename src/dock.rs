@@ -268,6 +268,11 @@ pub struct Dock {
     pub reveal: Spring,
     /// The music widget's width, easing to fit each song.
     music_w: Spring,
+    /// The song (title, artist) and the weather (temperature, description)
+    /// last measured, with their text's width, so it's measured once per
+    /// change rather than every frame.
+    music_text: Option<(String, String, f32)>,
+    weather_text: Option<(String, String, f32)>,
     reserved: bool,
     reserve_slot: Option<RECT>,
 
@@ -522,6 +527,8 @@ impl Dock {
             hide_taskbar: false,
             reveal: Spring::new(0.0, 300.0, 30.0),
             music_w: Spring::new(0.0, 300.0, 34.0),
+            music_text: None,
+            weather_text: None,
             reserved: false,
             reserve_slot: None,
             full: true,
@@ -1435,7 +1442,15 @@ impl Dock {
         // The music and weather widgets fit their text.
         let small = &gfx.fonts.small;
         let music_w = wd.media.map(|m| {
-            let text = gfx.measure(&m.title, small).max(gfx.measure(&m.artist, small));
+            // Measured once per song, not every frame.
+            let text = match &self.music_text {
+                Some((title, artist, w)) if *title == m.title && *artist == m.artist => *w,
+                _ => {
+                    let w = gfx.measure(&m.title, small).max(gfx.measure(&m.artist, small));
+                    self.music_text = Some((m.title.clone(), m.artist.clone(), w));
+                    w
+                }
+            };
             let bars = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
             let w = MUSIC_LEAD + text.clamp(MUSIC_TEXT_MIN, MUSIC_TEXT_MAX).ceil() + bars + MUSIC_BUTTON;
             if self.music_w.value < 1.0 {
@@ -1450,9 +1465,16 @@ impl Dock {
         }
         let weather_w = weather.filter(|_| self.show_weather).map(|wx| {
             let unit = if wx.fahrenheit { "F" } else { "C" };
-            let temp = gfx.measure(&format!("{:.0}\u{b0}{unit}", wx.temp), &gfx.fonts.label);
-            let text = temp.max(gfx.measure(wx.describe(), small)).min(WEATHER_TEXT_MAX);
-            (WEATHER_ICON_W + text + 10.0).ceil()
+            let temp = format!("{:.0}\u{b0}{unit}", wx.temp);
+            let text = match &self.weather_text {
+                Some((t, d, w)) if *t == temp && d == wx.describe() => *w,
+                _ => {
+                    let w = gfx.measure(&temp, &gfx.fonts.label).max(gfx.measure(wx.describe(), small));
+                    self.weather_text = Some((temp, wx.describe().to_string(), w));
+                    w
+                }
+            };
+            (WEATHER_ICON_W + text.min(WEATHER_TEXT_MAX) + 10.0).ceil()
         });
         self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len());
         let g = &self.geo;
