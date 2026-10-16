@@ -720,7 +720,7 @@ impl Dock {
             .unwrap_or_else(|| id.rsplit(['\\', '/']).next().unwrap_or(id).trim_end_matches(".exe").to_string())
     }
 
-    fn save_pinned(&self) {
+    fn save_pinned(&mut self) {
         let list: Vec<&str> = self.apps.iter().filter(|a| a.pinned).map(|a| a.id.as_str()).collect();
         let _ = std::fs::create_dir_all(config::dir());
         let _ = std::fs::write(pinned_path(), list.join("\r\n") + "\r\n");
