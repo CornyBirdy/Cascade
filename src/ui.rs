@@ -85,6 +85,8 @@ const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
 /// Refreshes clear glass's bent edges (see `lens`).
 const TIMER_LENS: usize = 19;
+/// Re-checks for a fullscreen app for a while after starting (see `start`).
+const TIMER_SETTLE: usize = 20;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -212,6 +214,8 @@ struct App {
     dragging: Option<Hot>,
     peek: Option<PeekKind>,
     fullscreen: bool,
+    /// Fullscreen re-checks left after starting (see `start`).
+    settle: u32,
     shown: bool,
     last_wheel: Instant,
 
@@ -699,6 +703,7 @@ impl App {
             dragging: None,
             peek: None,
             fullscreen: shell::fullscreen_now(),
+            settle: 0,
             shown: false,
             last_wheel: Instant::now(),
             media: None,
@@ -766,6 +771,14 @@ impl App {
         self.apply_dock();
         self.retarget();
         self.arm_lens();
+        // Started at sign-in, Windows says something fullscreen is in front
+        // until the desktop is up, and the taskbar's "fullscreen app gone"
+        // notice never comes, so Cascade would stay hidden: look again every
+        // couple of seconds for the first minute and a half.
+        self.settle = 45;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_SETTLE, 2000, None);
+        }
         if std::env::args().any(|a| a == "--settings") {
             self.open_settings();
         }
@@ -1170,18 +1183,7 @@ impl App {
         }
         if m == msg::APPBAR {
             match wp.0 as u32 {
-                ABN_FULLSCREENAPP => {
-                    self.fullscreen = lp.0 != 0;
-                    self.retarget();
-                    self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen) || self.launcher.open);
-                    self.sync_visualizer();
-                    if self.fullscreen {
-                        self.preview.hide();
-                    }
-                    mouseedge::pause(self.fullscreen);
-                    mouseedge::raise();
-                    self.arm_stats();
-                }
+                ABN_FULLSCREENAPP => self.set_fullscreen(lp.0 != 0),
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => {
                     self.dock.reposition();
                     mouseedge::raise();
@@ -1210,6 +1212,10 @@ impl App {
             }
             self.hook_taskbar();
             self.dock.configure(&self.cfg, self.monitor, self.dpi);
+            // What Windows said while signing in no longer holds (see `start`).
+            if self.fullscreen && !shell::fullscreen_now() {
+                self.set_fullscreen(false);
+            }
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
@@ -1621,6 +1627,17 @@ impl App {
             }
             TIMER_TICK => self.dirty = true,
             TIMER_LENS => crate::lens::refresh(),
+            TIMER_SETTLE => {
+                if self.fullscreen && !shell::fullscreen_now() {
+                    self.set_fullscreen(false);
+                }
+                if self.settle > 0 {
+                    self.settle -= 1;
+                    unsafe {
+                        SetTimer(Some(self.hwnd), TIMER_SETTLE, 2000, None);
+                    }
+                }
+            }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
@@ -1941,6 +1958,21 @@ impl App {
         }
     }
 
+    /// Something fullscreen came to the front (`on`) or went: hides or
+    /// shows the notch and taskbar (with `hide_in_fullscreen`).
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        self.retarget();
+        self.dock.set_visible(!(self.cfg.hide_in_fullscreen && self.fullscreen) || self.launcher.open);
+        self.sync_visualizer();
+        if self.fullscreen {
+            self.preview.hide();
+        }
+        mouseedge::pause(self.fullscreen);
+        mouseedge::raise();
+        self.arm_stats();
+    }
+
     /// Keeps clear glass's bent edges up to date with what's behind them, a
     /// few times a second, while the theme bends light.
     fn arm_lens(&mut self) {
@@ -1949,6 +1981,7 @@ impl App {
                 SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                crate::lens::stop();
             }
         }
     }

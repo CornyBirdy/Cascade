@@ -283,7 +283,7 @@ pub struct Systray {
 }
 
 /// Expands a `{known-folder-guid}\rest` path from the registry.
-fn expand_path(p: &str) -> String {
+pub fn expand_path(p: &str) -> String {
     let Some(rest) = p.strip_prefix('{') else { return p.to_string() };
     let Some((id, tail)) = rest.split_once('}') else { return p.to_string() };
     let hex: String = id.chars().filter(|c| c.is_ascii_hexdigit()).collect();

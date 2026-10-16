@@ -92,6 +92,9 @@ pub struct Backdrop {
     corner: Cell<f32>,
     /// Bent light along the panel's edge instead of a blur (see `lens`).
     lens: Cell<Option<Lens>>,
+    /// Hidden while switching between a blur and a ring: show it again at
+    /// the next `place`, even if the panel hasn't moved.
+    reshow: Cell<bool>,
 }
 
 impl Backdrop {
@@ -126,6 +129,7 @@ impl Backdrop {
                 last: None,
                 corner: Cell::new(0.0),
                 lens: Cell::new(None),
+                reshow: Cell::new(false),
             })
         }
     }
@@ -138,18 +142,40 @@ impl Backdrop {
             return;
         }
         let was = self.lens.replace(lens);
+        if was.is_some() == lens.is_some() {
+            // Only the bend changed: drawn again at the next `place`.
+            self.rect_changed();
+            return;
+        }
         unsafe {
-            let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
-            match (was, lens) {
-                (None, Some(_)) => {
-                    SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
-                }
-                (Some(_), None) => {
-                    lens::hide(self.hwnd);
-                    SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED.0) as i32);
-                }
-                _ => {}
+            // A layered window keeps showing its last picture after it stops
+            // being layered (the old ring stayed on as an outline round a
+            // panel switched to Acrylic), and a window just made layered
+            // shows nothing until it's drawn: hide it while it changes, and
+            // let `place` show it again in its new kind.
+            lens::hide(self.hwnd);
+            if IsWindowVisible(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+                self.reshow.set(true);
             }
+            let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            let ex = if lens.is_some() { ex | WS_EX_LAYERED.0 } else { ex & !WS_EX_LAYERED.0 };
+            SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex as i32);
+            if lens.is_none() {
+                // Back to a plain window: its frame covers it again, so the
+                // blur shows through (layered windows ignore this).
+                let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+                let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            }
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
         }
         // Drawn again at the next `place`.
         self.rect_changed();
@@ -219,9 +245,10 @@ impl Backdrop {
 
     /// Puts the blur at `r` (screen px), directly under `content`.
     pub fn place(&mut self, r: RECT, content: HWND) {
-        if r == self.rect && self.shown {
+        if r == self.rect && self.shown && !self.reshow.get() {
             return;
         }
+        self.reshow.set(false);
         self.rect = r;
         self.shown = true;
         unsafe {

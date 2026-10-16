@@ -24,6 +24,7 @@ mod pomodoro;
 mod quickmenu;
 mod preview;
 mod radios;
+mod screen;
 mod settings;
 mod shell;
 mod spring;

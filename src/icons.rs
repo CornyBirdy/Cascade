@@ -45,7 +45,7 @@ pub fn spawn() -> Sender<String> {
             let is_own = own.as_deref() == Some(id.to_lowercase().as_str());
             let pixels = match (&item, &wic) {
                 (_, Some(wic)) if is_own => own_icon(wic).or_else(|_| load_icon(item.as_ref().ok_or(E_FAIL)?, wic)),
-                (Some(item), Some(wic)) => small_icon(item, wic).map(Ok).unwrap_or_else(|| load_icon(item, wic)),
+                (Some(item), Some(wic)) => small_icon(&id, item, wic).map(Ok).unwrap_or_else(|| load_icon(item, wic)),
                 _ => Ok(Vec::new()),
             }
             .unwrap_or_default();
@@ -76,26 +76,34 @@ unsafe fn load_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Result<Vec<u
 /// to fill the slot. Asked for big, the shell shows these small inside a
 /// frame, which looks like an outline round the app. None for icons that
 /// come in big sizes (or whose file can't be read): the shell draws those.
-unsafe fn small_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Option<Vec<u8>> {
-    for (file, index) in icon_locations(item) {
+unsafe fn small_icon(id: &str, item: &IShellItem, wic: &IWICImagingFactory) -> Option<Vec<u8>> {
+    for (file, index) in icon_locations(id, item) {
         let Some(largest) = largest_icon(&file, index) else { continue };
         if largest >= ICON_SIZE {
             return None;
         }
         let mut icon = HICON::default();
-        SHDefExtractIconW(&HSTRING::from(file.as_str()), index, 0, Some(&mut icon as *mut _), None, largest)
-            .ok()
-            .ok()?;
+        let file = HSTRING::from(file.as_str());
+        let found = SHDefExtractIconW(&file, index, 0, Some(&mut icon as *mut _), None, largest);
+        // S_FALSE (nothing extracted) counts as success: check the icon too.
+        if found.is_err() || icon.is_invalid() {
+            continue;
+        }
         let result = wic.CreateBitmapFromHICON(icon).and_then(|bmp| to_pixels(wic, &bmp));
         let _ = DestroyIcon(icon);
-        return result.ok();
+        if let Ok(px) = result {
+            return Some(px);
+        }
     }
     None
 }
 
 /// Where an item's icon may come from, best first: (file, index as for
-/// ExtractIcon). The shell's own answer, then a Start entry's program.
-unsafe fn icon_locations(item: &IShellItem) -> Vec<(String, i32)> {
+/// ExtractIcon). The shell's own answer, then a Start entry's program, then
+/// the app id itself when it names a file: an exe path, or a Start entry
+/// kept as `{known folder}\path\app.exe` (how Start lists many desktop
+/// apps, e.g. ones in Program Files (x86)), which has no link to read.
+unsafe fn icon_locations(id: &str, item: &IShellItem) -> Vec<(String, i32)> {
     let mut out = Vec::new();
     if let Ok(pidl) = SHGetIDListFromObject(item) {
         let mut info = SHFILEINFOW::default();
@@ -110,7 +118,7 @@ unsafe fn icon_locations(item: &IShellItem) -> Vec<(String, i32)> {
         let name = &info.szDisplayName;
         let file = String::from_utf16_lossy(&name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())]);
         if found != 0 && !file.is_empty() {
-            out.push((file, info.iIcon));
+            out.push((expand_env(&file), info.iIcon));
         }
     }
     if let Ok(item) = item.cast::<IShellItem2>() {
@@ -118,10 +126,36 @@ unsafe fn icon_locations(item: &IShellItem) -> Vec<(String, i32)> {
             let s = p.to_string().unwrap_or_default();
             CoTaskMemFree(Some(p.0 as *const _));
             if !s.is_empty() {
-                out.push((s, 0));
+                out.push((crate::systray::expand_path(&expand_env(&s)), 0));
             }
         }
     }
+    let file = id.strip_prefix(r"shell:AppsFolder\").unwrap_or(id);
+    let file = crate::systray::expand_path(&expand_env(file));
+    let lower = file.to_ascii_lowercase();
+    let named = [".exe", ".dll", ".ico"].iter().any(|e| lower.ends_with(e));
+    if named && !out.iter().any(|(f, _)| f.eq_ignore_ascii_case(&file)) {
+        out.push((file, 0));
+    }
+    out
+}
+
+/// Fills in `%NAME%` environment variables, as shortcuts often store their
+/// paths (`%ProgramFiles%\App\app.exe`). Unknown names are left as they are.
+fn expand_env(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(v) if !name.is_empty() => out.push_str(&v),
+            _ => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -300,7 +334,15 @@ unsafe fn file_description(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::largest_icon;
+    use super::{expand_env, largest_icon};
+
+    #[test]
+    fn expands_environment_variables() {
+        std::env::set_var("CASCADE_TEST_DIR", r"C:\Apps");
+        assert_eq!(expand_env(r"%CASCADE_TEST_DIR%\a.exe"), r"C:\Apps\a.exe");
+        assert_eq!(expand_env(r"%CASCADE_NO_SUCH_VAR%\a.exe"), r"%CASCADE_NO_SUCH_VAR%\a.exe");
+        assert_eq!(expand_env("50% off"), "50% off");
+    }
 
     #[test]
     fn reads_icon_sizes_from_a_dll() {
