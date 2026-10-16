@@ -1618,6 +1618,9 @@ impl App {
 
     fn on_media(&mut self, info: Option<MediaInfo>) {
         self.media = info;
+        // A new song, its art, or play / pause on the music widget.
+        self.dock.dirty = true;
+        self.widgets.dirty = true;
         self.retarget();
     }
 
@@ -3269,7 +3272,8 @@ impl App {
                 }
                 if self.dock_bars && now.duration_since(self.dock_bars_at) >= Duration::from_millis(33) {
                     self.dock_bars_at = now;
-                    self.dock.dirty = true;
+                    // Only the music widget is redrawn for them.
+                    self.dock.bars_dirty = true;
                 }
             }
         }

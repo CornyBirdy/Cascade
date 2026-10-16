@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
 use crate::config::{self, Config};
-use crate::gfx::{Align, Color, Gfx, Layer, Painter};
+use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::icons::{IconResult, ICON_SIZE};
 use crate::media::MediaInfo;
 use crate::nvml::Gpu;
@@ -307,6 +307,8 @@ pub struct Dock {
     held: bool,
     pub foreground: HWND,
     pub dirty: bool,
+    /// Only the music widget's bars moved since the last frame (see `render_bars`).
+    pub bars_dirty: bool,
     /// Last frame's window rect in screen pixels.
     pub screen: RECT,
     /// A taskbar on another screen than the main one: Start, search, apps
@@ -552,6 +554,7 @@ impl Dock {
             held: false,
             foreground: HWND::default(),
             dirty: true,
+            bars_dirty: false,
             screen: RECT::default(),
             secondary: false,
             own_screen: false,
@@ -1342,6 +1345,7 @@ impl Dock {
         self.shown
             && self.window_visible
             && (self.dirty
+                || self.bars_dirty
                 || !self.reveal.settled()
                 || !self.music_w.settled()
                 || self.apps.iter().any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled()))
@@ -1386,7 +1390,7 @@ impl Dock {
         tray: &mut Systray,
         wd: &WidgetData,
     ) -> Result<()> {
-        self.dirty = false;
+        let was_dirty = std::mem::take(&mut self.dirty);
         if !self.shown || !self.window_visible {
             return Ok(());
         }
@@ -1421,6 +1425,13 @@ impl Dock {
         // Auto-hide fades the bar while it sinks a little.
         let hidden_px = (14.0 * k * (1.0 - self.reveal.value.clamp(0.0, 1.0))) as i32;
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
+        // Only the music widget's bars moved: redraw and upload just that.
+        let bars_only = std::mem::take(&mut self.bars_dirty) && !was_dirty && self.settled() && self.layer.ready();
+        if bars_only && self.screen == (RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph }) {
+            if self.render_bars(gfx, wd, pos, pw, ph)? {
+                return Ok(());
+            }
+        }
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         // The music and weather widgets fit their text.
         let small = &gfx.fonts.small;
@@ -1655,34 +1666,7 @@ impl Dock {
                             &f.small,
                         );
                     }
-                    Chip::Music => {
-                        let Some(m) = wd.media else { continue };
-                        let art = 28.0;
-                        match &wd.art {
-                            Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
-                            None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
-                        }
-                        // Bars moving with the music, between the title and the button.
-                        let viz = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
-                        let tw = s.w - MUSIC_LEAD - MUSIC_BUTTON - viz;
-                        if let Some((levels, c)) = &wd.bars {
-                            let x = s.x + s.w - MUSIC_BUTTON - viz + 2.0;
-                            crate::ui::spectrum(&p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
-                        }
-                        p.text(&m.title, &f.small, s.x + MUSIC_LEAD, mid_y - 16.0, tw, 16.0, Align::Left, white);
-                        p.text(&m.artist, &f.small, s.x + MUSIC_LEAD, mid_y, tw, 16.0, Align::Left, grey);
-                        // Play / pause.
-                        let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
-                        if self.hovered == Some(Hot::MusicToggle) {
-                            p.circle(bx, mid_y, 12.0, Color::white(0.10));
-                        }
-                        if m.playing {
-                            p.rrect(bx - 4.5, mid_y - 5.5, 3.2, 11.0, 1.0, c);
-                            p.rrect(bx + 1.3, mid_y - 5.5, 3.2, 11.0, 1.0, c);
-                        } else {
-                            p.polygon(&[(bx - 3.5, mid_y - 6.0), (bx - 3.5, mid_y + 6.0), (bx + 5.5, mid_y)], c);
-                        }
-                    }
+                    Chip::Music => self.draw_music(&p, f, s, mid_y, wd),
                 }
             }
 
@@ -1768,6 +1752,98 @@ impl Dock {
             self.hide_window();
         }
         Ok(())
+    }
+
+    /// The music widget at `s`: art, title and artist, the visualizer's bars
+    /// and the play / pause button.
+    fn draw_music(&self, p: &Painter, f: &Fonts, s: Span, mid_y: f32, wd: &WidgetData) {
+        let Some(m) = wd.media else { return };
+        let (white, grey) = (Color::white(0.95), Color::white(0.55));
+        let art = 28.0;
+        match &wd.art {
+            Some(bmp) => p.image(bmp, s.x + 4.0, mid_y - art / 2.0, art, art, 1.0),
+            None => p.rrect(s.x + 4.0, mid_y - art / 2.0, art, art, 5.0, Color::white(0.12)),
+        }
+        // Bars moving with the music, between the title and the button.
+        let viz = if wd.bars.is_some() { MUSIC_BARS } else { 0.0 };
+        let tw = s.w - MUSIC_LEAD - MUSIC_BUTTON - viz;
+        if let Some((levels, c)) = &wd.bars {
+            let x = s.x + s.w - MUSIC_BUTTON - viz + 2.0;
+            crate::ui::spectrum(p, levels, x, mid_y + 9.0, 28.0, 7, 17.0, c.alpha(0.95));
+        }
+        p.text(&m.title, &f.small, s.x + MUSIC_LEAD, mid_y - 16.0, tw, 16.0, Align::Left, white);
+        p.text(&m.artist, &f.small, s.x + MUSIC_LEAD, mid_y, tw, 16.0, Align::Left, grey);
+        // Play / pause.
+        let (bx, c) = (s.x + s.w - 16.0, Color::white(0.92));
+        if self.hovered == Some(Hot::MusicToggle) {
+            p.circle(bx, mid_y, 12.0, Color::white(0.10));
+        }
+        if m.playing {
+            p.rrect(bx - 4.5, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+            p.rrect(bx + 1.3, mid_y - 5.5, 3.2, 11.0, 1.0, c);
+        } else {
+            p.polygon(&[(bx - 3.5, mid_y - 6.0), (bx - 3.5, mid_y + 6.0), (bx + 5.5, mid_y)], c);
+        }
+    }
+
+    /// Whether anything but the visualizer's bars could look different from
+    /// the last frame (a spring still moving, or something marked dirty).
+    fn settled(&self) -> bool {
+        self.reveal.settled()
+            && self.music_w.settled()
+            && self.apps.iter().all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled())
+    }
+
+    /// Redraws only the music widget, for the visualizer's bars: its patch of
+    /// the island behind it and the widget, uploaded as that rect alone.
+    /// False if there's no music widget on the last frame to redraw.
+    fn render_bars(&mut self, gfx: &mut Gfx, wd: &WidgetData, pos: POINT, pw: i32, ph: i32) -> Result<bool> {
+        let g = &self.geo;
+        let Some(&(_, s)) = g.left.iter().chain(g.right.iter()).find(|(c, _)| *c == Chip::Music) else {
+            return Ok(false);
+        };
+        let Some(&(x0, x1)) = g.islands.iter().find(|(x0, x1)| s.x >= *x0 && s.x + s.w <= *x1) else {
+            return Ok(false);
+        };
+        let k = self.k;
+        let bh = g.y1 - g.y0;
+        let b = self.button();
+        let by = g.y0 + (bh - b) / 2.0;
+        let part = RECT {
+            left: ((s.x * k).floor() as i32).max(0),
+            top: ((by * k).floor() as i32).max(0),
+            right: (((s.x + s.w) * k).ceil() as i32).min(pw),
+            bottom: (((by + b) * k).ceil() as i32).min(ph),
+        };
+        if part.right <= part.left || part.bottom <= part.top {
+            return Ok(false);
+        }
+        let glass = self.acrylic && self.reveal.value > theme::GLASS_FROM;
+        gfx.begin_part(&mut self.layer, pw, ph, part, k)?;
+        {
+            let p = gfx.painter();
+            let g = &self.geo;
+            // The same island and hover as in a full frame, so the pixels match.
+            let r = self.radius;
+            theme::panel(&p, x0, g.y0, x1 - x0, bh, r, glass, self.opacity, 0.6 + 0.4 * self.opacity, 1.0);
+            let pressed = self.pressed.map(|p| p.0);
+            let hover = [Hot::Chip(Chip::Music), Hot::MusicToggle].into_iter().find_map(|h| {
+                if pressed == Some(h) {
+                    Some(Color::white(0.05))
+                } else if self.hovered == Some(h) {
+                    Some(Color::white(0.08))
+                } else {
+                    None
+                }
+            });
+            if let Some(c) = hover {
+                p.rrect(s.x, by, s.w, b, 5.0, c);
+            }
+            self.draw_music(&p, &gfx.fonts, s, g.y0 + bh / 2.0, wd);
+        }
+        let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
+        gfx.present_part(&self.layer, self.hwnd, pos, pw, ph, alpha, part)?;
+        Ok(true)
     }
 
     /// Screen x of app `i`'s centre (for anchoring the preview).

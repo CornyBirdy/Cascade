@@ -11,7 +11,9 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
+use windows::Win32::UI::WindowsAndMessaging::{
+    UpdateLayeredWindow, UpdateLayeredWindowIndirect, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+};
 
 #[derive(Clone, Copy)]
 pub struct Color(pub f32, pub f32, pub f32, pub f32);
@@ -102,6 +104,11 @@ impl Layer {
     /// Frees the pixels (e.g. while the window is hidden).
     pub fn release(&mut self) {
         self.surface = None;
+    }
+
+    /// Whether it holds the last frame (so part of it can be redrawn).
+    pub fn ready(&self) -> bool {
+        self.surface.is_some()
     }
 }
 
@@ -249,7 +256,28 @@ impl Gfx {
             self.rt.SetDpi(96.0 * scale, 96.0 * scale);
             self.scale.set(scale);
             self.rt.BeginDraw();
+            self.rt.SetTransform(&windows_numerics::Matrix3x2::identity());
             self.rt.Clear(Some(&clear.d2d()));
+        }
+        Ok(())
+    }
+
+    /// Starts redrawing only `part` (pixels) of the last frame on `layer`, a
+    /// frame `width` x `height` pixels in all. Drawing uses the whole frame's
+    /// coordinates, as with `begin`; only what falls in `part` is drawn, onto
+    /// a cleared `part`. Show it with `present_part`.
+    pub fn begin_part(&self, layer: &mut Layer, width: i32, height: i32, part: RECT, scale: f32) -> Result<()> {
+        let dc = layer.ensure(width, height)?;
+        unsafe {
+            self.rt.BindDC(dc, &part)?;
+            self.rt.SetDpi(96.0 * scale, 96.0 * scale);
+            self.scale.set(scale);
+            self.rt.BeginDraw();
+            // The target starts at the part's corner: a whole number of pixels,
+            // so everything lands on the same pixels as in a full frame.
+            let (dx, dy) = (-part.left as f32 / scale, -part.top as f32 / scale);
+            self.rt.SetTransform(&windows_numerics::Matrix3x2::translation(dx, dy));
+            self.rt.Clear(Some(&Color(0.0, 0.0, 0.0, 0.0).d2d()));
         }
         Ok(())
     }
@@ -301,6 +329,47 @@ impl Gfx {
                 ULW_ALPHA,
             )
         }
+    }
+
+    /// Ends a `begin_part` frame and hands the compositor only that `part`
+    /// of `layer` (the rest of the window keeps its pixels).
+    pub fn present_part(
+        &mut self,
+        layer: &Layer,
+        hwnd: HWND,
+        pos: POINT,
+        width: i32,
+        height: i32,
+        alpha: u8,
+        part: RECT,
+    ) -> Result<()> {
+        let ended = self.end();
+        unsafe { self.rt.SetTransform(&windows_numerics::Matrix3x2::identity()) };
+        ended?;
+        let Some(surface) = &layer.surface else { return Ok(()) };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: alpha,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let (size, src) = (SIZE { cx: width, cy: height }, POINT { x: 0, y: 0 });
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: HDC::default(),
+            pptDst: &pos,
+            psize: &size,
+            hdcSrc: surface.dc,
+            pptSrc: &src,
+            crKey: COLORREF(0),
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: &part,
+        };
+        unsafe {
+            let _ = UpdateLayeredWindowIndirect(hwnd, &info);
+        }
+        Ok(())
     }
 
     /// Uploads premultiplied BGRA pixels as a bitmap for this render target.
