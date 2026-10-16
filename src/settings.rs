@@ -165,6 +165,7 @@ impl Board {
                 ("ram", "Memory"),
                 ("gpu", "GPU"),
                 ("net", "Network"),
+                ("desktops", "Desktops"),
                 ("widgets", "Widgets"),
             ],
             Board::Panel => {
@@ -259,6 +260,11 @@ fn drop_slot(area: (f32, f32, f32, f32), lanes: &[Vec<&'static str>], x: f32, y:
 /// The little picture on a board tile.
 fn tile_icon(p: &Painter, item: &str, cx: f32, cy: f32, c: Color) {
     match item {
+        "desktops" => {
+            // Two desktops, one behind the other.
+            p.stroke_rrect(cx - 7.0, cy - 6.0, 11.0, 8.0, 1.5, c, 1.2);
+            p.rrect(cx - 3.0, cy - 2.0, 11.0, 8.0, 1.5, c);
+        }
         "weather" => crate::ui::weather_icon(p, cx, cy, 17.0, 2, true, c.3),
         "music" | "media" => {
             p.circle(cx - 2.4, cy + 4.0, 2.8, c);
@@ -651,6 +657,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "shortcut_win_v",
                 "Win+V",
                 "Your clipboard history (Windows' own, pins and all) by the text cursor. Click an item or press Enter to paste it.",
+                Toggle,
+            ),
+            row(
+                "shortcut_win_tab",
+                "Win+Tab",
+                "Task View: this desktop's windows to pick from, and your virtual desktops to switch to or add.",
                 Toggle,
             ),
             row(
@@ -1974,7 +1986,10 @@ mod tests {
             _ => String::new(),
         };
         let lanes = Board::Taskbar.read(&get);
-        assert_eq!(lanes, vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "widgets"]]);
+        assert_eq!(
+            lanes,
+            vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "widgets"]]
+        );
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
         assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather"]]);
     }

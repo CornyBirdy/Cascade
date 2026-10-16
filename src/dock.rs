@@ -69,6 +69,16 @@ const MUSIC_TEXT_MAX: f32 = 170.0;
 const WIDGETS_BTN_W: f32 = 28.0;
 /// Space between widgets on the same side.
 const ITEM_GAP: f32 = 2.0;
+/// The desktops widget's dots, and the longer one for the desktop you're on.
+const DESK_DOT: f32 = 6.0;
+const DESK_CURRENT_W: f32 = 16.0;
+const DESK_DOT_GAP: f32 = 4.0;
+
+/// How wide the desktops widget's dots are for `n` desktops.
+fn desk_dots_w(n: usize) -> f32 {
+    let n = n.max(1) as f32;
+    DESK_CURRENT_W + (n - 1.0) * DESK_DOT + (n - 1.0) * DESK_DOT_GAP
+}
 
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
@@ -138,6 +148,8 @@ pub enum Chip {
     Net,
     /// The button that opens the widgets panel.
     Widgets,
+    /// A dot per virtual desktop, the one you're on lit (opens Task View).
+    Desktops,
 }
 
 impl Chip {
@@ -150,6 +162,7 @@ impl Chip {
             "gpu" => Chip::Gpu,
             "net" | "network" => Chip::Net,
             "widgets" => Chip::Widgets,
+            "desktops" | "desktop" => Chip::Desktops,
             _ => return None,
         })
     }
@@ -173,6 +186,8 @@ pub struct WidgetData<'a> {
     pub stats: &'a Stats,
     /// Each NVIDIA card's own readings (the GPU widget shows one column each).
     pub gpus: &'a [Gpu],
+    /// How many virtual desktops there are, and which one you're on.
+    pub desks: (usize, usize),
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
     /// The music visualizer's bands and colour, if the music widget shows it.
@@ -495,12 +510,14 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
 /// How wide a widget is, or None if it has nothing to show right now. The
 /// music and weather widgets fit what they show (`music` and `weather`), and
 /// the GPU widget has a column for each of the `gpus` NVIDIA cards.
-fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize) -> Option<f32> {
+fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize, desks: usize) -> Option<f32> {
     match c {
         Chip::Weather => weather,
         Chip::Music => music,
         Chip::Net => Some(CHIP_NET_W),
         Chip::Widgets => Some(WIDGETS_BTN_W),
+        // Only with more than one desktop.
+        Chip::Desktops => (desks > 1).then(|| desk_dots_w(desks) + 16.0),
         Chip::Gpu if gpus > 0 => Some(CHIP_GPU_W * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
     }
@@ -1026,6 +1043,7 @@ impl Dock {
         music: Option<f32>,
         weather: Option<f32>,
         gpus: usize,
+        desks: usize,
     ) -> Geo {
         let b = self.button();
         let pad = self.edge();
@@ -1047,7 +1065,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, music, weather, gpus) {
+            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -1093,7 +1111,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, music, weather, gpus) {
+            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1476,7 +1494,8 @@ impl Dock {
             };
             (WEATHER_ICON_W + text.min(WEATHER_TEXT_MAX) + 10.0).ceil()
         });
-        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len());
+        let desks = wd.desks.0;
+        self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len(), desks);
         let g = &self.geo;
 
         // Blur behind each island, just under this window (placed once the
@@ -1647,6 +1666,20 @@ impl Dock {
                             white,
                         );
                         p.text(wx.describe(), &f.small, tx, mid_y, tw, 15.0, Align::Left, Color::white(0.6));
+                    }
+                    Chip::Desktops => {
+                        // A dot per desktop; the one you're on a longer, lit one.
+                        let (n, current) = wd.desks;
+                        let mut x = s.centre() - desk_dots_w(n) / 2.0;
+                        for i in 0..n {
+                            let (dw, c) = if i == current {
+                                (DESK_CURRENT_W, theme::accent())
+                            } else {
+                                (DESK_DOT, Color::white(0.55))
+                            };
+                            p.rrect(x, mid_y - DESK_DOT / 2.0, dw, DESK_DOT, DESK_DOT / 2.0, c);
+                            x += dw + DESK_DOT_GAP;
+                        }
                     }
                     Chip::Widgets => {
                         let c = Color::white(0.85);

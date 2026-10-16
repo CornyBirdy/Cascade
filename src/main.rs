@@ -10,6 +10,7 @@ mod brightness;
 mod calendar;
 mod clipboard;
 mod config;
+mod desktops;
 mod devices;
 mod dock;
 mod gfx;
@@ -82,6 +83,8 @@ pub mod msg {
     pub const CLIP_PASTE: u32 = WM_APP + 26;
     /// Your calendar's events (a boxed `Vec<ics::Event>`).
     pub const CALENDAR: u32 = WM_APP + 27;
+    /// The virtual desktops changed (no payload; read them with `desktops::read`).
+    pub const DESKTOPS: u32 = WM_APP + 28;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

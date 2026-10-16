@@ -34,6 +34,7 @@ use crate::brightness;
 use crate::calendar;
 use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
+use crate::desktops::{self, Desktops};
 use crate::devices::{self, Device};
 use crate::dock::{self, Dock, Hot as DockHot};
 use crate::gfx::{Align, Color, Edge, Gfx, Layer, Painter};
@@ -396,6 +397,8 @@ struct App {
     lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
+    /// Windows' virtual desktops (see `desktops`).
+    desks: Desktops,
     /// Your calendar's events (this month and the next six weeks), the
     /// reader, the link it was last given, and what's been announced:
     /// (event start, 0 coming up / 1 starting).
@@ -635,6 +638,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
                     a.flyout.dirty = true;
                 }
             });
+            return LRESULT(0);
+        }
+        msg::DESKTOPS => {
+            with_app(|a| a.on_desktops());
             return LRESULT(0);
         }
         msg::CALENDAR => {
@@ -988,6 +995,7 @@ impl App {
             message: String::new(),
             message_color: theme::accent(),
             device: None,
+            desks: desktops::read(),
             events: Vec::new(),
             cal_tx: calendar::spawn(),
             cal_url: String::new(),
@@ -1005,6 +1013,7 @@ impl App {
         shell::ensure_shortcuts();
         launcher::spawn_scan();
         self.apply_calendar();
+        desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
         }
@@ -1433,7 +1442,7 @@ impl App {
             return self.handle_widgets(m, wp, lp);
         }
         if hwnd == self.switcher.overlay {
-            return self.handle_switcher(m, lp);
+            return self.handle_switcher(m, wp, lp);
         }
         if m == msg::APPBAR {
             if let Some(i) = self.screens.iter().position(|d| d.hwnd == hwnd) {
@@ -2809,6 +2818,16 @@ impl App {
                         self.on_dock_click(di, hot);
                     }
                 }
+                // Scrolling over the desktops widget goes to the next or previous desktop.
+                WM_MOUSEWHEEL => {
+                    if self.dock_ref(di).hovered != Some(DockHot::Chip(dock::Chip::Desktops)) {
+                        return None;
+                    }
+                    let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
+                    let (n, cur) = (self.desks.names.len(), self.desks.current);
+                    let to = if delta < 0 { (cur + 1).min(n.saturating_sub(1)) } else { cur.saturating_sub(1) };
+                    desktops::switch(cur, to);
+                }
                 WM_MBUTTONUP => {
                     let d = self.dock_mut(di);
                     if let Some(i) = d.hovered_app() {
@@ -3008,6 +3027,7 @@ impl App {
             }
             DockHot::Tray => self.toggle_flyout(),
             DockHot::TrayIcon(i) => self.systray.click(i, false),
+            DockHot::Chip(dock::Chip::Desktops) => self.toggle_task_view(),
             DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
             DockHot::MusicToggle => self.toggle_play(),
             DockHot::Status => self.on_status_click(),
@@ -3101,13 +3121,31 @@ impl App {
         }
     }
 
-    fn handle_switcher(&mut self, m: u32, lp: LPARAM) -> Option<LRESULT> {
+    fn handle_switcher(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match m {
             WM_MOUSEMOVE => {
                 let (x, y) = lparam_xy(lp);
                 self.switcher.on_move(x, y);
             }
             WM_MOUSELEAVE => self.switcher.on_leave(),
+            // Task View: clicking anywhere else closes it.
+            WM_ACTIVATE if self.switcher.view => {
+                if wp.0 & 0xFFFF == 0 {
+                    self.switcher.hide();
+                }
+                return None;
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN if self.switcher.view => {
+                if let Some(a) = self.switcher.on_key_view(wp.0 as u16) {
+                    self.run_view(a);
+                }
+            }
+            WM_LBUTTONUP if self.switcher.view => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(a) = self.switcher.on_click_view(x, y) {
+                    self.run_view(a);
+                }
+            }
             WM_LBUTTONUP => {
                 let (x, y) = lparam_xy(lp);
                 if let Some(h) = self.switcher.on_click(x, y) {
@@ -3120,6 +3158,42 @@ impl App {
             _ => return None,
         }
         Some(LRESULT(0))
+    }
+
+    /// Win+Tab: Task View on the screen the pointer is on.
+    fn toggle_task_view(&mut self) {
+        if self.switcher.view {
+            self.switcher.hide();
+            return;
+        }
+        let d = self.dock_ref(self.dock_under_cursor());
+        let (k, monitor) = (d.k(), d.monitor());
+        let (k, monitor) = if monitor.right > monitor.left { (k, monitor) } else { (self.dpi, self.monitor) };
+        self.preview.hide();
+        self.launcher.hide();
+        self.desks = desktops::read();
+        self.switcher.begin_view(k, monitor, self.desks.clone());
+    }
+
+    fn run_view(&mut self, action: crate::switcher::ViewAction) {
+        use crate::switcher::ViewAction;
+        self.switcher.hide();
+        match action {
+            ViewAction::Focus(h) => dock::focus_window(h),
+            ViewAction::Desktop(i) => desktops::switch(self.desks.current, i),
+            ViewAction::NewDesktop => desktops::create(),
+            ViewAction::Close => {}
+        }
+    }
+
+    /// The desktops changed (one added, closed, renamed or switched to).
+    fn on_desktops(&mut self) {
+        let desks = desktops::read();
+        if desks != self.desks {
+            self.desks = desks;
+            self.dock.dirty = true;
+            self.switcher.set_desktops(self.desks.clone());
+        }
     }
 
     fn toggle_play(&mut self) {
@@ -3315,6 +3389,7 @@ impl App {
             b'N' => self.toggle_widgets(),
             b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
             b'A' => self.open_controls(),
+            b'\t' => self.toggle_task_view(),
             b'V' => match &mut self.clips {
                 Some(c) if c.open => c.hide(),
                 _ => self.open_clips(),
@@ -3685,6 +3760,7 @@ impl App {
             let data = dock::WidgetData {
                 stats: &self.sysmon.stats,
                 gpus: &self.sysmon.gpus,
+                desks: (self.desks.names.len(), self.desks.current),
                 media: self.media.as_ref(),
                 art,
                 bars,
@@ -3703,7 +3779,14 @@ impl App {
         if self.screens.iter().any(|d| d.wants_frame()) {
             // The other screens' taskbars: apps and the clock, no widgets.
             let status = dock::Status::default();
-            let data = dock::WidgetData { stats: &self.sysmon.stats, gpus: &[], media: None, art: None, bars: None };
+            let data = dock::WidgetData {
+                stats: &self.sysmon.stats,
+                gpus: &[],
+                desks: (0, 0),
+                media: None,
+                art: None,
+                bars: None,
+            };
             for d in &mut self.screens {
                 if d.wants_frame() {
                     fast |= d.step(dt);

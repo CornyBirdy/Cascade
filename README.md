@@ -61,7 +61,7 @@ Pinned apps are stored in `%APPDATA%\Cascade\pinned.txt`, one per line.
 
 ## Widgets
 
-- **On the taskbar:** the weather, what's playing (with a play / pause button and a little equaliser), CPU, memory, GPU, network speed and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
+- **On the taskbar:** the weather, what's playing (with a play / pause button and a little equaliser), CPU, memory, GPU, network speed, your virtual desktops (a dot each, the one you're on lit, shown with more than one: click for Task View, scroll to go to the next or previous one) and a grid button that opens the panel. Put each on the left side, the right side or nowhere, and in any order: in Settings → Widgets, drag their tiles between the Left, Right and Hidden lanes, or click a tile to show or hide it (or edit the two lists `taskbar_left` and `taskbar_right` in the config).
 - **The panel:** click any of them, or the grid button at the right of the taskbar. It opens above the taskbar's right side with cards for your Windows notifications (click one to open the app it came from, dismiss one with its ×, or *Clear all*), what's playing (art, an equaliser under it, progress, previous / play / next), system stats with live graphs (CPU, memory, GPU, disk, network), the weather and a calendar. Click anywhere else to close it.
 - **Customising it** (Settings → Widgets): the music visualizer on the music widget and card on or off (`widget_visualizer`), the Notifications card on or off, where each taskbar widget sits and in what order, the panel's cards and their order (drag the tiles; `widgets_panel` in the config), one or two columns (it goes to two by itself if one would be taller than the screen), and how often stats are read.
 - **Weather location** (Settings → Focus & weather): a town (`Adelaide`), `Town, Country` to pick between places with the same name (`Adelaide, Australia`), or `lat,lon`; leave it empty to go by your IP address. The row underneath says what it found (*Found: Adelaide, South Australia, Australia*) or that it found nothing.
@@ -88,6 +88,7 @@ Cascade's own versions of Windows' shortcut menus, in the current theme and wher
 - **Win+X** (or right-click **Start**): the quick links menu above the Start button: Installed apps, Power Options, Event Viewer, System, Device Manager, Network Connections, Disk Management, Computer Management, Terminal, Terminal (Admin), Task Manager, Settings, File Explorer, Search, Run, *Shut down or sign out* and Desktop (plus Mobility Center on a laptop). The same keys work as in Windows', shown beside each item: Win+X then A for an admin terminal, or U then R to restart. Arrow keys, Enter and Esc work too. (`shortcut_win_x`)
 - **Win+N:** the widgets panel, with your notifications and the calendar (`shortcut_win_n`; needs Cascade's taskbar).
 - **Win+A** (off by default): the notch's Controls instead of Windows' quick settings (`shortcut_win_a`).
+- **Win+Tab:** Task View in Cascade's look: this desktop's windows as live previews to pick from (click, or the arrow keys and Enter; Esc leaves), and under them your virtual desktops, the one you're on lit: click one to go there, or **+** for a new one (`shortcut_win_tab`).
 - **Win+V:** your clipboard history by the text cursor (or the pointer, in apps that don't say where their cursor is): Windows' own history, so pinned and synced items are there too. Click an item, press its number, or pick it with the arrow keys and Enter, and it's pasted into the app you were in; Delete or its × takes it out, *Clear all* empties it. With clipboard history off in Windows it offers to turn it on. It's only read while the menu is open (`shortcut_win_v`).
 
 ## Screens
@@ -159,6 +160,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/nvml.rs` | Each NVIDIA card's load, temperature, memory and power (the driver's NVML) |
 | `src/widgets.rs` | The widgets panel |
 | `src/quickmenu.rs` | The Win+X menu |
+| `src/desktops.rs` | Windows' virtual desktops: reading them, watching them, switching |
 | `src/clipboard.rs` | The Win+V menu: Windows' clipboard history, and pasting from it |
 | `src/preview.rs` | Window previews (DWM thumbnails) |
 | `src/gfx.rs` | Direct2D/DirectWrite drawing into layered windows |

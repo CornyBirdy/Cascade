@@ -137,10 +137,11 @@ alt_tab = true
 
 # ---- Widgets ----
 # Widgets on the taskbar, left to right on each side. Any of: weather, music,
-# cpu, ram, gpu, net, widgets (the button that opens the panel). Put a name in
+# cpu, ram, gpu, net, desktops (a dot per virtual desktop, shown with more
+# than one) or widgets (the button that opens the panel). Put a name in
 # either list, or leave it out of both to hide it. Click one to open the panel.
 taskbar_left = weather
-taskbar_right = music,cpu,ram,widgets
+taskbar_right = music,cpu,ram,desktops,widgets
 # The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar.
 widgets_panel = media,system,weather,calendar
 # Windows' notifications as a card at the top of the panel (also opened by the clock).
@@ -167,6 +168,8 @@ shortcut_win_n = true
 shortcut_win_a = false
 # Win+V: your clipboard history (Windows' own) by the text cursor.
 shortcut_win_v = true
+# Win+Tab: Task View, the windows of this desktop and your virtual desktops.
+shortcut_win_tab = true
 # Where the Start menu opens: auto (follows the taskbar), center or left.
 start_position = auto
 start_height = 620
@@ -306,6 +309,7 @@ pub struct Config {
     pub shortcut_win_n: bool,
     pub shortcut_win_a: bool,
     pub shortcut_win_v: bool,
+    pub shortcut_win_tab: bool,
     pub admin_helper: bool,
     pub start_position: String,
     pub start_height: f32,
@@ -408,7 +412,7 @@ impl Default for Config {
             mouse_align: "auto".into(),
             screen_inches: String::new(),
             taskbar_left: "weather".into(),
-            taskbar_right: "music,cpu,ram,widgets".into(),
+            taskbar_right: "music,cpu,ram,desktops,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
             widgets_columns: 1,
             widgets_notifications: true,
@@ -419,6 +423,7 @@ impl Default for Config {
             shortcut_win_n: true,
             shortcut_win_a: false,
             shortcut_win_v: true,
+            shortcut_win_tab: true,
             focus_minutes: 25,
             break_minutes: 5,
             calendar_url: String::new(),
@@ -647,6 +652,7 @@ impl Config {
                 "shortcut_win_n" => set_b(&mut c.shortcut_win_n),
                 "shortcut_win_a" => set_b(&mut c.shortcut_win_a),
                 "shortcut_win_v" => set_b(&mut c.shortcut_win_v),
+                "shortcut_win_tab" => set_b(&mut c.shortcut_win_tab),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "calendar_url" => c.calendar_url = v.trim_matches('"').to_string(),
@@ -778,6 +784,7 @@ impl Config {
             "shortcut_win_n" => b(self.shortcut_win_n),
             "shortcut_win_a" => b(self.shortcut_win_a),
             "shortcut_win_v" => b(self.shortcut_win_v),
+            "shortcut_win_tab" => b(self.shortcut_win_tab),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
             "calendar_url" => self.calendar_url.clone(),
