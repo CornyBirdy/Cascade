@@ -63,9 +63,11 @@ pub struct AppEntry {
     pub target: String,
 }
 
-struct RecentFile {
+pub struct RecentFile {
     name: String,
     path: String,
+    when: SystemTime,
+    /// How long ago, as shown ("5m ago"): worked out when the menu opens.
     ago: String,
 }
 
@@ -148,6 +150,28 @@ unsafe fn scan() -> Result<Vec<AppEntry>> {
     Ok(out)
 }
 
+/// Reads the recent files on a worker thread; posts `msg::RECENT`. The menu
+/// shows the last list it got, so opening it never waits on the folder.
+pub fn spawn_recent() {
+    std::thread::spawn(|| {
+        let ptr = Box::into_raw(Box::new(load_recent(8)));
+        if !msg::post(msg::RECENT, 0, ptr as isize) {
+            drop(unsafe { Box::from_raw(ptr) });
+        }
+    });
+}
+
+/// "Just now", "5m ago", "3h ago", "2d ago".
+fn ago(t: SystemTime) -> String {
+    let secs = SystemTime::now().duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        0..60 => "Just now".to_string(),
+        60..3600 => format!("{}m ago", secs / 60),
+        3600..86400 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
 /// Recently opened files, newest first (from the shell's Recent folder).
 fn load_recent(max: usize) -> Vec<RecentFile> {
     let Some(appdata) = std::env::var_os("APPDATA") else { return Vec::new() };
@@ -159,20 +183,12 @@ fn load_recent(max: usize) -> Vec<RecentFile> {
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
-    let now = SystemTime::now();
     files
         .into_iter()
         .take(max)
         .map(|(t, p)| {
-            let secs = now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
-            let ago = match secs {
-                0..60 => "Just now".to_string(),
-                60..3600 => format!("{}m ago", secs / 60),
-                3600..86400 => format!("{}h ago", secs / 3600),
-                _ => format!("{}d ago", secs / 86400),
-            };
             let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            RecentFile { name, path: p.to_string_lossy().into_owned(), ago }
+            RecentFile { name, path: p.to_string_lossy().into_owned(), when: t, ago: ago(t) }
         })
         .collect()
 }
@@ -488,7 +504,13 @@ impl Launcher {
     pub fn show(&mut self, k: f32, pinned: Vec<(String, String)>) {
         self.k = k;
         self.pinned = pinned;
-        self.recent = load_recent(8);
+        for r in &mut self.recent {
+            r.ago = ago(r.when);
+        }
+        if self.recent.is_empty() && self.geo.show_recent {
+            // Not read yet (just turned on): they arrive in a moment.
+            spawn_recent();
+        }
         self.query.clear();
         self.filter();
         self.reset_scroll();
@@ -519,11 +541,21 @@ impl Launcher {
         self.dirty = true;
     }
 
+    /// The recent files, read in the background (see `spawn_recent`).
+    pub fn set_recent(&mut self, recent: Vec<RecentFile>) {
+        self.recent = recent;
+        self.dirty = true;
+    }
+
     pub fn hide(&mut self) {
         crate::mousehook::set_rect(0, None);
         self.close_popups();
         if self.open {
             self.open = false;
+            // Read them again for next time, now the menu is out of the way.
+            if self.geo.show_recent {
+                spawn_recent();
+            }
             self.reveal.set(0.0);
             self.backdrop.hide();
             self.dirty = true;

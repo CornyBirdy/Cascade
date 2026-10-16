@@ -71,6 +71,8 @@ pub mod msg {
     pub const SHORTCUT: u32 = WM_APP + 22;
     /// A stats reading (a boxed `sysmon::Readings`).
     pub const STATS: u32 = WM_APP + 23;
+    /// The Start menu's recent files (a boxed `Vec<launcher::RecentFile>`).
+    pub const RECENT: u32 = WM_APP + 24;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

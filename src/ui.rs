@@ -615,6 +615,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::RECENT => {
+            let list = Box::from_raw(lp.0 as *mut Vec<launcher::RecentFile>);
+            with_app(move |a| a.launcher.set_recent(*list));
+            return LRESULT(0);
+        }
         msg::STATS => {
             let r = Box::from_raw(lp.0 as *mut Readings);
             with_app(move |a| a.on_stats(*r));
@@ -904,6 +909,9 @@ impl App {
     fn start(&mut self) {
         shell::ensure_shortcuts();
         launcher::spawn_scan();
+        if self.cfg.launcher && self.cfg.start_show_recent {
+            launcher::spawn_recent();
+        }
         if self.cfg.update_check {
             update::spawn_checker(self.cfg.github_token.clone());
         }
