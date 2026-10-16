@@ -264,6 +264,11 @@ unsafe fn display_name(id: &str, item: Option<&IShellItem>) -> String {
     id.rsplit(['\\', '/']).next().unwrap_or(id).trim_end_matches(".exe").to_string()
 }
 
+/// An exe's "File description" ("Google Chrome"), if it has one.
+pub fn exe_description(path: &str) -> Option<String> {
+    unsafe { file_description(path) }
+}
+
 unsafe fn file_description(path: &str) -> Option<String> {
     let path = HSTRING::from(path);
     let size = GetFileVersionInfoSizeW(&path, None);

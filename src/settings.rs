@@ -486,6 +486,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("scroll_volume", "Scroll to change volume", "Scroll over the closed notch.", Toggle),
             row(
+                "controls_mixer",
+                "Volume mixer",
+                "Each app playing sound on Controls, with its own volume, and the output device to pick.",
+                Toggle,
+            ),
+            row(
                 "usb_popups",
                 "USB devices",
                 "Say when one is plugged in: flight controllers, radios, headsets, phones and your list, or any device.",

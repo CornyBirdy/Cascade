@@ -22,6 +22,7 @@ mod keyhook;
 mod launcher;
 mod lens;
 mod media;
+mod mixer;
 mod mouseedge;
 mod mousehook;
 mod notifications;

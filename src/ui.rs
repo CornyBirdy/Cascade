@@ -44,6 +44,7 @@ use crate::ics::{self, DAY};
 use crate::keyhook;
 use crate::launcher::{self, AppEntry, Launcher};
 use crate::media::{self, Art, MediaCmd, MediaInfo};
+use crate::mixer::Mixer;
 use crate::mouseedge;
 use crate::msg;
 use crate::notifications::{self, NotifCmd};
@@ -231,6 +232,12 @@ enum Hot {
     Notifications,
     VolumeBar,
     BrightnessBar,
+    /// The mixer: the output device (opens the list of them), one of them,
+    /// an app's name (mutes it) and its volume.
+    Output,
+    OutputItem(usize),
+    AppMute(usize),
+    AppBar(usize),
     PomoToggle,
     PomoReset,
     PomoSkip,
@@ -392,6 +399,10 @@ struct App {
     message_color: Color,
     /// Render times, logged with `perf_log`.
     perf: Perf,
+    /// The Controls tab's volume mixer (read as Controls opens), and whether
+    /// its list of outputs is open.
+    mixer: Mixer,
+    outputs_open: bool,
     /// Whether the theme bends light, and whether its refresh timer runs.
     lens_wanted: bool,
     lens_on: bool,
@@ -1001,6 +1012,8 @@ impl App {
             cal_url: String::new(),
             cal_said: Vec::new(),
             perf: Perf::new(cfg.perf_log),
+            mixer: Mixer::default(),
+            outputs_open: false,
             lens_wanted: false,
             lens_on: false,
             update_available: None,
@@ -1279,7 +1292,7 @@ impl App {
             View::Expanded => match self.mode {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
-                Mode::Controls => (420.0, 154.0 + TAB_BAR, 30.0),
+                Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
                 Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
         };
@@ -1372,6 +1385,9 @@ impl App {
     fn set_mode(&mut self, mode: Mode) {
         if mode != self.mode {
             self.mode = mode;
+            if mode == Mode::Controls {
+                self.read_mixer();
+            }
             self.tab.set(MODES.iter().position(|&m| m == mode).unwrap_or(0) as f32);
             self.hovered = None;
             self.fade.snap(0.0);
@@ -1940,7 +1956,7 @@ impl App {
         if !self.expanded {
             return;
         }
-        if let Some(bar @ (Hot::VolumeBar | Hot::BrightnessBar)) = self.hit(x, y) {
+        if let Some(bar @ (Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_))) = self.hit(x, y) {
             if bar == Hot::BrightnessBar && !self.brightness_ok {
                 return;
             }
@@ -1956,6 +1972,28 @@ impl App {
     fn slider_value(&self, x: i32) -> f32 {
         let (x0, x1) = (50.0, self.content_w - 60.0);
         ((x as f32 / self.k - self.origin - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    }
+
+    /// The same for an app's slider in the mixer.
+    fn app_slider_value(&self, x: i32) -> f32 {
+        let (x0, x1) = (MIX_SLIDER_X, self.content_w - 60.0);
+        ((x as f32 / self.k - self.origin - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    }
+
+    /// Reads the mixer (the apps playing and the outputs) for Controls.
+    fn read_mixer(&mut self) {
+        self.outputs_open = false;
+        self.mixer = if self.cfg.controls_mixer { Mixer::read() } else { Mixer::default() };
+    }
+
+    /// The mixer's rows: the output (and the list of them when open), then
+    /// up to `MIX_APPS` apps.
+    fn mixer_h(&self) -> f32 {
+        if self.mixer.outputs.is_empty() {
+            return 0.0;
+        }
+        let list = if self.outputs_open { self.mixer.outputs.len() as f32 * MIX_ITEM_H } else { 0.0 };
+        MIX_GAP + MIX_ROW + list + self.mixer.apps.len().min(MIX_APPS) as f32 * MIX_ROW
     }
 
     fn drag_to(&mut self, bar: Hot, x: i32) {
@@ -1976,6 +2014,10 @@ impl App {
                     self.brightness = b;
                     let _ = self.brightness_tx.send(b);
                 }
+            }
+            Hot::AppBar(i) => {
+                let v = self.app_slider_value(x);
+                self.mixer.set_level(i, v);
             }
             _ => {}
         }
@@ -2072,7 +2114,16 @@ impl App {
                     let _ = KillTimer(Some(self.hwnd), TIMER_POMODORO);
                 }
             }
-            Hot::VolumeBar | Hot::BrightnessBar => {}
+            Hot::Output => self.outputs_open = !self.outputs_open && self.mixer.outputs.len() > 1,
+            Hot::OutputItem(i) => {
+                if i != self.mixer.current && self.mixer.set_output(i) {
+                    // The apps now play through the new device.
+                    self.read_mixer();
+                }
+                self.outputs_open = false;
+            }
+            Hot::AppMute(i) => self.mixer.toggle_mute(i),
+            Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_) => {}
         }
         self.retarget();
     }
@@ -3062,6 +3113,7 @@ impl App {
         self.expand_pending = false;
         self.pinned = true;
         self.mode = Mode::Controls;
+        self.read_mixer();
         self.tab.snap(1.0);
         self.hovered = None;
         unsafe {
@@ -4089,6 +4141,14 @@ impl App {
                 }
                 out.push((Hot::VolumeBar, 44.0, 84.0, tw - 98.0, 24.0));
                 out.push((Hot::BrightnessBar, 44.0, 118.0, tw - 98.0, 24.0));
+                for (hot, y, h) in self.mixer_rows() {
+                    let (x, w) = match hot {
+                        Hot::AppMute(_) => (18.0, MIX_SLIDER_X - 26.0),
+                        Hot::AppBar(_) => (MIX_SLIDER_X - 6.0, tw - 60.0 - MIX_SLIDER_X + 12.0),
+                        _ => (18.0, tw - 36.0),
+                    };
+                    out.push((hot, x, y, w, h));
+                }
             }
             Mode::Calendar => {
                 for (h, cx) in [(Hot::PomoReset, 274.0), (Hot::PomoToggle, 314.0), (Hot::PomoSkip, 354.0)] {
@@ -4546,6 +4606,97 @@ impl App {
             };
             p.text(&pct, &fonts.num, ox + tw - 54.0, cy - 10.0, 36.0, 20.0, Align::Right, white);
         }
+        self.draw_mixer(p, alpha);
+    }
+
+    /// Where the mixer's rows are: (what, top, height). An app's row is its
+    /// name (to mute it) and its slider.
+    fn mixer_rows(&self) -> Vec<(Hot, f32, f32)> {
+        let mut out = Vec::new();
+        if self.mixer.outputs.is_empty() {
+            return out;
+        }
+        let mut y = MIX_TOP + MIX_GAP;
+        out.push((Hot::Output, y, MIX_ROW));
+        y += MIX_ROW;
+        if self.outputs_open {
+            for i in 0..self.mixer.outputs.len() {
+                out.push((Hot::OutputItem(i), y, MIX_ITEM_H));
+                y += MIX_ITEM_H;
+            }
+        }
+        for i in 0..self.mixer.apps.len().min(MIX_APPS) {
+            out.push((Hot::AppMute(i), y, MIX_ROW));
+            out.push((Hot::AppBar(i), y, MIX_ROW));
+            y += MIX_ROW;
+        }
+        out
+    }
+
+    /// The mixer under the sliders: the output device (a list of them to
+    /// pick from when open), then each app with its own volume.
+    fn draw_mixer(&self, p: &Painter, alpha: f32) {
+        let ox = self.origin;
+        let tw = self.content_w;
+        let fonts = &self.gfx.fonts;
+        let white = Color::white(0.95 * alpha);
+        let dim = Color::white(0.55 * alpha);
+        if !self.mixer.outputs.is_empty() {
+            p.rrect(ox + 18.0, MIX_TOP + MIX_GAP / 2.0, tw - 36.0, 1.0, 0.0, Color::white(0.08 * alpha));
+        }
+        for (hot, y, h) in self.mixer_rows() {
+            let cy = y + h / 2.0;
+            let hovered = self.hovered == Some(hot);
+            match hot {
+                Hot::Output => {
+                    if hovered && self.mixer.outputs.len() > 1 {
+                        p.rrect(ox + 14.0, y + 1.0, tw - 28.0, h - 2.0, 7.0, Color::white(0.07 * alpha));
+                    }
+                    speaker(p, ox + 27.0, cy, 15.0, 1.0, false, dim);
+                    let name = self.mixer.outputs.get(self.mixer.current).map_or("Output", |o| o.name.as_str());
+                    p.text(name, &fonts.label, ox + 46.0, y, tw - 46.0 - 44.0, h, Align::Left, white);
+                    if self.mixer.outputs.len() > 1 {
+                        // Down when the list is closed, up when it's open.
+                        let (cx, s) = (ox + tw - 30.0, if self.outputs_open { -1.0 } else { 1.0 });
+                        p.line(cx - 4.0, cy - 2.0 * s, cx, cy + 2.0 * s, dim, 1.4);
+                        p.line(cx, cy + 2.0 * s, cx + 4.0, cy - 2.0 * s, dim, 1.4);
+                    }
+                }
+                Hot::OutputItem(i) => {
+                    if hovered {
+                        p.rrect(ox + 30.0, y + 1.0, tw - 48.0, h - 2.0, 6.0, Color::white(0.08 * alpha));
+                    }
+                    if i == self.mixer.current {
+                        p.circle(ox + 40.0, cy, 3.0, theme::accent().alpha(alpha));
+                    }
+                    let name = &self.mixer.outputs[i].name;
+                    p.text(name, &fonts.small, ox + 52.0, y, tw - 52.0 - 24.0, h, Align::Left, white);
+                }
+                Hot::AppMute(i) => {
+                    let a = &self.mixer.apps[i];
+                    if hovered {
+                        p.rrect(ox + 14.0, y + 2.0, MIX_SLIDER_X - 22.0, h - 4.0, 6.0, Color::white(0.07 * alpha));
+                    }
+                    let c = if a.muted { dim } else { white };
+                    speaker(p, ox + 27.0, cy, 13.0, a.level, a.muted, c);
+                    p.text(&a.name, &fonts.small, ox + 42.0, y, MIX_SLIDER_X - 54.0, h, Align::Left, c);
+                }
+                Hot::AppBar(i) => {
+                    let a = &self.mixer.apps[i];
+                    let (x0, x1) = (ox + MIX_SLIDER_X, ox + tw - 60.0);
+                    let track = if hovered || self.dragging == Some(hot) { 8.0 } else { 6.0 };
+                    p.rrect(x0, cy - track / 2.0, x1 - x0, track, track / 2.0, Color::white(0.15 * alpha));
+                    let fill = (x1 - x0) * a.level.clamp(0.0, 1.0);
+                    if fill > 0.5 {
+                        let c = Color::white(if a.muted { 0.35 } else { 0.9 } * alpha);
+                        p.rrect(x0, cy - track / 2.0, fill.max(track), track, track / 2.0, c);
+                    }
+                    let pct = format!("{}", (a.level * 100.0).round() as i32);
+                    p.text(&pct, &fonts.small, ox + tw - 54.0, y, 36.0, h, Align::Right, dim);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn draw_calendar(&self, p: &Painter, alpha: f32) {
@@ -4663,6 +4814,16 @@ impl App {
 }
 
 // --------------------------------------------------------------- tab bar --
+
+/// The mixer on the Controls tab: where it starts (under the sliders), the
+/// gap above it, its rows (the output, each app), the rows of the list of
+/// outputs, where the apps' sliders start, and the most apps it lists.
+const MIX_TOP: f32 = 148.0;
+const MIX_GAP: f32 = 10.0;
+const MIX_ROW: f32 = 28.0;
+const MIX_ITEM_H: f32 = 26.0;
+const MIX_SLIDER_X: f32 = 160.0;
+const MIX_APPS: usize = 5;
 
 /// Height of the open notch's tab bar, and the room it takes at the bottom.
 const TAB_H: f32 = 30.0;
