@@ -51,7 +51,7 @@ use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
 use crate::spring::Spring;
 use crate::switcher::Switcher;
-use crate::sysmon::Sampler;
+use crate::sysmon::{self, Readings, StatsCmd};
 use crate::systray::{self, Flyout, Systray};
 use crate::theme;
 use crate::update;
@@ -73,7 +73,6 @@ const TIMER_TICK: usize = 4;
 const TIMER_FLYOUT: usize = 5;
 const TIMER_POMODORO: usize = 6;
 const TIMER_KEYFIX: usize = 7;
-const TIMER_STATS: usize = 8;
 const TIMER_SWITCH: usize = 9;
 // Dock timers (on the dock window).
 const TIMER_SCAN: usize = 10;
@@ -345,8 +344,12 @@ struct App {
     /// Last rect given to the hidden tray window.
     tray_rect: RECT,
     /// System stats, sampled only while a stats widget is on screen.
-    sysmon: Sampler,
-    stats_on: bool,
+    /// The latest stats readings, from the reader thread (see `sysmon`).
+    sysmon: Readings,
+    stats_tx: Sender<StatsCmd>,
+    /// How the reader was last started (its pace in ms, and whether it reads
+    /// the GPU and disk counters), or None while it's stopped.
+    stats_on: Option<(u32, bool)>,
     widgets: Widgets,
     widgets_seen: bool,
     /// Window changes come from the shell's own notifications (few) rather
@@ -609,6 +612,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::STATS => {
+            let r = Box::from_raw(lp.0 as *mut Readings);
+            with_app(move |a| a.on_stats(*r));
+            return LRESULT(0);
+        }
         msg::NOTIFS => {
             let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
             with_app(move |a| {
@@ -869,8 +877,9 @@ impl App {
             shell_hooked: false,
             taskbar_hook: None,
             edge_key: String::new(),
-            sysmon: Sampler::new(),
-            stats_on: false,
+            sysmon: Readings::default(),
+            stats_tx: sysmon::spawn(),
+            stats_on: None,
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
             widgets_seen: false,
             dock_held: false,
@@ -1849,7 +1858,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if ![TIMER_TICK, TIMER_POMODORO, TIMER_STATS, TIMER_SWITCH, TIMER_LENS].contains(&id) {
+            if ![TIMER_TICK, TIMER_POMODORO, TIMER_SWITCH, TIMER_LENS].contains(&id) {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -1897,7 +1906,6 @@ impl App {
                     }
                 }
             }
-            TIMER_STATS => self.sample_stats(),
             TIMER_SWITCH => {
                 self.switcher.show_now();
                 // Alt let go without the hook seeing it (an admin window took the
@@ -2968,26 +2976,28 @@ impl App {
     fn arm_stats(&mut self) {
         let chips = ["cpu", "ram", "gpu", "net"].iter().any(|n| self.cfg.placed(n));
         let want = (self.cfg.dock && self.dock.shown && chips) || self.widgets.open;
-        unsafe {
-            if want {
-                let ms = if self.widgets.open { 1000 } else { self.cfg.stats_seconds.max(1) * 1000 };
-                if !self.stats_on {
-                    self.stats_on = true;
-                    self.sample_stats(); // the first reading is only a baseline
-                }
-                SetTimer(Some(self.hwnd), TIMER_STATS, ms, None);
-            } else if self.stats_on {
-                self.stats_on = false;
-                let _ = KillTimer(Some(self.hwnd), TIMER_STATS);
-                self.sysmon.reset();
-            }
+        // GPU and disk load cost a bit more: only when they are shown.
+        let pace = want.then(|| {
+            let ms = if self.widgets.open { 1000 } else { self.cfg.stats_seconds.max(1) * 1000 };
+            (ms, self.cfg.placed("gpu") || self.widgets.open)
+        });
+        if pace != self.stats_on {
+            self.stats_on = pace;
+            let cmd = match pace {
+                Some((ms, counters)) => StatsCmd::Start { every: Duration::from_millis(ms as u64), counters },
+                None => StatsCmd::Stop,
+            };
+            let _ = self.stats_tx.send(cmd);
         }
     }
 
-    fn sample_stats(&mut self) {
+    /// A reading from the stats thread.
+    fn on_stats(&mut self, readings: Readings) {
+        if self.stats_on.is_none() {
+            return; // one still on its way when the reader was stopped
+        }
         let before = self.sysmon.signature();
-        // GPU and disk load cost a bit more: only when they are shown.
-        self.sysmon.sample(self.cfg.placed("gpu") || self.widgets.open);
+        self.sysmon = readings;
         if self.sysmon.signature() != before {
             self.dock.dirty = true;
         }

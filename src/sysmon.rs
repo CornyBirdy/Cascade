@@ -2,11 +2,13 @@
 //! the performance counters) GPU and disk. NVIDIA cards also get their own
 //! readings each (load, temperature, memory, power; see `nvml`).
 //!
-//! Nothing here runs by itself. The app samples on a timer only while a
-//! stats widget is on screen, and stops the timer (and drops the counters)
-//! the moment none is.
+//! The readings are taken on a thread of their own (some counters take tens
+//! of milliseconds to collect), which the app starts only while a stats
+//! widget is on screen and stops the moment none is: it then lets go of the
+//! counters and sleeps until it's started again.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -17,6 +19,7 @@ use windows::Win32::System::Performance::*;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
 
+use crate::msg;
 use crate::nvml::{Gpu, Nvml};
 
 /// Samples kept for the graphs.
@@ -60,7 +63,7 @@ impl Stats {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct History {
     pub cpu: VecDeque<f32>,
     pub ram: VecDeque<f32>,
@@ -157,14 +160,92 @@ impl Drop for Pdh {
     }
 }
 
-pub struct Sampler {
+/// The latest readings, as the widgets show them.
+#[derive(Clone, Default)]
+pub struct Readings {
     pub stats: Stats,
     pub hist: History,
     /// Each NVIDIA card, with its own readings (empty without one).
     pub gpus: Vec<Gpu>,
+}
+
+impl Readings {
+    /// What the taskbar chips show (see `Stats::signature`), with each card's
+    /// load and temperature, so they are only redrawn when it changes.
+    pub fn signature(&self) -> String {
+        let mut s = self.stats.signature();
+        for g in &self.gpus {
+            s += &format!("|{:?}/{:?}", g.load.map(|v| v.round() as i32), g.temp.map(|v| v.round() as i32));
+        }
+        s
+    }
+}
+
+pub enum StatsCmd {
+    /// Read every `every`, with the GPU and disk counters if `counters`.
+    Start { every: Duration, counters: bool },
+    /// Stop reading and let go of the counters.
+    Stop,
+}
+
+/// Starts the (sleeping) reader. Each reading arrives as a boxed `Readings`
+/// in `msg::STATS`.
+pub fn spawn() -> Sender<StatsCmd> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || run(rx));
+    tx
+}
+
+fn run(rx: Receiver<StatsCmd>) {
+    let mut sampler = Sampler::new();
+    let mut on: Option<(Duration, bool)> = None;
+    loop {
+        let cmd = match on {
+            None => match rx.recv() {
+                Ok(c) => Some(c),
+                Err(_) => return,
+            },
+            Some((every, _)) => match rx.recv_timeout(every) {
+                Ok(c) => Some(c),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
+        };
+        match cmd {
+            Some(StatsCmd::Start { every, counters }) => {
+                let was = on.replace((every, counters));
+                // Already reading: only the pace (or the counters) changed.
+                if was.is_some() {
+                    continue;
+                }
+            }
+            Some(StatsCmd::Stop) => {
+                on = None;
+                sampler.reset();
+                continue;
+            }
+            None => {}
+        }
+        if let Some((_, counters)) = on {
+            sampler.sample(counters);
+            let ptr = Box::into_raw(Box::new(sampler.readings()));
+            if !msg::post(msg::STATS, 0, ptr as isize) {
+                drop(unsafe { Box::from_raw(ptr) });
+            }
+        }
+    }
+}
+
+struct Sampler {
+    stats: Stats,
+    hist: History,
+    gpus: Vec<Gpu>,
     cpu_prev: Option<(u64, u64, u64)>,
     net_prev: Option<(u64, u64, Instant)>,
     pdh: Option<Pdh>,
+    /// A fresh query taking its baseline, to take over from `pdh` at the
+    /// next reading (see `counters`).
+    next_pdh: Option<Pdh>,
     nvml: Nvml,
 }
 
@@ -173,7 +254,7 @@ fn filetime(f: FILETIME) -> u64 {
 }
 
 impl Sampler {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             stats: Stats::default(),
             hist: History::default(),
@@ -181,18 +262,13 @@ impl Sampler {
             cpu_prev: None,
             net_prev: None,
             pdh: None,
+            next_pdh: None,
             nvml: Nvml::default(),
         }
     }
 
-    /// What the taskbar chips show (see `Stats::signature`), with each card's
-    /// load and temperature.
-    pub fn signature(&self) -> String {
-        let mut s = self.stats.signature();
-        for g in &self.gpus {
-            s += &format!("|{:?}/{:?}", g.load.map(|v| v.round() as i32), g.temp.map(|v| v.round() as i32));
-        }
-        s
+    fn readings(&self) -> Readings {
+        Readings { stats: self.stats, hist: self.hist.clone(), gpus: self.gpus.clone() }
     }
 
     fn drop_gpus(&mut self) {
@@ -202,10 +278,11 @@ impl Sampler {
     }
 
     /// Forgets the baselines (the next samples start fresh) and frees the counters.
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.cpu_prev = None;
         self.net_prev = None;
         self.pdh = None;
+        self.next_pdh = None;
         self.stats.gpu = None;
         self.stats.disk = None;
         self.drop_gpus();
@@ -213,7 +290,7 @@ impl Sampler {
 
     /// Takes one sample. `counters` also reads GPU and disk load, which costs
     /// a little more, so ask for it only when it will be shown.
-    pub fn sample(&mut self, counters: bool) {
+    fn sample(&mut self, counters: bool) {
         self.cpu();
         self.memory();
         self.network();
@@ -221,6 +298,7 @@ impl Sampler {
             self.counters();
         } else if self.pdh.is_some() || !self.gpus.is_empty() {
             self.pdh = None;
+            self.next_pdh = None;
             self.stats.gpu = None;
             self.stats.disk = None;
             self.drop_gpus();
@@ -298,10 +376,13 @@ impl Sampler {
             self.hist.gpus.clear();
         }
         self.gpus = gpus;
-        // The set of GPU engines changes as programs come and go: start the
-        // query again now and then so new ones are picked up.
-        if self.pdh.as_ref().is_some_and(|p| p.opened.elapsed() > Duration::from_secs(30)) {
-            self.pdh = None;
+        // The set of GPU engines changes as programs come and go, so now and
+        // then a fresh query is started. It takes its baseline alongside the
+        // old one and takes over at the next reading, so none is lost.
+        if let Some(next) = self.next_pdh.take() {
+            self.pdh = Some(next);
+        } else if self.pdh.as_ref().is_some_and(|p| p.opened.elapsed() > Duration::from_secs(30)) {
+            self.next_pdh = Pdh::open();
         }
         if self.pdh.is_none() {
             self.pdh = Pdh::open();

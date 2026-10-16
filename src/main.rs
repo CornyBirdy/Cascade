@@ -23,8 +23,8 @@ mod mousehook;
 mod notifications;
 mod nvml;
 mod pomodoro;
-mod quickmenu;
 mod preview;
+mod quickmenu;
 mod radios;
 mod settings;
 mod shell;
@@ -69,6 +69,8 @@ pub mod msg {
     pub const NOTIFS: u32 = WM_APP + 21;
     /// A Win+key shortcut Cascade handles (wParam: the key, e.g. 'X').
     pub const SHORTCUT: u32 = WM_APP + 22;
+    /// A stats reading (a boxed `sysmon::Readings`).
+    pub const STATS: u32 = WM_APP + 23;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

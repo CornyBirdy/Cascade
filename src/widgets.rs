@@ -18,7 +18,7 @@ use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::media::MediaInfo;
 use crate::notifications::{Access, Snapshot};
 use crate::spring::Spring;
-use crate::sysmon::{self, Sampler, HISTORY};
+use crate::sysmon::{self, Readings, HISTORY};
 use crate::theme;
 use crate::weather::Weather;
 
@@ -88,7 +88,7 @@ pub enum Action {
 pub struct Ctx<'a> {
     /// The music visualizer's bands and colour, if the music card shows it.
     pub bars: Option<([f32; BANDS], Color)>,
-    pub sampler: &'a Sampler,
+    pub sampler: &'a Readings,
     pub media: Option<&'a MediaInfo>,
     pub art: Option<ID2D1Bitmap>,
     pub weather: Option<&'a Weather>,

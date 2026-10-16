@@ -751,16 +751,7 @@ impl Painter<'_> {
     /// the same scale and offset within the pixel) the time before: steady
     /// panels are painted once instead of every frame. `alpha` fades all of
     /// it; cached, `draw` paints at full strength and the bitmap is faded.
-    pub fn cached(
-        &self,
-        key: u64,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        alpha: f32,
-        draw: impl Fn(&Painter, f32, f32, f32),
-    ) {
+    pub fn cached(&self, key: u64, x: f32, y: f32, w: f32, h: f32, alpha: f32, draw: impl Fn(&Painter, f32, f32, f32)) {
         use std::hash::{Hash, Hasher};
         let k = self.gfx.scale.get();
         // From the pixel before (x, y), a pixel spare all round for smoothing.
