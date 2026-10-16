@@ -24,6 +24,7 @@ pub const ICON_SIZE: u32 = 96;
 const PKEY_LINK_TARGET: PROPERTYKEY =
     PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25), pid: 2 };
 
+#[derive(Clone)]
 pub struct IconResult {
     pub id: String,
     pub name: String,

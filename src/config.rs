@@ -107,6 +107,13 @@ tray_icons = true
 dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
+# Other screens: all = a taskbar on every screen, main = only the main one.
+taskbar_screens = all
+# Which windows each screen's taskbar shows: all, or screen (only the ones on
+# that screen; pinned apps show everywhere).
+taskbar_screen_apps = all
+# The clock on the other screens' taskbars.
+taskbar_screen_clock = true
 
 # ---- Screens ----
 # Keep the pointer's height true when it crosses between screens of different
@@ -244,6 +251,9 @@ pub struct Config {
     pub hide_taskbar: bool,
     pub dock_icon_size: f32,
     pub dock_magnify: f32,
+    pub taskbar_screens: String,
+    pub taskbar_screen_apps: String,
+    pub taskbar_screen_clock: bool,
     pub taskbar_style: String,
     pub taskbar_align: String,
     pub taskbar_start: String,
@@ -334,6 +344,9 @@ impl Default for Config {
             hide_taskbar: true,
             dock_icon_size: 24.0,
             dock_magnify: 0.0,
+            taskbar_screens: "all".into(),
+            taskbar_screen_apps: "all".into(),
+            taskbar_screen_clock: true,
             taskbar_style: "full".into(),
             taskbar_align: "center".into(),
             taskbar_start: "with_apps".into(),
@@ -547,6 +560,9 @@ impl Config {
                 "hide_taskbar" => set_b(&mut c.hide_taskbar),
                 "dock_icon_size" => set_f(&mut c.dock_icon_size, 16.0, 48.0),
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
+                "taskbar_screens" if matches!(v, "all" | "main") => c.taskbar_screens = v.into(),
+                "taskbar_screen_apps" if matches!(v, "all" | "screen") => c.taskbar_screen_apps = v.into(),
+                "taskbar_screen_clock" => set_b(&mut c.taskbar_screen_clock),
                 "taskbar_style" if matches!(v, "full" | "floating") => c.taskbar_style = v.into(),
                 "taskbar_align" if matches!(v, "center" | "left") => c.taskbar_align = v.into(),
                 "taskbar_start" if matches!(v, "with_apps" | "left") => c.taskbar_start = v.into(),
@@ -674,6 +690,9 @@ impl Config {
             "hide_taskbar" => b(self.hide_taskbar),
             "dock_icon_size" => self.dock_icon_size.to_string(),
             "dock_magnify" => self.dock_magnify.to_string(),
+            "taskbar_screens" => self.taskbar_screens.clone(),
+            "taskbar_screen_apps" => self.taskbar_screen_apps.clone(),
+            "taskbar_screen_clock" => b(self.taskbar_screen_clock),
             "taskbar_style" => self.taskbar_style.clone(),
             "taskbar_align" => self.taskbar_align.clone(),
             "taskbar_start" => self.taskbar_start.clone(),

@@ -475,6 +475,19 @@ pub fn work_area() -> RECT {
     r
 }
 
+/// The work area of the screen at `monitor` (the screen less taskbars).
+pub fn work_area_of(monitor: RECT) -> RECT {
+    unsafe {
+        let mon = MonitorFromRect(&monitor, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            monitor
+        }
+    }
+}
+
 // ------------------------------------------------------------------ menu --
 
 #[derive(Clone, Copy, PartialEq)]

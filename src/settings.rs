@@ -555,6 +555,20 @@ fn rows(section: usize) -> Vec<Row> {
                 "Grow icons under the cursor (0 for the Windows look).",
                 slider(0.0, 1.0, 0.05, Unit::Percent),
             ),
+            heading("h_screens", "Other screens"),
+            row(
+                "taskbar_screens",
+                "Taskbar on",
+                "With more than one screen: a taskbar on each, or on the main one only.",
+                Choice(&[("all", "Every screen"), ("main", "Main screen")]),
+            ),
+            row(
+                "taskbar_screen_apps",
+                "Apps on each taskbar",
+                "Every open window, or only the ones on that screen. Pinned apps show on all of them.",
+                Choice(&[("all", "All windows"), ("screen", "That screen's")]),
+            ),
+            row("taskbar_screen_clock", "Clock on other screens", "The widgets and tray stay on the main screen.", Toggle),
         ],
         4 => vec![
             heading("h_open", "Opening"),
@@ -752,6 +766,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (3, "dock") => true,
         (3, _) if !on("dock") => false,
         (3, "status_click") => on("show_status"),
+        (3, "taskbar_screen_apps" | "taskbar_screen_clock") => get("taskbar_screens") == "all",
         // Start menu: the helper also serves Alt+Tab and the shortcuts.
         (4, "launcher" | "admin_helper") => true,
         (4, _) if !on("launcher") => false,

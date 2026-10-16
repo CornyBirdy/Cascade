@@ -13,6 +13,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, DATE_SHORTDATE, TIME_NOSECONDS};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{MonitorFromRect, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -303,6 +304,16 @@ pub struct Dock {
     pub dirty: bool,
     /// Last frame's window rect in screen pixels.
     pub screen: RECT,
+    /// A taskbar on another screen than the main one: Start, search, apps
+    /// and the clock, without the widgets, tray and status icons.
+    pub secondary: bool,
+    /// Shows only the windows on its own screen (and the pinned apps).
+    own_screen: bool,
+    /// A fullscreen app is in front on this taskbar's screen (only tracked
+    /// for the other screens' taskbars; the main one follows the notch).
+    pub fullscreen: bool,
+    /// The pinned apps changed here, for the other screens' taskbars to follow.
+    pins_changed: bool,
 }
 
 fn pinned_path() -> std::path::PathBuf {
@@ -535,6 +546,10 @@ impl Dock {
             foreground: HWND::default(),
             dirty: true,
             screen: RECT::default(),
+            secondary: false,
+            own_screen: false,
+            fullscreen: false,
+            pins_changed: false,
         };
         for id in load_pinned() {
             let mut app = DockApp::new(id, true);
@@ -545,8 +560,96 @@ impl Dock {
         d
     }
 
+    /// A taskbar for another screen (see `secondary`).
+    pub fn new_secondary(hwnd: HWND, trigger: HWND, icon_tx: Sender<String>, backdrops: Vec<Backdrop>) -> Self {
+        let mut d = Self::new(hwnd, trigger, icon_tx, backdrops);
+        d.secondary = true;
+        d
+    }
+
     pub fn is(&self, h: HWND) -> bool {
         h == self.hwnd || h == self.trigger
+    }
+
+    /// For a taskbar on another screen to load its icons the same way.
+    pub fn icon_sender(&self) -> Sender<String> {
+        self.icon_tx.clone()
+    }
+
+    /// Physical pixels per layout unit on this taskbar's screen.
+    pub fn k(&self) -> f32 {
+        self.k
+    }
+
+    /// The screen this taskbar is on.
+    pub fn monitor(&self) -> RECT {
+        self.monitor
+    }
+
+    fn hmonitor(&self) -> HMONITOR {
+        unsafe { MonitorFromRect(&self.monitor, MONITOR_DEFAULTTONEAREST) }
+    }
+
+    /// Whether it shows window `h`, but `h` has since moved to another screen.
+    pub fn misplaced(&self, h: HWND) -> bool {
+        self.own_screen
+            && self.tracks(h)
+            && unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) } != self.hmonitor()
+    }
+
+    /// The pinned apps, in order.
+    pub fn pinned_ids(&self) -> Vec<String> {
+        self.apps.iter().filter(|a| a.pinned).map(|a| a.id.clone()).collect()
+    }
+
+    /// Whether the pinned apps changed since the last call.
+    pub fn take_pins_changed(&mut self) -> bool {
+        std::mem::take(&mut self.pins_changed)
+    }
+
+    /// Takes on the pinned apps (and their order) another screen's taskbar
+    /// changed to. Running apps that aren't pinned keep their places after them.
+    pub fn adopt_pins(&mut self, ids: &[String]) {
+        let mut rest: Vec<DockApp> = std::mem::take(&mut self.apps);
+        let mut apps = Vec::with_capacity(rest.len() + ids.len());
+        for id in ids {
+            let app = match rest.iter().position(|a| a.id.eq_ignore_ascii_case(id)) {
+                Some(i) => rest.remove(i),
+                None => {
+                    let mut a = DockApp::new(id.clone(), true);
+                    a.presence.snap(1.0);
+                    self.request_icon(id);
+                    a
+                }
+            };
+            apps.push(app);
+        }
+        for a in &mut apps {
+            a.pinned = true;
+            a.presence.set(1.0);
+        }
+        for mut a in rest {
+            a.pinned = false;
+            a.presence.set(if a.windows.is_empty() { 0.0 } else { 1.0 });
+            apps.push(a);
+        }
+        self.apps = apps;
+        self.hovered = None;
+        self.dragging = None;
+        self.pressed = None;
+        self.dirty = true;
+    }
+
+    /// Takes the taskbar and its windows down for good (its screen went away).
+    pub fn destroy(mut self) {
+        self.shutdown();
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.trigger);
+            for b in &self.backdrops {
+                let _ = DestroyWindow(b.hwnd);
+            }
+        }
     }
 
     pub fn hovered_app(&self) -> Option<usize> {
@@ -621,6 +724,7 @@ impl Dock {
         let list: Vec<&str> = self.apps.iter().filter(|a| a.pinned).map(|a| a.id.as_str()).collect();
         let _ = std::fs::create_dir_all(config::dir());
         let _ = std::fs::write(pinned_path(), list.join("\r\n") + "\r\n");
+        self.pins_changed = true;
     }
 
     // ------------------------------------------------------------ placement --
@@ -653,6 +757,16 @@ impl Dock {
         self.show_tray = cfg.tray_icons;
         self.left_cfg = parse_chips(&cfg.taskbar_left);
         self.right_cfg = parse_chips(&cfg.taskbar_right);
+        self.own_screen = cfg.taskbar_screens == "all" && cfg.taskbar_screen_apps == "screen";
+        if self.secondary {
+            // The widgets, tray and status icons stay on the main screen.
+            self.show_status = false;
+            self.show_tray = false;
+            self.show_weather = false;
+            self.show_clock = cfg.taskbar_screen_clock;
+            self.left_cfg.clear();
+            self.right_cfg.clear();
+        }
         self.monitor = monitor;
         self.k = k;
         for b in &self.backdrops {
@@ -684,6 +798,8 @@ impl Dock {
         self.bottom = match self.reserve_slot {
             Some(slot) => slot.bottom,
             None if self.hide_taskbar => self.monitor.bottom,
+            // Above Windows' own taskbar on that screen, if it shows one.
+            None if self.secondary => shell::work_area_of(self.monitor).bottom.min(self.monitor.bottom),
             None => {
                 let taskbar = shell::bottom_taskbar_top(self.monitor).unwrap_or(i32::MAX);
                 shell::work_area().bottom.min(self.monitor.bottom).min(taskbar)
@@ -814,8 +930,13 @@ impl Dock {
         for a in &mut self.apps {
             a.windows.clear();
         }
+        let screen = self.own_screen.then(|| self.hmonitor());
         for h in all {
             if !is_app_window(h, own) {
+                continue;
+            }
+            // (A minimised window counts where it will come back.)
+            if screen.is_some_and(|m| unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) } != m) {
                 continue;
             }
             let mut pid = 0u32;
