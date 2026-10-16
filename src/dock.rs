@@ -1427,10 +1427,9 @@ impl Dock {
         let pos = POINT { x: self.monitor.left, y: self.bottom - ph + hidden_px };
         // Only the music widget's bars moved: redraw and upload just that.
         let bars_only = std::mem::take(&mut self.bars_dirty) && !was_dirty && self.settled() && self.layer.ready();
-        if bars_only && self.screen == (RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph }) {
-            if self.render_bars(gfx, wd, pos, pw, ph)? {
-                return Ok(());
-            }
+        let same_place = self.screen == (RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph });
+        if bars_only && same_place && self.render_bars(gfx, wd, pos, pw, ph)? {
+            return Ok(());
         }
         self.screen = RECT { left: pos.x, top: pos.y, right: pos.x + pw, bottom: pos.y + ph };
         // The music and weather widgets fit their text.
