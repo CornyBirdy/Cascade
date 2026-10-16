@@ -408,6 +408,9 @@ struct App {
     lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
+    /// Files being dragged over a taskbar app: (taskbar, app, since when,
+    /// whether its window was brought up).
+    drag: Option<(usize, usize, Instant, bool)>,
     /// Windows' virtual desktops (see `desktops`).
     desks: Desktops,
     /// Your calendar's events (this month and the next six weeks), the
@@ -521,6 +524,20 @@ pub fn run() -> Result<()> {
         APP.with(|c| c.borrow_mut().take());
     }
     Ok(())
+}
+
+/// Files dragged over taskbar `di` at screen point (x, y) (see `drop`).
+pub(crate) fn drag_over(di: usize, x: i32, y: i32) -> bool {
+    with_app(|a| a.on_drag(di, x, y)).unwrap_or(false)
+}
+
+pub(crate) fn drag_leave(di: usize) {
+    with_app(|a| a.on_drag_leave(di));
+}
+
+/// Files dropped on taskbar `di`; true if an app took them.
+pub(crate) fn drop_files(di: usize, x: i32, y: i32, files: Vec<String>) -> bool {
+    with_app(move |a| a.on_drop(di, x, y, files)).unwrap_or(false)
 }
 
 unsafe extern "system" fn win_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, object: i32, child: i32, _: u32, _: u32) {
@@ -1006,6 +1023,7 @@ impl App {
             message: String::new(),
             message_color: theme::accent(),
             device: None,
+            drag: None,
             desks: desktops::read(),
             events: Vec::new(),
             cal_tx: calendar::spawn(),
@@ -1025,6 +1043,7 @@ impl App {
     fn start(&mut self) {
         shell::ensure_shortcuts();
         launcher::spawn_scan();
+        crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
         desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
@@ -1068,6 +1087,7 @@ impl App {
             self.shell_hooked = false;
         }
         self.preview.hide();
+        crate::drop::revoke(self.dock.hwnd);
         self.dock.shutdown();
         for d in &mut self.screens {
             d.shutdown();
@@ -2924,6 +2944,66 @@ impl App {
         Some(LRESULT(0))
     }
 
+    // ----------------------------------------------- dropping files --
+
+    /// The app under screen point (x, y) on taskbar `di`, lit as if hovered,
+    /// and its front window.
+    fn app_at(&mut self, di: usize, x: i32, y: i32) -> Option<(usize, Option<HWND>)> {
+        let d = self.dock_mut(di);
+        let mut p = POINT { x, y };
+        unsafe {
+            let _ = ScreenToClient(d.hwnd, &mut p);
+        }
+        d.on_move(p.x, p.y);
+        let i = d.hovered_app()?;
+        Some((i, d.apps[i].windows.first().copied()))
+    }
+
+    /// Files dragged over taskbar `di`: true over an app (which takes them).
+    /// Held over an app with windows for a moment, its window comes up.
+    fn on_drag(&mut self, di: usize, x: i32, y: i32) -> bool {
+        let Some((i, window)) = self.app_at(di, x, y) else {
+            self.drag = None;
+            return false;
+        };
+        match &mut self.drag {
+            Some((d, a, since, raised)) if *d == di && *a == i => {
+                if !*raised && since.elapsed() > Duration::from_millis(700) {
+                    *raised = true;
+                    if let Some(w) = window {
+                        dock::focus_window(w);
+                    }
+                }
+            }
+            _ => self.drag = Some((di, i, Instant::now(), false)),
+        }
+        true
+    }
+
+    fn on_drag_leave(&mut self, di: usize) {
+        self.drag = None;
+        self.dock_mut(di).on_leave();
+    }
+
+    /// Files dropped on taskbar `di`: opened with the app they're on.
+    fn on_drop(&mut self, di: usize, x: i32, y: i32, files: Vec<String>) -> bool {
+        self.drag = None;
+        let app = self.app_at(di, x, y);
+        self.dock_mut(di).on_leave();
+        let Some((i, _)) = app else { return false };
+        let id = self.dock_ref(di).apps[i].id.clone();
+        if id.to_ascii_lowercase().ends_with(".exe") {
+            let args: Vec<String> = files.iter().map(|f| format!("\"{f}\"")).collect();
+            shell::launch(&id, &args.join(" "), false);
+        } else {
+            // A Store app can't be handed files this way: open them as usual.
+            for f in &files {
+                shell::open(f);
+            }
+        }
+        true
+    }
+
     // ------------------------------------------------- other screens --
 
     fn dock_ref(&self, di: usize) -> &Dock {
@@ -2982,7 +3062,10 @@ impl App {
         }
         while self.screens.len() < want.len() {
             match self.make_screen_dock() {
-                Some(d) => self.screens.push(d),
+                Some(d) => {
+                    crate::drop::register(d.hwnd, self.screens.len() + 1);
+                    self.screens.push(d);
+                }
                 None => break,
             }
         }

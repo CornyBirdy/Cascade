@@ -677,6 +677,7 @@ impl Dock {
     /// Takes the taskbar and its windows down for good (its screen went away).
     pub fn destroy(mut self) {
         self.shutdown();
+        crate::drop::revoke(self.hwnd);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
             let _ = DestroyWindow(self.trigger);

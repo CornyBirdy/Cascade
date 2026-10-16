@@ -13,6 +13,7 @@ mod config;
 mod desktops;
 mod devices;
 mod dock;
+mod drop;
 mod gfx;
 mod helper;
 mod http;
@@ -128,6 +129,8 @@ fn main() {
     update::cleanup();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // For dropping files on the taskbar (see `drop`).
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
     if let Err(e) = ui::run() {
         use windows::core::{w, HSTRING};
