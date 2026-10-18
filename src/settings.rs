@@ -436,7 +436,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "refraction",
                 "Refraction",
-                "Clear glass bends what's behind it round its edge. Uses a little CPU.",
+                "Liquid Glass and Translucent bend what's behind them round their edge. Uses a little CPU.",
                 Toggle,
             ),
         ],

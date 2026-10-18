@@ -151,18 +151,21 @@ pub const THEMES: [Theme; 10] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about:
-            "Apple-style clear glass you see through: light gathers in its thick edge, splits into colour and glints.",
-        glass: Glass::Clear,
-        tint: (0.10, 0.11, 0.14),
-        tint_scale: 0.25,
+        about: "Apple-style glass: a light blur, an edge that bends what's behind it like a lens, and a bright rim.",
+        // Apple's glass is lightly frosted, so what's on it stays readable
+        // over anything; the lens ring (Refraction) sits over that blur at
+        // the edge, where the glass is thick and bends the light most.
+        glass: Glass::Blur,
+        tint: (0.11, 0.12, 0.15),
+        tint_scale: 0.35,
         solid: (0.17, 0.18, 0.21),
-        film: (white(0.05), white(0.02)),
-        // A soft edge: only drawn with Refraction off (the bent light shows
-        // the edge otherwise), and then a hint, not a white outline.
-        rim: Rim::Specular(0.26),
-        light: Light { lens: (6.0, 0.06), dispersion: 0.07, ..DARK },
-        refract: Some(Lens { band: 18.0, bend: 0.75, split: 0.12 }),
+        // Brighter at the top, as the glass catches the light from above.
+        film: (white(0.07), white(0.015)),
+        // The rim stays with Refraction on: the light it catches is the other
+        // half of the look.
+        rim: Rim::Specular(0.55),
+        light: Light { lens: (6.0, 0.06), dispersion: 0.06, ..DARK },
+        refract: Some(Lens { band: 16.0, bend: 0.8, split: 0.12 }),
         accent: Color(0.04, 0.52, 1.0, 1.0),
     },
     Theme {
@@ -506,8 +509,11 @@ pub fn lighten(c: Color, t: f32) -> Color {
 pub fn current() -> Theme {
     let mut t = resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]);
     if lens_of(&t).is_some() {
-        // The bent light shows the edge; a drawn one would only fight it.
-        t.rim = Rim::None;
+        // The bent light shows the edge; a drawn band would only fight it. A
+        // specular rim (light on the glass, not in it) stays.
+        if !matches!(t.rim, Rim::Specular(_)) {
+            t.rim = Rim::None;
+        }
         t.light.lens = (0.0, 0.0);
         t.light.dispersion = 0.0;
     }
@@ -524,7 +530,9 @@ pub fn set_refraction(on: bool) {
 /// How `t` bends light, if it does and Refraction is on.
 fn lens_of(t: &Theme) -> Option<Lens> {
     let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
-    let lens = t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && t.glass == Glass::Clear)?;
+    let lens = t
+        .refract
+        .filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Clear | Glass::Blur))?;
     // The Edge slider sets how strongly it bends.
     (k > 0.0).then_some(Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
 }

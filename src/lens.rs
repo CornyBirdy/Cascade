@@ -17,6 +17,11 @@
 //! reads what's outside the panel, never what's under it. The middle of
 //! the panel stays truly see-through.
 //!
+//! Where the panel sits against the edge of the screen (the taskbar along
+//! the bottom, the lip along the top) there is nothing outside to read, so
+//! the ring fades out on that side and leaves the glass under it, instead of
+//! smearing whatever it could reach.
+//!
 //! What's behind can change at any time, so the rings are refreshed a few
 //! times a second while one is on screen (`refresh`), and only redrawn when
 //! what's behind them did change. Only the strips just outside the panel
@@ -335,15 +340,24 @@ fn paint(ring: &mut Ring, force: bool) -> bool {
                     sample(src, stride, valid, sx + nx * d, sy + ny * d, channel)
                 };
                 let (red, green, blue) = (at(1.0 + split, 2), at(1.0, 1), at(1.0 - split, 0));
+                // Off the screen there's nothing to bend in (the panel is
+                // against its edge there): fade out over a couple of pixels.
+                let reach = to_edge + out * (1.0 + split);
+                let (rx, ry) = (sx + nx * reach, sy + ny * reach);
+                let off = (valid.0 - rx).max(rx - valid.2).max(valid.1 - ry).max(ry - valid.3);
+                let seen = (1.0 - off.max(0.0) / 2.0).clamp(0.0, 1.0);
                 // Light caught in the curve, most along its lit (upper) part:
                 // what shows where the edge is over a plain background.
-                let glint = 255.0 * 0.16 * t * t * t * (0.55 - 0.45 * ny);
+                let glint = 0.16 * t * t * t * (0.55 - 0.45 * ny);
                 let cover = (inside + 0.5).clamp(0.0, 1.0);
                 // Fade into the flat glass, where the ring shows what's behind as it is.
                 let fade = ((band - inside) / (band * 0.25)).clamp(0.0, 1.0);
-                let a = cover * fade;
-                let px = |c: f32| ((c + glint).min(255.0) * a).round() as u8;
-                dst[o..o + 4].copy_from_slice(&[px(blue), px(green), px(red), (a * 255.0).round() as u8]);
+                let a = cover * fade * seen;
+                // Where the bent light faded, the glint is left on its own.
+                let lone = cover * glint * (1.0 - seen);
+                let alpha = a + lone * (1.0 - a);
+                let px = |c: f32| ((c + glint * 255.0).min(255.0) * a + 255.0 * lone * (1.0 - a)).round() as u8;
+                dst[o..o + 4].copy_from_slice(&[px(blue), px(green), px(red), (alpha * 255.0).round() as u8]);
             }
         }
     }
