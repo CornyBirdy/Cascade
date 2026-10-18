@@ -45,6 +45,7 @@ mod update;
 mod usage;
 mod weather;
 mod widgets;
+mod wifi;
 
 /// Messages worker threads post to the main (notch) window.
 pub mod msg {
@@ -88,6 +89,8 @@ pub mod msg {
     pub const CALENDAR: u32 = WM_APP + 27;
     /// The virtual desktops changed (no payload; read them with `desktops::read`).
     pub const DESKTOPS: u32 = WM_APP + 28;
+    /// Wi-Fi networks in range (a boxed `wifi::Report`).
+    pub const WIFI: u32 = WM_APP + 29;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

@@ -62,6 +62,7 @@ use crate::theme;
 use crate::update;
 use crate::weather::{self, Weather};
 use crate::widgets::{self, Widgets};
+use crate::wifi;
 
 /// Width of the concave flares joining the notch to the screen edge.
 const EAR: f32 = 9.0;
@@ -241,6 +242,13 @@ enum Hot {
     PomoToggle,
     PomoReset,
     PomoSkip,
+    /// The Wi-Fi list (Controls): the chevron on the Wi-Fi tile that opens
+    /// it, its back button, a network, and the ways on to Windows' own.
+    WifiMore,
+    WifiBack,
+    WifiNet(usize),
+    WifiSettings,
+    WifiQuick,
 }
 
 thread_local! {
@@ -328,6 +336,10 @@ struct App {
     brightness_tx: Sender<u32>,
     radios: Radios,
     radio_tx: Sender<RadioCmd>,
+    /// The Wi-Fi networks in range, shown in Controls' Wi-Fi list while it's open.
+    wifi_tx: Sender<wifi::Cmd>,
+    wifi: wifi::Report,
+    wifi_open: bool,
     pomo: Pomodoro,
     weather: Option<Weather>,
     visualizer: Visualizer,
@@ -700,6 +712,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(move |a| a.on_stats(*r));
             return LRESULT(0);
         }
+        msg::WIFI => {
+            let report = Box::from_raw(lp.0 as *mut wifi::Report);
+            with_app(move |a| {
+                a.wifi = *report;
+                if a.wifi_open {
+                    a.retarget();
+                    a.dirty = true;
+                }
+            });
+            return LRESULT(0);
+        }
         msg::NOTIFS => {
             let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
             with_app(move |a| {
@@ -984,6 +1007,9 @@ impl App {
             brightness_tx,
             radios: Radios::default(),
             radio_tx,
+            wifi_tx: wifi::spawn(),
+            wifi: wifi::Report::default(),
+            wifi_open: false,
             pomo: Pomodoro::new(cfg.focus_minutes, cfg.break_minutes),
             weather: None,
             visualizer: Visualizer::default(),
@@ -1320,6 +1346,7 @@ impl App {
             View::Expanded => match self.mode {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
+                Mode::Controls if self.wifi_open => (420.0, self.wifi_layout().total + TAB_BAR, 30.0),
                 Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
                 Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
@@ -1329,6 +1356,10 @@ impl App {
 
     /// Re-derives the view and animation targets after any state change.
     fn retarget(&mut self) {
+        // The Wi-Fi list closes with the notch.
+        if !self.expanded {
+            self.wifi_open = false;
+        }
         let visible = self.cfg.notch && !(self.cfg.hide_in_fullscreen && self.fullscreen);
         if visible != self.shown {
             self.shown = visible;
@@ -1413,6 +1444,7 @@ impl App {
     fn set_mode(&mut self, mode: Mode) {
         if mode != self.mode {
             self.mode = mode;
+            self.wifi_open = false;
             if mode == Mode::Controls {
                 self.read_mixer();
             }
@@ -1678,7 +1710,12 @@ impl App {
                 return Some(LRESULT(1));
             }
             msg::RADIOS => {
+                let was = self.radios.wifi;
                 self.radios = Radios::unpack(wp.0);
+                // Wi-Fi just came on with the list open: see what's there.
+                if self.wifi_open && self.radios.wifi == Some(true) && was != Some(true) {
+                    let _ = self.wifi_tx.send(wifi::Cmd::Scan);
+                }
                 self.dirty = true;
                 self.dock.dirty = true;
             }
@@ -2158,6 +2195,28 @@ impl App {
                 self.outputs_open = false;
             }
             Hot::AppMute(i) => self.mixer.toggle_mute(i),
+            Hot::WifiMore => {
+                self.wifi_open = true;
+                self.wifi.note = None;
+                let _ = self.wifi_tx.send(wifi::Cmd::Scan);
+            }
+            Hot::WifiBack => self.wifi_open = false,
+            Hot::WifiNet(i) => {
+                if let Some(n) = self.wifi.nets.get(i).filter(|n| !n.connected) {
+                    self.wifi.note = Some(format!("Joining {}\u{2026}", n.ssid));
+                    let _ = self.wifi_tx.send(wifi::Cmd::Connect(n.clone()));
+                }
+            }
+            Hot::WifiSettings => {
+                shell::open("ms-settings:network-wifi");
+                self.expanded = false;
+            }
+            Hot::WifiQuick => {
+                // Windows' own quick settings, for anything Controls doesn't do
+                // (Cascade lets an injected Win+A through even when it takes the key).
+                shell::win_combo(b'A' as u16);
+                self.expanded = false;
+            }
             Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_) => {}
         }
         self.retarget();
@@ -4257,8 +4316,23 @@ impl App {
                 }
             }
             Mode::Media => {}
+            Mode::Controls if self.wifi_open => {
+                let l = self.wifi_layout();
+                out.push((Hot::WifiBack, 14.0, 14.0, 36.0, 34.0));
+                out.push((Hot::Wifi, tw - 18.0 - WIFI_SWITCH_W, 17.0, WIFI_SWITCH_W, 28.0));
+                for i in 0..l.rows {
+                    out.push((Hot::WifiNet(i), 14.0, l.top + i as f32 * WIFI_ROW, tw - 28.0, WIFI_ROW));
+                }
+                let bw = (tw - 36.0 - 8.0) / 2.0;
+                out.push((Hot::WifiSettings, 18.0, l.foot, bw, WIFI_BTN_H));
+                out.push((Hot::WifiQuick, 18.0 + bw + 8.0, l.foot, bw, WIFI_BTN_H));
+            }
             Mode::Controls => {
                 let tile_w = (tw - 36.0 - 16.0) / 3.0;
+                // The Wi-Fi tile's chevron (opens the list) before the tile itself.
+                if self.radios.wifi.is_some() {
+                    out.push((Hot::WifiMore, 18.0 + tile_w - WIFI_MORE_W, 14.0, WIFI_MORE_W, 54.0));
+                }
                 for (i, h) in [Hot::Wifi, Hot::Bluetooth, Hot::Notifications].into_iter().enumerate() {
                     out.push((h, 18.0 + i as f32 * (tile_w + 8.0), 14.0, tile_w, 54.0));
                 }
@@ -4654,7 +4728,119 @@ impl App {
         }
     }
 
+    /// Where the Wi-Fi list's parts are (content-relative y).
+    fn wifi_layout(&self) -> WifiLayout {
+        let top = 60.0;
+        let rows = self.wifi.nets.len().min(WIFI_ROWS);
+        let note = top + rows as f32 * WIFI_ROW + 4.0;
+        // A line for what's going on: scanning, nothing found, a pick's result.
+        let note_h = if self.wifi_note().is_some() { 24.0 } else { 0.0 };
+        let foot = note + note_h + 6.0;
+        WifiLayout { top, rows, note, foot, total: foot + WIFI_BTN_H + 14.0 }
+    }
+
+    /// The line under the Wi-Fi list, if there's something to say.
+    fn wifi_note(&self) -> Option<String> {
+        if self.radios.wifi == Some(false) {
+            return Some("Wi-Fi is off.".into());
+        }
+        if self.wifi.missing {
+            return Some("No Wi-Fi adapter found.".into());
+        }
+        if let Some(n) = &self.wifi.note {
+            return Some(n.clone());
+        }
+        if self.wifi.scanning {
+            return Some("Looking for networks\u{2026}".into());
+        }
+        self.wifi.nets.is_empty().then(|| "No networks in range.".into())
+    }
+
+    /// Controls' Wi-Fi list: back, the Wi-Fi switch, the networks in range
+    /// (the one you're on first), then Windows' own Wi-Fi settings and quick
+    /// settings for anything this doesn't do.
+    fn draw_wifi(&self, p: &Painter, alpha: f32) {
+        let ox = self.origin;
+        let tw = self.content_w;
+        let fonts = &self.gfx.fonts;
+        let white = Color::white(0.95 * alpha);
+        let dim = Color::white(0.55 * alpha);
+        let l = self.wifi_layout();
+        // Header: a back chevron, the title, the switch.
+        if self.hovered == Some(Hot::WifiBack) {
+            p.rrect(ox + 14.0, 14.0, 36.0, 34.0, 10.0, Color::white(0.08 * alpha));
+        }
+        let (bx, by) = (ox + 34.0, 31.0);
+        p.line(bx + 3.0, by - 7.0, bx - 4.0, by, white, 1.8);
+        p.line(bx - 4.0, by, bx + 3.0, by + 7.0, white, 1.8);
+        p.text("Wi-Fi", &fonts.title, ox + 58.0, 14.0, tw - 160.0, 34.0, Align::Left, white);
+        let on = self.radios.wifi == Some(true);
+        let (sx, sy) = (ox + tw - 18.0 - WIFI_SWITCH_W, 21.0);
+        p.rrect(
+            sx,
+            sy,
+            WIFI_SWITCH_W,
+            20.0,
+            10.0,
+            if on { theme::accent().alpha(alpha) } else { Color::white(0.18 * alpha) },
+        );
+        let knob = if on { sx + WIFI_SWITCH_W - 10.0 } else { sx + 10.0 };
+        p.circle(knob, sy + 10.0, 7.0, white);
+        // The networks.
+        for (i, n) in self.wifi.nets.iter().take(l.rows).enumerate() {
+            let y = l.top + i as f32 * WIFI_ROW;
+            if self.hovered == Some(Hot::WifiNet(i)) && !n.connected {
+                p.rrect(ox + 14.0, y + 1.0, tw - 28.0, WIFI_ROW - 2.0, 9.0, Color::white(0.07 * alpha));
+            }
+            let cy = y + WIFI_ROW / 2.0;
+            signal_bars(
+                p,
+                ox + 30.0,
+                cy,
+                wifi::bars(n.signal),
+                if n.connected { theme::accent().alpha(alpha) } else { white },
+                alpha,
+            );
+            let name_w = tw - 150.0;
+            p.text(&n.ssid, &fonts.label, ox + 52.0, y, name_w, WIFI_ROW, Align::Left, white);
+            let mut right = ox + tw - 26.0;
+            if n.secure {
+                padlock(p, right - 5.0, cy, dim);
+                right -= 20.0;
+            }
+            let status = if n.connected {
+                "Connected"
+            } else if n.profile.is_some() {
+                "Saved"
+            } else {
+                ""
+            };
+            if !status.is_empty() {
+                let c = if n.connected { theme::accent().alpha(alpha) } else { dim };
+                p.text(status, &fonts.small, right - 80.0, y, 76.0, WIFI_ROW, Align::Right, c);
+            }
+        }
+        if let Some(note) = self.wifi_note() {
+            p.text(&note, &fonts.small, ox + 20.0, l.note, tw - 40.0, 22.0, Align::Left, dim);
+        }
+        // Ways on to Windows' own.
+        let bw = (tw - 36.0 - 8.0) / 2.0;
+        for (i, (hot, label)) in
+            [(Hot::WifiSettings, "More Wi-Fi settings"), (Hot::WifiQuick, "Windows quick settings")]
+                .into_iter()
+                .enumerate()
+        {
+            let x = ox + 18.0 + i as f32 * (bw + 8.0);
+            let fill = if self.hovered == Some(hot) { 0.13 } else { 0.08 };
+            p.rrect(x, l.foot, bw, WIFI_BTN_H, 10.0, Color::white(fill * alpha));
+            p.text(label, &fonts.small, x, l.foot, bw, WIFI_BTN_H, Align::Center, white);
+        }
+    }
+
     fn draw_controls(&self, p: &Painter, alpha: f32) {
+        if self.wifi_open {
+            return self.draw_wifi(p, alpha);
+        }
         let ox = self.origin;
         let tw = self.content_w;
         let fonts = &self.gfx.fonts;
@@ -4678,23 +4864,31 @@ impl App {
                 Hot::Bluetooth => bluetooth(p, icx, icy, white),
                 _ => bell(p, icx, icy, white),
             }
+            // The Wi-Fi tile names the network you're on, and has a chevron
+            // that opens the list of them.
+            let joined = (hot == Hot::Wifi && state == Some(true))
+                .then(|| self.wifi.nets.iter().find(|n| n.connected).map(|n| n.ssid.as_str()))
+                .flatten();
             let status = match (hot, state) {
                 (Hot::Notifications, _) => "Open",
+                (Hot::Wifi, Some(true)) if joined.is_some() => joined.unwrap_or("On"),
                 (_, Some(true)) => "On",
                 (_, Some(false)) => "Off",
                 (_, None) => "Unavailable",
             };
-            p.text(label, &fonts.label, x + 46.0, y + 9.0, tile_w - 50.0, 18.0, Align::Left, white);
-            p.text(
-                status,
-                &fonts.small,
-                x + 46.0,
-                y + 27.0,
-                tile_w - 50.0,
-                16.0,
-                Align::Left,
-                Color::white(0.55 * alpha),
-            );
+            let text_w =
+                if hot == Hot::Wifi && state.is_some() { tile_w - 50.0 - WIFI_MORE_W + 8.0 } else { tile_w - 50.0 };
+            p.text(label, &fonts.label, x + 46.0, y + 9.0, text_w, 18.0, Align::Left, white);
+            p.text(status, &fonts.small, x + 46.0, y + 27.0, text_w, 16.0, Align::Left, Color::white(0.55 * alpha));
+            if hot == Hot::Wifi && state.is_some() {
+                let mx = x + tile_w - WIFI_MORE_W;
+                if self.hovered == Some(Hot::WifiMore) {
+                    p.rrect(mx + 2.0, y + 6.0, WIFI_MORE_W - 6.0, 42.0, 10.0, Color::white(0.10 * alpha));
+                }
+                let (cx, cy, c) = (mx + WIFI_MORE_W / 2.0 - 1.0, y + 27.0, Color::white(0.75 * alpha));
+                p.line(cx - 2.5, cy - 5.0, cx + 2.5, cy, c, 1.6);
+                p.line(cx + 2.5, cy, cx - 2.5, cy + 5.0, c, 1.6);
+            }
         }
         // Sliders.
         let rows = [
@@ -4941,6 +5135,23 @@ impl App {
 /// The mixer on the Controls tab: where it starts (under the sliders), the
 /// gap above it, its rows (the output, each app), the rows of the list of
 /// outputs, where the apps' sliders start, and the most apps it lists.
+/// Controls' Wi-Fi list: a network's row, how many show, the buttons under
+/// them, the switch in its header and the chevron on the Wi-Fi tile.
+const WIFI_ROW: f32 = 36.0;
+const WIFI_ROWS: usize = 6;
+const WIFI_BTN_H: f32 = 32.0;
+const WIFI_SWITCH_W: f32 = 40.0;
+const WIFI_MORE_W: f32 = 26.0;
+
+/// Where the parts of Controls' Wi-Fi list are (see `App::wifi_layout`).
+struct WifiLayout {
+    top: f32,
+    rows: usize,
+    note: f32,
+    foot: f32,
+    total: f32,
+}
+
 const MIX_TOP: f32 = 148.0;
 const MIX_GAP: f32 = 10.0;
 const MIX_ROW: f32 = 28.0;
@@ -5099,6 +5310,22 @@ fn wifi(p: &Painter, cx: f32, cy: f32, c: Color) {
         p.arc(cx, base, r, a0, a1, c, 1.8);
     }
     p.circle(cx, base, 1.6, c);
+}
+
+/// Signal strength: four bars rising to the right, `n` of them lit.
+fn signal_bars(p: &Painter, x: f32, cy: f32, n: u32, c: Color, alpha: f32) {
+    for i in 0..4u32 {
+        let h = 4.0 + i as f32 * 3.5;
+        let lit = i < n;
+        let col = if lit { c } else { Color::white(0.18 * alpha) };
+        p.rrect(x - 8.0 + i as f32 * 4.5, cy + 7.0 - h, 3.0, h, 1.0, col);
+    }
+}
+
+/// A small padlock (a secured network).
+fn padlock(p: &Painter, cx: f32, cy: f32, c: Color) {
+    p.rrect(cx - 4.5, cy - 1.0, 9.0, 7.0, 1.5, c);
+    p.arc(cx, cy - 1.0, 3.0, std::f32::consts::PI, std::f32::consts::TAU, c, 1.4);
 }
 
 fn bluetooth(p: &Painter, cx: f32, cy: f32, c: Color) {
