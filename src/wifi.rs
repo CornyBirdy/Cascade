@@ -51,7 +51,16 @@ pub enum Cmd {
 
 pub fn spawn() -> Sender<Cmd> {
     let (tx, rx) = channel();
-    std::thread::spawn(move || run(rx));
+    std::thread::spawn(move || {
+        // ShellExecute (Windows' network list, for a password) wants COM.
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+        }
+        run(rx)
+    });
     tx
 }
 
