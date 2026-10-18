@@ -151,7 +151,8 @@ alt_tab_style = cards
 # either list, or leave it out of both to hide it. Click one to open the panel.
 taskbar_left = weather
 taskbar_right = music,cpu,ram,desktops,widgets
-# The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar.
+# The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar,
+# phone (your Android phone's notifications through Phone Link, and a way into it).
 widgets_panel = media,system,weather,calendar
 # Windows' notifications as a card at the top of the panel (also opened by the clock).
 widgets_notifications = true

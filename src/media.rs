@@ -1,6 +1,11 @@
 //! Now-playing info from Windows' media transport controls (the same source
 //! the Windows volume flyout uses). Runs on its own thread and only wakes on
 //! media events, so it costs nothing while the music doesn't change.
+//!
+//! Music playing on your Android phone shows up here too when Phone Link
+//! relays it (Phone Link > Audio): it's one more media session, marked as
+//! the phone's. With more than one thing playing or paused (the phone and a
+//! browser, say) `MediaCmd::NextSource` steps between them.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -30,7 +35,12 @@ pub enum MediaCmd {
     PlayPause,
     Next,
     Previous,
+    /// Show (and control) the next app or device with media instead.
+    NextSource,
 }
+
+/// Phone Link's AppUserModelID prefix: media from your phone.
+const PHONE_LINK: &str = "Microsoft.YourPhone";
 
 /// Album art, pre-scaled and pre-rounded, as premultiplied BGRA.
 pub struct Art {
@@ -50,6 +60,11 @@ pub struct MediaInfo {
     /// When `position` was sampled.
     pub stamp: Instant,
     pub art: Option<Arc<Art>>,
+    /// Playing on your phone, through Phone Link.
+    pub phone: bool,
+    /// How many apps (and phones) have media to show, so the UI can offer a
+    /// way to switch between them when there's more than one.
+    pub sources: usize,
 }
 
 impl MediaInfo {
@@ -85,6 +100,9 @@ struct Watcher {
     art_key: String,
     art: Option<Arc<Art>>,
     wic: Option<IWICImagingFactory>,
+    /// The source picked with `NextSource` (its AppUserModelID), shown even
+    /// while another plays, until it goes away.
+    pinned: Option<String>,
 }
 
 fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
@@ -102,26 +120,38 @@ fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
         Ok(())
     }))?;
 
-    let mut w = Watcher { manager, subs: Vec::new(), current: None, art_key: String::new(), art: None, wic: None };
+    let mut w = Watcher {
+        manager,
+        subs: Vec::new(),
+        current: None,
+        art_key: String::new(),
+        art: None,
+        wic: None,
+        pinned: None,
+    };
     w.resubscribe(&tx);
     w.refresh();
 
     // Returns (refresh, resubscribe) after running any player action.
-    let handle = |cmd: MediaCmd, w: &Watcher| match cmd {
+    let handle = |cmd: MediaCmd, w: &mut Watcher| match cmd {
         MediaCmd::Refresh => (true, false),
         MediaCmd::Resubscribe => (true, true),
+        MediaCmd::NextSource => {
+            w.next_source();
+            (true, false)
+        }
         action => {
             w.act(action);
             (true, false)
         }
     };
     while let Ok(cmd) = rx.recv() {
-        let (mut refresh, mut resubscribe) = handle(cmd, &w);
+        let (mut refresh, mut resubscribe) = handle(cmd, &mut w);
         // Players fire several events per track change (title, then art,
         // then timeline). Let them land, then refresh once.
         std::thread::sleep(Duration::from_millis(120));
         while let Ok(more) = rx.try_recv() {
-            let (a, b) = handle(more, &w);
+            let (a, b) = handle(more, &mut w);
             refresh |= a;
             resubscribe |= b;
         }
@@ -138,6 +168,20 @@ fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
 fn now_filetime() -> i64 {
     let ft = unsafe { GetSystemTimeAsFileTime() };
     ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
+}
+
+fn aumid(s: &Session) -> String {
+    s.SourceAppUserModelId().map(|h| h.to_string_lossy()).unwrap_or_default()
+}
+
+/// Whether a session has anything to show: playing, or paused on a title.
+fn has_media(s: &Session) -> bool {
+    is_playing(s)
+        || s.TryGetMediaPropertiesAsync()
+            .and_then(|op| op.get())
+            .and_then(|p| p.Title())
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
 }
 
 fn is_playing(s: &Session) -> bool {
@@ -189,9 +233,33 @@ impl Watcher {
         }
     }
 
-    /// Picks the session worth showing: one that is playing (preferring the
-    /// one Windows calls current), otherwise the current one.
-    fn pick(&self) -> Option<Session> {
+    /// The sessions with something to show, in Windows' order.
+    fn with_media(&self) -> Vec<Session> {
+        let Ok(sessions) = self.manager.GetSessions() else { return Vec::new() };
+        (0..sessions.Size().unwrap_or(0)).filter_map(|i| sessions.GetAt(i).ok()).filter(has_media).collect()
+    }
+
+    /// Steps to the next source with media (after the one shown now).
+    fn next_source(&mut self) {
+        let all = self.with_media();
+        if all.len() < 2 {
+            return;
+        }
+        let shown = self.current.as_ref().map(aumid).unwrap_or_default();
+        let at = all.iter().position(|s| aumid(s) == shown).map_or(0, |i| (i + 1) % all.len());
+        self.pinned = Some(aumid(&all[at]));
+    }
+
+    /// Picks the session worth showing: the one picked with NextSource while
+    /// it's there, else one that is playing (preferring the one Windows calls
+    /// current), otherwise the current one.
+    fn pick(&mut self) -> Option<Session> {
+        if let Some(p) = self.pinned.clone() {
+            match self.with_media().into_iter().find(|s| aumid(s) == p) {
+                Some(s) => return Some(s),
+                None => self.pinned = None,
+            }
+        }
         let current = self.manager.GetCurrentSession().ok();
         if let Some(c) = &current {
             if is_playing(c) {
@@ -245,6 +313,14 @@ impl Watcher {
             }
         }
 
+        // From your phone, through Phone Link: say so where the artist goes.
+        let phone = aumid(s).starts_with(PHONE_LINK);
+        let artist = match (phone, artist.is_empty()) {
+            (true, true) => "Your phone".to_string(),
+            (true, false) => format!("Phone \u{b7} {artist}"),
+            (false, _) => artist,
+        };
+
         let key = format!("{title}\u{1}{artist}\u{1}{album}");
         if key != self.art_key || self.art.is_none() {
             self.art_key = key;
@@ -265,6 +341,8 @@ impl Watcher {
             duration: Duration::from_nanos(duration as u64 * 100),
             stamp: Instant::now(),
             art: self.art.clone(),
+            phone,
+            sources: self.with_media().len(),
         }))
     }
 

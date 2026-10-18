@@ -39,6 +39,19 @@ enum Card {
     System,
     Weather,
     Calendar,
+    /// Your Android phone through Phone Link: what it's notified you of, and
+    /// a way into Phone Link.
+    Phone,
+}
+
+/// Phone Link's AppUserModelID prefix (the app was once called Your Phone).
+const PHONE_LINK: &str = "Microsoft.YourPhone";
+/// How many of the phone's notifications the Phone card lists.
+const PHONE_MAX: usize = 3;
+
+/// Whether a notification came from your phone, through Phone Link.
+pub fn from_phone(aumid: &str) -> bool {
+    aumid.starts_with(PHONE_LINK)
 }
 
 /// "media,system" -> the cards, in that order (unknown names and repeats ignored).
@@ -51,6 +64,7 @@ fn parse_cards(list: &str) -> Vec<Card> {
             "system" | "stats" => Card::System,
             "weather" => Card::Weather,
             "calendar" => Card::Calendar,
+            "phone" => Card::Phone,
             _ => continue,
         };
         if !out.contains(&card) {
@@ -70,6 +84,7 @@ enum Target {
     NotifOpen(u32),
     NotifRemove(u32),
     NotifSettings,
+    OpenPhoneLink,
 }
 
 pub enum Action {
@@ -82,6 +97,7 @@ pub enum Action {
     OpenNotification(u32),
     RemoveNotification(u32),
     NotificationSettings,
+    OpenPhoneLink,
 }
 
 /// What the cards show.
@@ -191,7 +207,16 @@ fn card_height(card: Card, ctx: &Ctx) -> f32 {
         }
         Card::Weather => 112.0,
         Card::Calendar => 256.0,
+        Card::Phone => {
+            let rows = phone_items(ctx).count().clamp(1, PHONE_MAX);
+            34.0 + rows as f32 * NOTIF_ROW + 40.0
+        }
     }
+}
+
+/// The notifications your phone sent through Phone Link, newest first.
+fn phone_items<'a>(ctx: &'a Ctx) -> impl Iterator<Item = &'a crate::notifications::Notif> {
+    ctx.notifs.items.iter().filter(|n| from_phone(&n.aumid)).take(PHONE_MAX)
 }
 
 /// Each card's place (card, x, y, height) and the panel's size.
@@ -327,6 +352,7 @@ impl Widgets {
             Target::NotifOpen(id) => Action::OpenNotification(id),
             Target::NotifRemove(id) => Action::RemoveNotification(id),
             Target::NotifSettings => Action::NotificationSettings,
+            Target::OpenPhoneLink => Action::OpenPhoneLink,
         })
     }
 
@@ -423,6 +449,7 @@ impl Widgets {
                     Card::System => system_card(&p, f, ctx, cx, cy),
                     Card::Weather => weather_card(&p, f, ctx, cx, cy),
                     Card::Calendar => calendar_card(&p, f, cx, cy),
+                    Card::Phone => self.phone_card(&p, f, ctx, cx, cy, ch),
                 }
             }
         }
@@ -491,6 +518,58 @@ impl Widgets {
                 }
             }
         }
+    }
+
+    /// Your phone through Phone Link: the notifications it mirrored here
+    /// (click one to open it there, × to dismiss it), and Open Phone Link.
+    /// Its music shows on the Media card, marked as from the phone.
+    fn phone_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32, h: f32) {
+        p.text("Phone", &f.label, x + 14.0, y + 6.0, 200.0, 26.0, Align::Left, Color::white(0.9));
+        // A phone outline beside the title.
+        let (px, py) = (x + CARD_W - 26.0, y + 19.0);
+        p.stroke_rrect(px - 5.0, py - 8.0, 10.0, 16.0, 2.5, Color::white(0.6), 1.2);
+        p.line(px - 1.5, py + 5.0, px + 1.5, py + 5.0, Color::white(0.6), 1.2);
+        let top = y + 34.0;
+        let items: Vec<&crate::notifications::Notif> = phone_items(ctx).collect();
+        let tw = CARD_W - 28.0 - 30.0;
+        if ctx.notifs.access != Access::Allowed {
+            let msg = "Phone Link's notifications show here once Cascade can read notifications.";
+            p.text_wrap(msg, &f.small, x + 14.0, top, CARD_W - 28.0, NOTIF_ROW, Color::white(0.55));
+        } else if items.is_empty() {
+            p.text("Nothing from your phone", &f.body, x, top, CARD_W, NOTIF_ROW, Align::Center, Color::white(0.5));
+        }
+        for (i, item) in items.iter().enumerate() {
+            let ry = top + i as f32 * NOTIF_ROW;
+            let open = Target::NotifOpen(item.id);
+            let remove = Target::NotifRemove(item.id);
+            if matches!(self.hovered, Some(t) if t == open || t == remove) {
+                p.rrect(x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0, 8.0, Color::white(0.06));
+            } else if i > 0 {
+                p.rrect(x + 14.0, ry, CARD_W - 28.0, 1.0, 0.0, Color::white(0.06));
+            }
+            p.text(&item.title, &f.label, x + 14.0, ry + 8.0, tw, 16.0, Align::Left, Color::white(0.95));
+            p.text(&item.body, &f.small, x + 14.0, ry + 26.0, tw, 15.0, Align::Left, Color::white(0.65));
+            let (cx, cy) = (x + CARD_W - 26.0, ry + NOTIF_ROW / 2.0);
+            if self.hovered == Some(remove) {
+                p.circle(cx, cy, 11.0, Color::white(0.10));
+            }
+            let c = Color::white(0.7);
+            p.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, c, 1.3);
+            p.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, c, 1.3);
+            self.hits.push((remove, cx - 12.0, cy - 12.0, 24.0, 24.0));
+            self.hits.push((open, x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0));
+        }
+        let (bw, bh) = (150.0, 26.0);
+        let (bx, by) = (x + 14.0, y + h - bh - 10.0);
+        let a = if self.hovered == Some(Target::OpenPhoneLink) { 0.16 } else { 0.09 };
+        p.rrect(bx, by, bw, bh, 7.0, Color::white(a));
+        p.text("Open Phone Link", &f.small, bx, by, bw, bh, Align::Center, Color::white(0.9));
+        self.hits.push((Target::OpenPhoneLink, bx, by, bw, bh));
+    }
+
+    /// Whether the Phone card is in the panel (it reads notifications too).
+    pub fn shows_phone(&self) -> bool {
+        self.cards.contains(&Card::Phone)
     }
 
     fn media_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {

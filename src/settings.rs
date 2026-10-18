@@ -168,9 +168,13 @@ impl Board {
                 ("desktops", "Desktops"),
                 ("widgets", "Widgets"),
             ],
-            Board::Panel => {
-                &[("media", "Media"), ("system", "System"), ("weather", "Weather"), ("calendar", "Calendar")]
-            }
+            Board::Panel => &[
+                ("media", "Media"),
+                ("system", "System"),
+                ("weather", "Weather"),
+                ("calendar", "Calendar"),
+                ("phone", "Phone"),
+            ],
         }
     }
 
@@ -311,6 +315,10 @@ fn tile_icon(p: &Painter, item: &str, cx: f32, cy: f32, c: Color) {
             p.arc(cx, cy + 2.5, 7.0, std::f32::consts::PI, std::f32::consts::TAU, c, 1.4);
             p.line(cx, cy + 2.5, cx + 3.5, cy - 2.5, c, 1.4);
             p.circle(cx, cy + 2.5, 1.6, c);
+        }
+        "phone" => {
+            p.stroke_rrect(cx - 4.5, cy - 7.0, 9.0, 14.0, 2.2, c, 1.3);
+            p.line(cx - 1.5, cy + 4.5, cx + 1.5, cy + 4.5, c, 1.3);
         }
         "calendar" => {
             p.stroke_rrect(cx - 6.0, cy - 5.0, 12.0, 11.0, 2.2, c, 1.3);

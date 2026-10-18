@@ -250,6 +250,8 @@ enum Hot {
     WifiNet(usize),
     WifiSettings,
     WifiQuick,
+    /// Media: switch to the next app (or phone) with media.
+    MediaSource,
 }
 
 thread_local! {
@@ -2212,6 +2214,9 @@ impl App {
                 self.outputs_open = false;
             }
             Hot::AppMute(i) => self.mixer.toggle_mute(i),
+            Hot::MediaSource => {
+                let _ = self.media_tx.send(MediaCmd::NextSource);
+            }
             Hot::WifiMore => {
                 self.wifi_open = true;
                 self.wifi.note = None;
@@ -2301,7 +2306,7 @@ impl App {
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
-                if self.widgets.open && self.cfg.widgets_notifications {
+                if self.widgets.open && (self.cfg.widgets_notifications || self.widgets.shows_phone()) {
                     let _ = self.notif_tx.send(NotifCmd::Refresh);
                     unsafe {
                         SetTimer(Some(self.hwnd), TIMER_NOTIFS, 3000, None);
@@ -3485,7 +3490,8 @@ impl App {
         let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
         self.widgets.show(panel, notifications, columns, right, bottom, max_h, k);
         self.arm_stats();
-        if notifications {
+        // The Phone card lists the phone's notifications, so it reads them too.
+        if notifications || self.widgets.shows_phone() {
             // Read now, then every few seconds while the panel stays open.
             let _ = self.notif_tx.send(NotifCmd::Refresh);
             unsafe {
@@ -3549,6 +3555,10 @@ impl App {
                     Some(widgets::Action::NotificationSettings) => {
                         self.widgets.hide();
                         shell::open("ms-settings:privacy-notifications");
+                    }
+                    Some(widgets::Action::OpenPhoneLink) => {
+                        self.widgets.hide();
+                        shell::open("shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App");
                     }
                     None => {}
                 }
@@ -4348,6 +4358,9 @@ impl App {
                 for (h, dx) in [(Hot::Previous, -60.0), (Hot::PlayPause, 0.0), (Hot::Next, 60.0)] {
                     out.push((h, tw / 2.0 + dx - 20.0, 104.0, 40.0, 40.0));
                 }
+                if self.media.as_ref().is_some_and(|m| m.sources > 1) {
+                    out.push((Hot::MediaSource, tw - 18.0 - 34.0, 107.0, 34.0, 34.0));
+                }
             }
             Mode::Media => {}
             Mode::Controls if self.wifi_open => {
@@ -4689,6 +4702,20 @@ impl App {
         let cy = 124.0;
         let cx = ox + tw / 2.0;
         let white = Color::white(0.95 * alpha);
+        // More than one thing with media (your phone and a browser, say): a
+        // button to switch between them, at the right of the controls.
+        if m.sources > 1 {
+            let (sx, sy) = (ox + tw - 18.0 - 17.0, cy);
+            if self.hovered == Some(Hot::MediaSource) {
+                p.circle(sx, sy, 16.0, Color::white(0.10 * alpha));
+            }
+            let c = Color::white(0.75 * alpha);
+            // Two arrows passing each other.
+            p.line(sx - 7.0, sy - 3.5, sx + 6.0, sy - 3.5, c, 1.5);
+            p.line(sx + 3.0, sy - 6.5, sx + 6.0, sy - 3.5, c, 1.5);
+            p.line(sx + 7.0, sy + 3.5, sx - 6.0, sy + 3.5, c, 1.5);
+            p.line(sx - 3.0, sy + 6.5, sx - 6.0, sy + 3.5, c, 1.5);
+        }
         for (b, x) in [(Hot::Previous, cx - 60.0), (Hot::PlayPause, cx), (Hot::Next, cx + 60.0)] {
             if self.hovered == Some(b) {
                 p.circle(x, cy, 19.0, Color::white(0.12 * alpha));
