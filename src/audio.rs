@@ -220,8 +220,12 @@ unsafe fn capture(stop: &AtomicBool) -> Result<()> {
     let mut last_post = Instant::now();
     let bin_hz = rate / FFT_SIZE as f32;
 
+    // Short waits and frequent posts keep the bars on the beat: what reaches
+    // the screen is at most ~20 ms behind what was played (the bars jump up
+    // at once and only ease down; see `msg::SPECTRUM` in ui).
     while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(8));
+        let mut fresh = false;
         loop {
             let n = cap.GetNextPacketSize()?;
             if n == 0 {
@@ -248,9 +252,10 @@ unsafe fn capture(stop: &AtomicBool) -> Result<()> {
                 head = (head + 1) % FFT_SIZE;
             }
             cap.ReleaseBuffer(frames)?;
+            fresh |= frames > 0;
         }
 
-        if last_post.elapsed() < Duration::from_millis(30) {
+        if !fresh || last_post.elapsed() < Duration::from_millis(12) {
             continue;
         }
         last_post = Instant::now();

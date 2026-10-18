@@ -286,6 +286,8 @@ struct App {
     tabs_fade: Spring,
     level: Spring,
     bars: [Spring; BANDS],
+    /// A bar jumped up (see `msg::SPECTRUM`): draw it even though no spring moves.
+    bars_fresh: bool,
     /// Whether the notch (or the lip) shows the visualizer's bars.
     notch_bars: bool,
     /// Whether the music widget or the panel's music card shows them.
@@ -951,6 +953,7 @@ impl App {
             // a held volume key instead of trailing behind it.
             level: Spring::new(vol.0, 1600.0, 78.0),
             bars: [Spring::new(0.0, 700.0, 30.0); BANDS],
+            bars_fresh: false,
             notch_bars: false,
             widget_bars: false,
             dock_bars: false,
@@ -1681,7 +1684,14 @@ impl App {
             msg::SPECTRUM => {
                 if self.visualizer.running() {
                     for (b, v) in self.bars.iter_mut().zip(audio::unpack(wp.0)) {
-                        b.set(v);
+                        // A beat shows the moment it's heard: bars jump up and
+                        // only ease back down (springing up lagged ~70 ms).
+                        if v > b.value {
+                            b.snap(v);
+                            self.bars_fresh = true;
+                        } else {
+                            b.set(v);
+                        }
                     }
                 }
             }
@@ -3852,7 +3862,7 @@ impl App {
     }
 
     fn bars_moving(&self) -> bool {
-        self.bars.iter().any(|b| !b.settled())
+        self.bars_fresh || self.bars.iter().any(|b| !b.settled())
     }
 
     fn wants_frame(&self) -> bool {
@@ -3879,6 +3889,7 @@ impl App {
 
         // The visualizer's bars, wherever they show.
         if self.bars_moving() {
+            self.bars_fresh = false;
             for b in &mut self.bars {
                 b.step(dt);
             }
