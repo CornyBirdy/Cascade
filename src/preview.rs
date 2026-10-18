@@ -1,12 +1,22 @@
 //! Window previews above the dock. Live thumbnails are composited by DWM
 //! itself (DwmRegisterThumbnail), so Cascade never copies window pixels.
+//!
+//! Resting the pointer on a preview peeks at its window, as Windows' own
+//! taskbar does: every other window turns to glass, so you can see where
+//! that one is. That's DWM's live preview (the same call alternative
+//! taskbars use); Cascade's own windows are kept out of it.
 
-use windows::core::{Result, BOOL};
+use std::sync::OnceLock;
+
+use windows::core::{w, Result, BOOL, HRESULT, PCSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 
 use crate::gfx::{Align, Color, Gfx};
 use crate::theme;
@@ -17,6 +27,36 @@ const THUMB_H: f32 = 128.0;
 const TITLE_H: f32 = 26.0;
 const PAD: f32 = 8.0;
 const HEIGHT: f32 = PAD + TITLE_H + THUMB_H + PAD + 4.0;
+/// How long the pointer rests on a preview before its window is peeked at.
+const PEEK_MS: u32 = 400;
+pub const TIMER_PEEK: usize = 1;
+
+/// dwmapi's DwmpActivateLivePreview (ordinal 113): (on, the window to show,
+/// a window to keep on top, 3 = a window peek, reserved).
+type LivePreview = unsafe extern "system" fn(u32, HWND, HWND, u32, usize) -> HRESULT;
+
+fn live_preview() -> Option<LivePreview> {
+    static F: OnceLock<Option<LivePreview>> = OnceLock::new();
+    *F.get_or_init(|| unsafe {
+        let dwm = GetModuleHandleW(w!("dwmapi.dll")).ok()?;
+        let f = GetProcAddress(dwm, PCSTR(113 as *const u8))?;
+        // SAFETY: ordinal 113 of dwmapi is DwmpActivateLivePreview, with this signature.
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, LivePreview>(f))
+    })
+}
+
+/// Keeps every window of Cascade's (on this, the UI thread) visible during
+/// a peek: the taskbar, its glass, the notch and the previews themselves.
+fn exclude_own_from_peek() {
+    unsafe extern "system" fn each(h: HWND, _: LPARAM) -> BOOL {
+        let on = BOOL(1);
+        let _ = DwmSetWindowAttribute(h, DWMWA_EXCLUDED_FROM_PEEK, &on as *const _ as *const _, 4);
+        true.into()
+    }
+    unsafe {
+        let _ = EnumThreadWindows(GetCurrentThreadId(), Some(each), LPARAM(0));
+    }
+}
 
 struct Item {
     window: HWND,
@@ -38,6 +78,9 @@ pub struct Preview {
     tracking: bool,
     k: f32,
     size: (i32, i32),
+    /// Peek at a window while the pointer rests on its preview (`taskbar_peek`).
+    pub peek: bool,
+    peeking: bool,
 }
 
 impl Preview {
@@ -62,6 +105,39 @@ impl Preview {
             tracking: false,
             k: 1.0,
             size: (0, 0),
+            peek: true,
+            peeking: false,
+        }
+    }
+
+    /// The pointer has rested on a preview: peek at its window.
+    pub fn on_timer(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_PEEK);
+        }
+        let Some(target) = self.hovered.filter(|_| !self.hover_close).and_then(|i| self.items.get(i)) else {
+            return;
+        };
+        let Some(f) = live_preview() else { return };
+        exclude_own_from_peek();
+        unsafe {
+            let _ = f(1, target.window, self.hwnd, 3, 0);
+        }
+        self.peeking = true;
+    }
+
+    /// Ends a peek (or one about to start).
+    fn unpeek(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_PEEK);
+        }
+        if self.peeking {
+            self.peeking = false;
+            if let Some(f) = live_preview() {
+                unsafe {
+                    let _ = f(0, HWND::default(), HWND::default(), 3, 0);
+                }
+            }
         }
     }
 
@@ -149,6 +225,7 @@ impl Preview {
     }
 
     pub fn hide(&mut self) {
+        self.unpeek();
         self.clear_thumbs();
         self.app = None;
         self.hovered = None;
@@ -183,6 +260,16 @@ impl Preview {
         }
         let (hovered, close) = self.hit(x, y);
         if hovered != self.hovered || close != self.hover_close {
+            // A different preview (or its close button): the peek starts over.
+            let peeked = self.peeking;
+            self.unpeek();
+            if self.peek && hovered.is_some() && !close {
+                // Straight on to the next window while already peeking.
+                let wait = if peeked { 60 } else { PEEK_MS };
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_PEEK, wait, None);
+                }
+            }
             self.hovered = hovered;
             self.hover_close = close;
             unsafe {
@@ -192,6 +279,7 @@ impl Preview {
     }
 
     pub fn on_leave(&mut self) {
+        self.unpeek();
         self.tracking = false;
         self.hovered = None;
         unsafe {
@@ -200,6 +288,7 @@ impl Preview {
     }
 
     pub fn on_click(&mut self, x: i32, y: i32) -> Option<Action> {
+        self.unpeek();
         match self.hit(x, y) {
             (Some(i), true) => Some(Action::Close(self.items[i].window)),
             (Some(i), false) => Some(Action::Focus(self.items[i].window)),

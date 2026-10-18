@@ -548,6 +548,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("dock_icon_size", "Icon size", "Size of the app icons.", slider(16.0, 48.0, 1.0, Unit::Px)),
             row(
+                "taskbar_peek",
+                "Peek at windows",
+                "Rest the pointer on a window's preview to see where it is: the other windows turn to glass.",
+                Toggle,
+            ),
+            row(
                 "taskbar_tile",
                 "Icon padding",
                 "Space between an icon and the edge of its highlight.",

@@ -1205,6 +1205,7 @@ impl App {
             self.switcher.hide_now();
         }
         self.switcher.set_style(crate::switcher::Style::parse(&self.cfg.alt_tab_style));
+        self.preview.peek = self.cfg.taskbar_peek;
         if !self.cfg.launcher {
             self.launcher.hide();
         }
@@ -1584,7 +1585,7 @@ impl App {
             return self.handle_dock(i, hwnd, m, wp, lp);
         }
         if hwnd == self.preview.hwnd {
-            return self.handle_preview(m, lp);
+            return self.handle_preview(m, wp, lp);
         }
         self.handle_notch(m, wp, lp)
     }
@@ -3801,10 +3802,11 @@ impl App {
         }
     }
 
-    fn handle_preview(&mut self, m: u32, lp: LPARAM) -> Option<LRESULT> {
+    fn handle_preview(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         let dock = self.dock_ref(self.preview_dock).hwnd;
         unsafe {
             match m {
+                WM_TIMER if wp.0 == preview::TIMER_PEEK => self.preview.on_timer(),
                 WM_MOUSEMOVE => {
                     let _ = KillTimer(Some(dock), TIMER_PREVIEW_HIDE);
                     let _ = KillTimer(Some(dock), TIMER_DOCK_HIDE);

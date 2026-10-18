@@ -116,6 +116,9 @@ tray_icons = true
 dock_icon_size = 24
 # Grow icons under the cursor (0 = off).
 dock_magnify = 0
+# Rest the pointer on a window's preview to see only that window (the others
+# turn to glass), as Windows' taskbar does.
+taskbar_peek = true
 # Other screens: all = a taskbar on every screen, main = only the main one.
 taskbar_screens = all
 # Which windows each screen's taskbar shows: all, or screen (only the ones on
@@ -295,6 +298,7 @@ pub struct Config {
     pub hide_taskbar: bool,
     pub dock_icon_size: f32,
     pub dock_magnify: f32,
+    pub taskbar_peek: bool,
     pub taskbar_screens: String,
     pub taskbar_screen_apps: String,
     pub taskbar_screen_clock: bool,
@@ -402,6 +406,7 @@ impl Default for Config {
             hide_taskbar: true,
             dock_icon_size: 24.0,
             dock_magnify: 0.0,
+            taskbar_peek: true,
             taskbar_screens: "all".into(),
             taskbar_screen_apps: "all".into(),
             taskbar_screen_clock: true,
@@ -632,6 +637,7 @@ impl Config {
                 "hide_taskbar" => set_b(&mut c.hide_taskbar),
                 "dock_icon_size" => set_f(&mut c.dock_icon_size, 16.0, 48.0),
                 "dock_magnify" => set_f(&mut c.dock_magnify, 0.0, 1.0),
+                "taskbar_peek" => set_b(&mut c.taskbar_peek),
                 "taskbar_screens" if matches!(v, "all" | "main") => c.taskbar_screens = v.into(),
                 "taskbar_screen_apps" if matches!(v, "all" | "screen") => c.taskbar_screen_apps = v.into(),
                 "taskbar_screen_clock" => set_b(&mut c.taskbar_screen_clock),
@@ -778,6 +784,7 @@ impl Config {
             "hide_taskbar" => b(self.hide_taskbar),
             "dock_icon_size" => self.dock_icon_size.to_string(),
             "dock_magnify" => self.dock_magnify.to_string(),
+            "taskbar_peek" => b(self.taskbar_peek),
             "taskbar_screens" => self.taskbar_screens.clone(),
             "taskbar_screen_apps" => self.taskbar_screen_apps.clone(),
             "taskbar_screen_clock" => b(self.taskbar_screen_clock),
