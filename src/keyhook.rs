@@ -230,6 +230,14 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         notify(msg::SWITCH, (vk == VK_LEFT.0) as usize);
                         return LRESULT(1);
                     }
+                    // Up and down a row (4 and 5).
+                    if down && (vk == VK_UP.0 || vk == VK_DOWN.0) {
+                        notify(msg::SWITCH, if vk == VK_UP.0 { 4 } else { 5 });
+                        return LRESULT(1);
+                    }
+                    if up && matches!(vk, v if v == VK_LEFT.0 || v == VK_RIGHT.0 || v == VK_UP.0 || v == VK_DOWN.0) {
+                        return LRESULT(1);
+                    }
                     if is_alt && up {
                         TAB_ACTIVE.store(false, Ordering::Relaxed);
                         if !TAB_CANCEL.load(Ordering::Relaxed) {

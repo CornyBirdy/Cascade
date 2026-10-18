@@ -372,6 +372,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
             row("alt_tab", "Alt+Tab switcher", "Cascade's own, with live previews, instead of Windows'.", Toggle),
             row(
+                "alt_tab_style",
+                "Alt+Tab look",
+                "Cards with live previews, larger previews, big app icons, or a list of titles.",
+                Choice(&[("cards", "Cards"), ("large", "Large"), ("icons", "Icons"), ("list", "List")]),
+            ),
+            row(
                 "max_fps",
                 "Animation frame cap",
                 "Also limited to your monitor's refresh rate.",
@@ -810,6 +816,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             let t = theme::THEMES.iter().find(|t| t.key == theme).copied().unwrap_or(theme::THEMES[0]);
             t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
         }
+        (0, "alt_tab_style") => on("alt_tab"),
         // Notch.
         (2, "notch") => true,
         (2, _) if !on("notch") => false,

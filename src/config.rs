@@ -137,6 +137,9 @@ screen_inches =
 # ---- Alt+Tab ----
 # Cascade's own window switcher (live previews, same theme) instead of Windows'.
 alt_tab = true
+# How it looks: cards (live previews), large (bigger previews), icons (big app
+# icons, the window's title under them) or list (icons and titles in a column).
+alt_tab_style = cards
 
 # ---- Widgets ----
 # Widgets on the taskbar, left to right on each side. Any of: weather, music,
@@ -302,6 +305,7 @@ pub struct Config {
     pub show_clock: bool,
     pub tray_icons: bool,
     pub alt_tab: bool,
+    pub alt_tab_style: String,
     pub mouse_match: bool,
     pub mouse_align: String,
     pub screen_inches: String,
@@ -419,6 +423,7 @@ impl Default for Config {
             start_web_search: "google".into(),
             start_opacity: 0.55,
             alt_tab: true,
+            alt_tab_style: "cards".into(),
             mouse_match: false,
             mouse_align: "auto".into(),
             screen_inches: String::new(),
@@ -652,6 +657,7 @@ impl Config {
                 "status_click" if matches!(v, "notch" | "windows") => c.status_click = v.into(),
                 "show_clock" => set_b(&mut c.show_clock),
                 "alt_tab" => set_b(&mut c.alt_tab),
+                "alt_tab_style" if matches!(v, "cards" | "large" | "icons" | "list") => c.alt_tab_style = v.into(),
                 "mouse_match" => set_b(&mut c.mouse_match),
                 "mouse_align" if matches!(v, "auto" | "top" | "middle" | "bottom") => c.mouse_align = v.into(),
                 "screen_inches" => c.screen_inches = v.trim_matches('"').to_string(),
@@ -785,6 +791,7 @@ impl Config {
             "status_click" => self.status_click.clone(),
             "show_clock" => b(self.show_clock),
             "alt_tab" => b(self.alt_tab),
+            "alt_tab_style" => self.alt_tab_style.clone(),
             "mouse_match" => b(self.mouse_match),
             "mouse_align" => self.mouse_align.clone(),
             "screen_inches" => self.screen_inches.clone(),

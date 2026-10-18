@@ -1196,8 +1196,9 @@ impl App {
             self.quick.hide();
         }
         if !self.cfg.alt_tab {
-            self.switcher.hide();
+            self.switcher.hide_now();
         }
+        self.switcher.set_style(crate::switcher::Style::parse(&self.cfg.alt_tab_style));
         if !self.cfg.launcher {
             self.launcher.hide();
         }
@@ -3221,7 +3222,8 @@ impl App {
         }
     }
 
-    /// Alt+Tab: 0 next, 1 previous, 2 Alt released, 3 cancelled.
+    /// Alt+Tab: 0 next, 1 previous, 2 Alt released, 3 cancelled, 4 up a
+    /// row, 5 down a row.
     fn on_switch(&mut self, op: usize) {
         if !self.cfg.alt_tab {
             return;
@@ -3242,6 +3244,11 @@ impl App {
                 self.switcher.step(op == 1);
             }
             2 => self.finish_switch(),
+            4 | 5 => {
+                if self.switcher.active {
+                    self.switcher.step_row(op == 4);
+                }
+            }
             _ => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SWITCH);
@@ -3261,6 +3268,10 @@ impl App {
     }
 
     fn handle_switcher(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        // Fading out after a pick: it's done with input.
+        if self.switcher.closing() {
+            return None;
+        }
         match m {
             WM_MOUSEMOVE => {
                 let (x, y) = lparam_xy(lp);

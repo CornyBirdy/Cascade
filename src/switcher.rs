@@ -10,6 +10,13 @@
 //! Win+Tab opens it as Task View: it stays open (pick a window with a click,
 //! the arrow keys and Enter, or Esc to leave), and under the windows a strip
 //! of your virtual desktops to switch to, or make a new one.
+//!
+//! Alt+Tab comes in four looks (`alt_tab_style`): cards with live previews,
+//! large previews (KDE's thumbnail grid), big app icons with the picked
+//! window's title under them (GNOME's app switcher) and a compact list of
+//! icons and titles (KDE's). Either way it slides and fades in, and out
+//! again once you've picked. Arrow keys move the pick in every direction
+//! while Alt is held.
 
 use windows::core::{Result, BOOL};
 use windows::Win32::Foundation::*;
@@ -26,14 +33,52 @@ use crate::gfx::{Align, Color, Gfx, Layer};
 use crate::spring::Spring;
 use crate::theme;
 
-const CARD_W: f32 = 232.0;
-const CARD_H: f32 = 176.0;
-const TITLE_H: f32 = 38.0;
-const GAP: f32 = 12.0;
 const PAD: f32 = 20.0;
-const MAX_ROWS: usize = 3;
 /// How far a card rises while it appears, in layout units.
 const RISE: f32 = 18.0;
+/// How far the whole panel slides up as it opens (and down as it closes).
+const SLIDE: f32 = 14.0;
+/// The picked window's title, under the icons (Icons style).
+const CAPTION_H: f32 = 40.0;
+
+/// How Alt+Tab looks (`alt_tab_style`). Task View always uses the cards.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Style {
+    /// Cards with live previews (the default).
+    Cards,
+    /// Bigger previews, fewer to a row.
+    Large,
+    /// Big app icons in a row; the picked window's title under them.
+    Icons,
+    /// A column of icons and titles.
+    List,
+}
+
+impl Style {
+    pub fn parse(v: &str) -> Self {
+        match v {
+            "large" => Style::Large,
+            "icons" => Style::Icons,
+            "list" => Style::List,
+            _ => Style::Cards,
+        }
+    }
+}
+
+/// The size of one card (or tile, or row) in a style, in layout units.
+#[derive(Clone, Copy)]
+struct Geom {
+    w: f32,
+    h: f32,
+    /// The title strip at the top of a card (0: no title on the card).
+    title: f32,
+    gap: f32,
+    /// Live previews in the cards.
+    thumbs: bool,
+    /// The app icon's size.
+    icon: f32,
+    max_rows: usize,
+}
 /// Task View's strip of desktops, under the cards.
 const STRIP_H: f32 = 64.0;
 const DESK_W: f32 = 132.0;
@@ -107,6 +152,9 @@ pub struct Switcher {
     desks: Desktops,
     /// The desktop or button under the pointer in the strip.
     desk_hover: Option<Spot>,
+    style: Style,
+    /// Fading out after a pick (or Esc): still drawn until `open` reaches 0.
+    closing: bool,
 }
 
 unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
@@ -141,6 +189,30 @@ impl Switcher {
             view: false,
             desks: Desktops::default(),
             desk_hover: None,
+            style: Style::Cards,
+            closing: false,
+        }
+    }
+
+    pub fn set_style(&mut self, style: Style) {
+        if style != self.style {
+            self.hide_now();
+            self.style = style;
+        }
+    }
+
+    fn geom(&self) -> Geom {
+        let style = if self.view { Style::Cards } else { self.style };
+        match style {
+            Style::Cards => Geom { w: 232.0, h: 176.0, title: 38.0, gap: 12.0, thumbs: true, icon: 18.0, max_rows: 3 },
+            Style::Large => Geom { w: 340.0, h: 248.0, title: 40.0, gap: 14.0, thumbs: true, icon: 20.0, max_rows: 2 },
+            Style::Icons => Geom { w: 92.0, h: 92.0, title: 0.0, gap: 8.0, thumbs: false, icon: 48.0, max_rows: 3 },
+            Style::List => {
+                // As many rows as fit the screen, within reason.
+                let mon_h = (self.monitor.bottom - self.monitor.top) as f32 / self.k;
+                let rows = ((mon_h - 2.0 * PAD - 160.0) / 48.0).floor().clamp(4.0, 14.0) as usize;
+                Geom { w: 440.0, h: 44.0, title: 0.0, gap: 4.0, thumbs: false, icon: 24.0, max_rows: rows }
+            }
         }
     }
 
@@ -156,18 +228,22 @@ impl Switcher {
     }
 
     fn max_cols(&self) -> usize {
+        let g = self.geom();
+        if !self.view && self.style == Style::List {
+            return 1;
+        }
         let mon_w = (self.monitor.right - self.monitor.left) as f32 / self.k;
-        ((mon_w - 2.0 * PAD - 80.0 + GAP) / (CARD_W + GAP)).floor().max(1.0) as usize
+        ((mon_w - 2.0 * PAD - 80.0 + g.gap) / (g.w + g.gap)).floor().max(1.0) as usize
     }
 
     /// Win+Tab: opens as Task View on `monitor`, with the windows of this
     /// desktop and the strip of `desks`, and takes the keyboard.
     pub fn begin_view(&mut self, k: f32, monitor: RECT, desks: Desktops) {
-        if self.active || self.view {
-            self.hide();
+        if self.active || self.view || self.shown {
+            self.hide_now();
         }
-        self.list(k, monitor);
         self.view = true;
+        self.list(k, monitor);
         self.desks = desks;
         self.desk_hover = None;
         let fg = unsafe { GetForegroundWindow() };
@@ -192,8 +268,8 @@ impl Switcher {
 
     /// Alt+Tab was pressed: lists the windows and picks the one to switch to.
     pub fn begin(&mut self, k: f32, monitor: RECT) -> bool {
-        if self.view {
-            self.hide();
+        if self.view || self.shown {
+            self.hide_now();
         }
         self.list(k, monitor);
         if self.items.is_empty() {
@@ -220,10 +296,11 @@ impl Switcher {
             let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
         }
         // Top of the z-order first, which is the order they were last used in.
+        let most = self.max_cols() * self.geom().max_rows;
         self.items = all
             .into_iter()
             .filter(|&h| dock::is_app_window(h, own))
-            .take(self.max_cols() * MAX_ROWS)
+            .take(most)
             .map(|h| {
                 let mut title = [0u16; 256];
                 let n = unsafe { GetWindowTextW(h, &mut title) } as usize;
@@ -245,9 +322,10 @@ impl Switcher {
     /// Readies the cards' animations once the windows are listed.
     fn start(&mut self) {
         self.hovered = None;
+        self.closing = false;
         self.open.snap(0.0);
         let (cols, ..) = self.layout();
-        let (rx, ry) = Self::card(self.selected, cols);
+        let (rx, ry) = self.card(self.selected, cols);
         self.ring_x.snap(rx);
         self.ring_y.snap(ry);
         for (i, it) in self.items.iter_mut().enumerate() {
@@ -265,6 +343,33 @@ impl Switcher {
         self.dirty = true;
     }
 
+    /// Up or down a row (the arrow keys while Alt is held), wrapping round
+    /// to the other end of the column. With a single row, up and down step
+    /// back and forward instead.
+    pub fn step_row(&mut self, up: bool) {
+        let n = self.items.len();
+        if n == 0 {
+            return;
+        }
+        let (cols, rows, ..) = self.layout();
+        if rows <= 1 {
+            return self.step(up);
+        }
+        let s = self.selected;
+        self.selected = if up {
+            if s >= cols {
+                s - cols
+            } else {
+                (((n - 1) / cols) * cols + s).min(n - 1)
+            }
+        } else if s + cols < n {
+            s + cols
+        } else {
+            s % cols
+        };
+        self.dirty = true;
+    }
+
     /// Alt was released: hides the panel and returns the window to switch to.
     pub fn commit(&mut self) -> Option<HWND> {
         let target = self.items.get(self.selected).map(|i| i.window);
@@ -272,14 +377,34 @@ impl Switcher {
         target
     }
 
+    /// Lets go of the keyboard and fades the panel out (it's gone for good
+    /// once `open` reaches 0; see `render`).
     pub fn hide(&mut self) {
+        if !self.shown {
+            return self.hide_now();
+        }
+        self.release_keys();
+        self.active = false;
+        self.hovered = None;
+        self.desk_hover = None;
+        self.closing = true;
+        self.dirty = true;
+    }
+
+    fn release_keys(&mut self) {
         if self.view {
-            self.view = false;
             unsafe {
                 let ex = GetWindowLongW(self.overlay, GWL_EXSTYLE) as u32;
                 SetWindowLongW(self.overlay, GWL_EXSTYLE, (ex | WS_EX_NOACTIVATE.0) as i32);
             }
         }
+    }
+
+    /// Takes it off the screen at once.
+    pub fn hide_now(&mut self) {
+        self.release_keys();
+        self.view = false;
+        self.closing = false;
         self.clear_thumbs();
         self.items.clear();
         self.active = false;
@@ -308,11 +433,18 @@ impl Switcher {
     /// Cards in a row, rows, and the panel's size in layout units (with
     /// Task View's strip of desktops under the cards).
     fn layout(&self) -> (usize, usize, f32, f32) {
+        let g = self.geom();
         let n = self.items.len().max(1);
         let cols = n.min(self.max_cols());
-        let rows = n.div_ceil(cols).min(MAX_ROWS);
-        let mut w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
-        let mut h = PAD * 2.0 + rows as f32 * CARD_H + (rows - 1) as f32 * GAP;
+        let rows = n.div_ceil(cols).min(g.max_rows);
+        let mut w = PAD * 2.0 + cols as f32 * g.w + (cols - 1) as f32 * g.gap;
+        let mut h = PAD * 2.0 + rows as f32 * g.h + (rows - 1) as f32 * g.gap;
+        if !self.view && self.style == Style::Icons {
+            // The picked window's title goes under the icons, and long titles
+            // need more room than a short row of icons.
+            h += CAPTION_H;
+            w = w.max(360.0);
+        }
         if self.view {
             w = w.max(self.strip_w() + 2.0 * PAD);
             h += STRIP_H;
@@ -353,13 +485,20 @@ impl Switcher {
         inside(plus).then_some(Spot::Plus)
     }
 
-    fn card(i: usize, cols: usize) -> (f32, f32) {
-        (PAD + (i % cols) as f32 * (CARD_W + GAP), PAD + (i / cols) as f32 * (CARD_H + GAP))
+    /// Card `i`'s top-left corner (layout units), with the cards (or tiles)
+    /// of a row shorter than the panel centred in it.
+    fn card(&self, i: usize, cols: usize) -> (f32, f32) {
+        let g = self.geom();
+        let (_, _, w, _) = self.layout();
+        let row_w = cols as f32 * g.w + (cols - 1) as f32 * g.gap;
+        let x0 = (w - row_w) / 2.0;
+        (x0 + (i % cols) as f32 * (g.w + g.gap), PAD + (i / cols) as f32 * (g.h + g.gap))
     }
 
     /// The thumbnail's box inside a card.
-    fn thumb_box(cx: f32, cy: f32) -> (f32, f32, f32, f32) {
-        (cx + 10.0, cy + TITLE_H, CARD_W - 20.0, CARD_H - TITLE_H - 10.0)
+    fn thumb_box(&self, cx: f32, cy: f32) -> (f32, f32, f32, f32) {
+        let g = self.geom();
+        (cx + 10.0, cy + g.title, g.w - 20.0, g.h - g.title - 10.0)
     }
 
     fn screen_pos(&self, pw: i32, ph: i32) -> (i32, i32) {
@@ -371,16 +510,21 @@ impl Switcher {
         self.shown && (self.dirty || self.moving)
     }
 
+    /// Fading out: it no longer takes clicks or keys.
+    pub fn closing(&self) -> bool {
+        self.closing
+    }
+
     /// Advances the animations. Returns true while anything is moving.
     pub fn animate(&mut self, dt: f32) -> bool {
         if !self.shown {
             return false;
         }
         let (cols, ..) = self.layout();
-        let (rx, ry) = Self::card(self.selected, cols);
+        let (rx, ry) = self.card(self.selected, cols);
         self.ring_x.set(rx);
         self.ring_y.set(ry);
-        self.open.set(1.0);
+        self.open.set(if self.closing { 0.0 } else { 1.0 });
         let mut moving = self.ring_x.step(dt);
         moving |= self.ring_y.step(dt);
         moving |= self.open.step(dt);
@@ -400,9 +544,11 @@ impl Switcher {
         }
         moving |= appearing;
         // The thumbnails live in another window: move them along with the
-        // cards while those appear (and once more when they land).
-        self.thumbs_dirty = appearing || self.was_moving;
-        self.was_moving = appearing;
+        // cards while those appear and the panel fades (and once more when
+        // they land).
+        let fading = !self.open.settled();
+        self.thumbs_dirty = appearing || fading || self.was_moving;
+        self.was_moving = appearing || fading;
         self.moving = moving;
         moving
     }
@@ -413,7 +559,7 @@ impl Switcher {
         if it.thumb == 0 {
             return;
         }
-        let a = it.appear.value.clamp(0.0, 1.0);
+        let a = it.appear.value.clamp(0.0, 1.0) * self.open.value.clamp(0.0, 1.0);
         let oy = (1.0 - it.appear.value) * RISE;
         let (fx, fy, fw, fh) = it.fit;
         let k = self.k;
@@ -441,19 +587,20 @@ impl Switcher {
             return;
         }
         self.shown = true;
-        let (cols, _, w, h) = self.layout();
-        let k = self.k;
-        let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
-        let (x, y) = self.screen_pos(pw, ph);
+        let (cols, ..) = self.layout();
+        // The glass comes in with the panel, in `render`.
         unsafe {
             let _ = ShowWindow(self.overlay, SW_SHOWNOACTIVATE);
         }
-        self.backdrop.place(RECT { left: x, top: y, right: x + pw, bottom: y + ph }, self.overlay);
+        let thumbs = self.geom().thumbs;
         for i in 0..self.items.len() {
-            let (cx, cy) = Self::card(i, cols);
-            let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
-            let src = self.items[i].window;
             self.items[i].appear.snap(0.0);
+            if !thumbs {
+                continue;
+            }
+            let (cx, cy) = self.card(i, cols);
+            let (tx, ty, tw, th) = self.thumb_box(cx, cy);
+            let src = self.items[i].window;
             let thumb = unsafe { DwmRegisterThumbnail(self.backdrop.hwnd, src) }.unwrap_or(0);
             self.items[i].thumb = thumb;
             if thumb == 0 {
@@ -476,9 +623,10 @@ impl Switcher {
     fn hit(&self, x: i32, y: i32) -> Option<usize> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         let (cols, ..) = self.layout();
+        let g = self.geom();
         (0..self.items.len()).find(|&i| {
-            let (cx, cy) = Self::card(i, cols);
-            lx >= cx && lx < cx + CARD_W && ly >= cy && ly < cy + CARD_H
+            let (cx, cy) = self.card(i, cols);
+            lx >= cx && lx < cx + g.w && ly >= cy && ly < cy + g.h
         })
     }
 
@@ -561,11 +709,20 @@ impl Switcher {
         if !self.shown {
             return Ok(());
         }
+        if self.closing && self.open.value < 0.02 {
+            self.hide_now();
+            return Ok(());
+        }
         let k = self.k;
-        let (cols, _, w, h) = self.layout();
+        let g = self.geom();
+        let style = if self.view { Style::Cards } else { self.style };
+        let (cols, rows, w, h) = self.layout();
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
         let (x, y) = self.screen_pos(pw, ph);
-        let icon_px = (18.0 * k).round() as u32;
+        let open = self.open.value.clamp(0.0, 1.0);
+        // It rises into place as it fades in, and sinks as it fades out.
+        let y = y + ((1.0 - open) * SLIDE * k).round() as i32;
+        let icon_px = (g.icon * k).round() as u32;
         let icons: Vec<Option<ID2D1Bitmap>> =
             self.items.iter().map(|it| it.id.as_ref().and_then(|id| dock.icon(id, gfx, icon_px))).collect();
 
@@ -575,61 +732,96 @@ impl Switcher {
             }
             self.thumbs_dirty = false;
         }
+        // The backdrop (the glass, or an opaque panel without blur; it also
+        // hosts the previews) follows the panel once it's shown enough to look
+        // right. Before that the panel is painted solid.
+        let backdrop = open > theme::GLASS_FROM;
+        let glass = self.blur && backdrop;
         gfx.begin(&mut self.layer, pw, ph, k)?;
         {
             let p = gfx.painter();
             let f = &gfx.fonts;
             let r = self.radius.max(6.0);
-            let open = self.open.value.clamp(0.0, 1.0);
-            // Without blur the backdrop itself is opaque, so only a trace on top
-            // (it keeps the pixels clickable).
-            theme::panel(&p, 0.0, 0.0, w, h, self.radius, self.blur, self.opacity, 0.02, open);
+            // Over the opaque backdrop (no blur) only a trace on top: it keeps
+            // the pixels clickable.
+            let solid = if !self.blur && backdrop { 0.02 } else { 0.97 };
+            theme::panel(&p, 0.0, 0.0, w, h, self.radius, glass, self.opacity, solid, 1.0);
             for (i, it) in self.items.iter().enumerate() {
-                let (cx, cy0) = Self::card(i, cols);
+                let (cx, cy0) = self.card(i, cols);
                 let a = it.appear.value.clamp(0.0, 1.0);
                 let cy = cy0 + (1.0 - it.appear.value) * RISE;
                 let sel = it.sel.value.clamp(0.0, 1.0);
                 let hov = it.hov.value.clamp(0.0, 1.0) * (1.0 - sel);
-                let fill = 0.05 + 0.07 * sel + 0.03 * hov;
-                p.rrect(cx, cy, CARD_W, CARD_H, r, Color::white(fill * a));
-                p.stroke_rrect(
-                    cx + 0.5,
-                    cy + 0.5,
-                    CARD_W - 1.0,
-                    CARD_H - 1.0,
-                    r,
-                    Color::white(0.07 * a * (1.0 - sel)),
-                    1.0,
-                );
-                match &icons[i] {
-                    Some(bmp) => p.icon(bmp, cx + 22.0, cy + TITLE_H / 2.0, a),
-                    None => p.rrect(cx + 14.0, cy + TITLE_H / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15 * a)),
-                }
                 let title = if it.title.is_empty() { "Window" } else { &it.title };
-                p.text(
-                    title,
-                    &f.label,
-                    cx + 40.0,
-                    cy + 4.0,
-                    CARD_W - 52.0,
-                    TITLE_H - 8.0,
-                    Align::Left,
-                    Color::white(0.93 * a),
-                );
-                let (tx, ty, tw, th) = Self::thumb_box(cx, cy);
-                p.hole(tx, ty, tw, th);
-                if it.thumb == 0 {
-                    // No live preview (e.g. an admin window): its icon, big.
-                    p.rrect(tx, ty, tw, th, 6.0, Color::white(0.06 * a));
-                    if let Some(bmp) = &icons[i] {
-                        p.icon(bmp, tx + tw / 2.0, ty + th / 2.0, a);
+                match style {
+                    Style::Cards | Style::Large => {
+                        let fill = 0.05 + 0.07 * sel + 0.03 * hov;
+                        p.rrect(cx, cy, g.w, g.h, r, Color::white(fill * a));
+                        p.stroke_rrect(
+                            cx + 0.5,
+                            cy + 0.5,
+                            g.w - 1.0,
+                            g.h - 1.0,
+                            r,
+                            Color::white(0.07 * a * (1.0 - sel)),
+                            1.0,
+                        );
+                        match &icons[i] {
+                            Some(bmp) => p.icon(bmp, cx + 22.0, cy + g.title / 2.0, a),
+                            None => {
+                                p.rrect(cx + 14.0, cy + g.title / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15 * a))
+                            }
+                        }
+                        let font = if style == Style::Large { &f.body } else { &f.label };
+                        let c = Color::white(0.93 * a);
+                        p.text(title, font, cx + 40.0, cy + 4.0, g.w - 52.0, g.title - 8.0, Align::Left, c);
+                        let (tx, ty, tw, th) = self.thumb_box(cx, cy);
+                        p.hole(tx, ty, tw, th);
+                        if it.thumb == 0 {
+                            // No live preview (e.g. an admin window): its icon, big.
+                            p.rrect(tx, ty, tw, th, 6.0, Color::white(0.06 * a));
+                            if let Some(bmp) = &icons[i] {
+                                p.icon(bmp, tx + tw / 2.0, ty + th / 2.0, a);
+                            }
+                        }
                     }
+                    Style::Icons => {
+                        let fill = 0.10 * sel + 0.06 * hov;
+                        if fill > 0.0 {
+                            p.rrect(cx, cy, g.w, g.h, r + 4.0, Color::white(fill * a));
+                        }
+                        match &icons[i] {
+                            Some(bmp) => p.icon(bmp, cx + g.w / 2.0, cy + g.h / 2.0, a),
+                            None => p.rrect(cx + 22.0, cy + 22.0, 48.0, 48.0, 10.0, Color::white(0.15 * a)),
+                        }
+                    }
+                    Style::List => {
+                        let fill = 0.11 * sel + 0.05 * hov;
+                        if fill > 0.0 {
+                            p.rrect(cx, cy, g.w, g.h, r, Color::white(fill * a));
+                        }
+                        match &icons[i] {
+                            Some(bmp) => p.icon(bmp, cx + 26.0, cy + g.h / 2.0, a),
+                            None => p.rrect(cx + 14.0, cy + g.h / 2.0 - 12.0, 24.0, 24.0, 6.0, Color::white(0.15 * a)),
+                        }
+                        let c = Color::white((0.78 + 0.18 * sel) * a);
+                        p.text(title, &f.body, cx + 50.0, cy, g.w - 62.0, g.h, Align::Left, c);
+                    }
+                }
+            }
+            if style == Style::Icons {
+                // The picked window's title under the icons.
+                if let Some(it) = self.items.get(self.selected) {
+                    let title = if it.title.is_empty() { "Window" } else { &it.title };
+                    let top = PAD + rows as f32 * (g.h + g.gap) - g.gap + 6.0;
+                    let c = Color::white(0.93);
+                    p.text(title, &f.body, PAD, top, w - 2.0 * PAD, CAPTION_H - 6.0, Align::Center, c);
                 }
             }
             if self.view {
                 if self.items.is_empty() {
-                    let (cw, ch) = (w - 2.0 * PAD, CARD_H);
-                    let c = Color::white(0.55 * open);
+                    let (cw, ch) = (w - 2.0 * PAD, g.h);
+                    let c = Color::white(0.55);
                     p.text("No windows on this desktop", &f.body, PAD, PAD, cw, ch, Align::Center, c);
                 }
                 // The desktops: the one you're on lit, and a button for a new one.
@@ -644,28 +836,49 @@ impl Switcher {
                     } else {
                         0.05
                     };
-                    p.rrect(bx, by, bw, DESK_H, r, Color::white(fill * open));
+                    p.rrect(bx, by, bw, DESK_H, r, Color::white(fill));
                     if current {
-                        p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent().alpha(open), 2.0);
+                        p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent(), 2.0);
                     }
                     let name = &self.desks.names[i];
-                    p.text(name, &f.label, bx + 8.0, by, bw - 16.0, DESK_H, Align::Center, Color::white(0.92 * open));
+                    p.text(name, &f.label, bx + 8.0, by, bw - 16.0, DESK_H, Align::Center, Color::white(0.92));
                 }
                 let (bx, by, bw) = plus;
                 let hot = self.desk_hover == Some(Spot::Plus);
-                p.rrect(bx, by, bw, DESK_H, r, Color::white(if hot { 0.12 } else { 0.06 } * open));
-                let (cx, cy, c) = (bx + bw / 2.0, by + DESK_H / 2.0, Color::white(0.85 * open));
+                p.rrect(bx, by, bw, DESK_H, r, Color::white(if hot { 0.12 } else { 0.06 }));
+                let (cx, cy, c) = (bx + bw / 2.0, by + DESK_H / 2.0, Color::white(0.85));
                 p.line(cx - 6.0, cy, cx + 6.0, cy, c, 1.6);
                 p.line(cx, cy - 6.0, cx, cy + 6.0, c, 1.6);
             }
-            // The selection ring glides from card to card.
-            if let Some(it) = self.items.get(self.selected) {
+            // The selection ring glides from card to card (the list and the
+            // icons show the pick by its lighter fill instead).
+            if matches!(style, Style::Cards | Style::Large) {
+                if let Some(it) = self.items.get(self.selected) {
+                    let a = it.appear.value.clamp(0.0, 1.0);
+                    let oy = (1.0 - it.appear.value) * RISE;
+                    let (x, y) = (self.ring_x.value, self.ring_y.value + oy);
+                    p.stroke_rrect(x + 1.0, y + 1.0, g.w - 2.0, g.h - 2.0, r, theme::accent().alpha(a), 2.0);
+                }
+            } else if let Some(it) = self.items.get(self.selected) {
+                // A small accent mark on the picked one, so it reads at a glance.
                 let a = it.appear.value.clamp(0.0, 1.0);
                 let oy = (1.0 - it.appear.value) * RISE;
                 let (x, y) = (self.ring_x.value, self.ring_y.value + oy);
-                p.stroke_rrect(x + 1.0, y + 1.0, CARD_W - 2.0, CARD_H - 2.0, r, theme::accent().alpha(a), 2.0);
+                if style == Style::List {
+                    p.rrect(x + 3.0, y + g.h * 0.25, 3.0, g.h * 0.5, 1.5, theme::accent().alpha(a));
+                } else {
+                    p.rrect(x + g.w * 0.35, y + g.h - 5.0, g.w * 0.3, 3.0, 1.5, theme::accent().alpha(a));
+                }
             }
         }
-        gfx.present(&self.layer, self.overlay, POINT { x, y }, pw, ph, 255)
+        let alpha = (open * 255.0).round() as u8;
+        let shown = gfx.present(&self.layer, self.overlay, POINT { x, y }, pw, ph, alpha);
+        let screen = RECT { left: x, top: y, right: x + pw, bottom: y + ph };
+        if !backdrop {
+            self.backdrop.hold(screen);
+        } else if self.backdrop.track(screen, None, self.overlay) {
+            self.dirty = true;
+        }
+        shown
     }
 }
