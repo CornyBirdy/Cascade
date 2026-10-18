@@ -369,6 +369,8 @@ struct App {
     /// System stats, sampled only while a stats widget is on screen.
     /// The latest stats readings, from the reader thread (see `sysmon`).
     sysmon: Readings,
+    /// Which NVIDIA card the shown readings start at (see `gpu_cards`).
+    gpu_first: usize,
     stats_tx: Sender<StatsCmd>,
     /// How the reader was last started (its pace in ms, and whether it reads
     /// the GPU and disk counters), or None while it's stopped.
@@ -1012,6 +1014,7 @@ impl App {
             taskbar_hook: None,
             edge_key: String::new(),
             sysmon: Readings::default(),
+            gpu_first: 0,
             stats_tx: sysmon::spawn(),
             stats_on: None,
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
@@ -3479,6 +3482,13 @@ impl App {
         }
         let before = self.sysmon.signature();
         self.sysmon = readings;
+        // Only the card picked in Settings (`gpu_cards`), on the taskbar and in the panel.
+        self.gpu_first = 0;
+        if let Some(n) = self.cfg.gpu_cards.parse::<usize>().ok().filter(|&n| n >= 1) {
+            if self.sysmon.keep_gpu(n - 1) {
+                self.gpu_first = n - 1;
+            }
+        }
         if self.sysmon.signature() != before {
             self.dock.dirty = true;
         }
@@ -3910,6 +3920,7 @@ impl App {
             let data = dock::WidgetData {
                 stats: &self.sysmon.stats,
                 gpus: &self.sysmon.gpus,
+                gpu_first: self.gpu_first,
                 desks: (self.desks.names.len(), self.desks.current),
                 media: self.media.as_ref(),
                 art,

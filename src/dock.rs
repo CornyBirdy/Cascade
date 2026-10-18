@@ -53,8 +53,18 @@ const STATUS_ICON: f32 = 24.0;
 /// Space between floating islands.
 const ISLAND_GAP: f32 = 8.0;
 const CHIP_STAT_W: f32 = 48.0;
-/// Each NVIDIA card's column on the GPU widget (its load and temperature).
+/// Each NVIDIA card's column on the GPU widget (its load and temperature),
+/// and with the card's name over it (`gpu_label = name`).
 const CHIP_GPU_W: f32 = 66.0;
+const CHIP_GPU_NAMED_W: f32 = 92.0;
+
+/// What the GPU widget's big figure is (`gpu_value`).
+#[derive(Clone, Copy, PartialEq)]
+pub enum GpuValue {
+    Load,
+    Memory,
+    Power,
+}
 const CHIP_NET_W: f32 = 84.0;
 /// The music widget's album art and the space around it, left of the text.
 const MUSIC_LEAD: f32 = 40.0;
@@ -186,6 +196,9 @@ pub struct WidgetData<'a> {
     pub stats: &'a Stats,
     /// Each NVIDIA card's own readings (the GPU widget shows one column each).
     pub gpus: &'a [Gpu],
+    /// The first shown card's place among all of them (0 unless `gpu_cards`
+    /// picks a later one), so "GPU 2" stays GPU 2 shown alone.
+    pub gpu_first: usize,
     /// How many virtual desktops there are, and which one you're on.
     pub desks: (usize, usize),
     pub media: Option<&'a MediaInfo>,
@@ -309,6 +322,11 @@ pub struct Dock {
     show_weather: bool,
     show_tray: bool,
     left_cfg: Vec<Chip>,
+    /// The GPU widget: the temperature over each card's figure, what that
+    /// figure is, and the card's name rather than its number.
+    gpu_temp: bool,
+    gpu_value: GpuValue,
+    gpu_names: bool,
     right_cfg: Vec<Chip>,
 
     k: f32,
@@ -510,7 +528,15 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
 /// How wide a widget is, or None if it has nothing to show right now. The
 /// music and weather widgets fit what they show (`music` and `weather`), and
 /// the GPU widget has a column for each of the `gpus` NVIDIA cards.
-fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize, desks: usize) -> Option<f32> {
+/// `gpu_col` is one card's column.
+fn chip_width(
+    c: Chip,
+    music: Option<f32>,
+    weather: Option<f32>,
+    gpus: usize,
+    gpu_col: f32,
+    desks: usize,
+) -> Option<f32> {
     match c {
         Chip::Weather => weather,
         Chip::Music => music,
@@ -518,7 +544,7 @@ fn chip_width(c: Chip, music: Option<f32>, weather: Option<f32>, gpus: usize, de
         Chip::Widgets => Some(WIDGETS_BTN_W),
         // Only with more than one desktop.
         Chip::Desktops => (desks > 1).then(|| desk_dots_w(desks) + 16.0),
-        Chip::Gpu if gpus > 0 => Some(CHIP_GPU_W * gpus as f32),
+        Chip::Gpu if gpus > 0 => Some(gpu_col * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
     }
 }
@@ -565,6 +591,9 @@ impl Dock {
             show_weather: true,
             show_tray: true,
             left_cfg: Vec::new(),
+            gpu_temp: true,
+            gpu_value: GpuValue::Load,
+            gpu_names: false,
             right_cfg: Vec::new(),
             k: 1.0,
             monitor: RECT::default(),
@@ -767,6 +796,15 @@ impl Dock {
     /// Applies config and screen geometry, and reserves screen space when the
     /// taskbar is always shown. Visibility is separate (`set_visible`) so a
     /// fullscreen game never changes the work area of other windows.
+    /// One NVIDIA card's column on the GPU widget.
+    fn gpu_col(&self) -> f32 {
+        if self.gpu_names {
+            CHIP_GPU_NAMED_W
+        } else {
+            CHIP_GPU_W
+        }
+    }
+
     pub fn configure(&mut self, cfg: &Config, monitor: RECT, k: f32) {
         self.enabled = cfg.dock;
         self.autohide = cfg.dock_autohide;
@@ -791,6 +829,13 @@ impl Dock {
         self.show_weather = cfg.weather;
         self.show_tray = cfg.tray_icons;
         self.left_cfg = parse_chips(&cfg.taskbar_left);
+        self.gpu_temp = cfg.gpu_temp;
+        self.gpu_value = match cfg.gpu_value.as_str() {
+            "memory" => GpuValue::Memory,
+            "power" => GpuValue::Power,
+            _ => GpuValue::Load,
+        };
+        self.gpu_names = cfg.gpu_label == "name";
         self.right_cfg = parse_chips(&cfg.taskbar_right);
         self.own_screen = cfg.taskbar_screens == "all" && cfg.taskbar_screen_apps == "screen";
         if self.secondary {
@@ -1066,7 +1111,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
+            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -1112,7 +1157,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, music, weather, gpus, desks) {
+            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1690,22 +1735,35 @@ impl Dock {
                     }
                     Chip::Cpu => two("CPU", &format!("{:.0}%", st.cpu), grey, white, &f.label),
                     Chip::Ram => two("RAM", &format!("{:.0}%", st.ram), grey, white, &f.label),
-                    // One column per NVIDIA card: its load, under its number and temperature.
+                    // One column per NVIDIA card: its figure (load, memory or
+                    // power), under its number (or name) and temperature.
                     Chip::Gpu if !wd.gpus.is_empty() => {
                         let n = wd.gpus.len();
+                        let col = self.gpu_col();
                         for (i, g) in wd.gpus.iter().enumerate() {
-                            let cx = s.x + i as f32 * CHIP_GPU_W;
-                            let name = if n > 1 { format!("GPU {}", i + 1) } else { "GPU".to_string() };
-                            let top = match g.temp {
+                            let cx = s.x + i as f32 * col;
+                            let name = if self.gpu_names {
+                                g.name.clone()
+                            } else if n > 1 {
+                                format!("GPU {}", wd.gpu_first + i + 1)
+                            } else {
+                                "GPU".to_string()
+                            };
+                            let top = match g.temp.filter(|_| self.gpu_temp) {
                                 Some(t) => format!("{name} \u{b7} {t:.0}\u{b0}"),
                                 None => name,
                             };
-                            let (load, c) = match g.load {
-                                Some(l) => (format!("{l:.0}%"), white),
+                            let figure = match self.gpu_value {
+                                GpuValue::Load => g.load.map(|l| format!("{l:.0}%")),
+                                GpuValue::Memory => g.vram_used.map(|u| format!("{u:.1} GB")),
+                                GpuValue::Power => g.power.map(|w| format!("{w:.0} W")),
+                            };
+                            let (figure, c) = match figure {
+                                Some(v) => (v, white),
                                 None => ("\u{2014}".to_string(), grey),
                             };
-                            p.text(&top, &f.small, cx, mid_y - 16.0, CHIP_GPU_W, 16.0, Align::Center, grey);
-                            p.text(&load, &f.label, cx, mid_y, CHIP_GPU_W, 16.0, Align::Center, c);
+                            p.text(&top, &f.small, cx, mid_y - 16.0, col, 16.0, Align::Center, grey);
+                            p.text(&figure, &f.label, cx, mid_y, col, 16.0, Align::Center, c);
                         }
                     }
                     Chip::Gpu => match st.gpu {

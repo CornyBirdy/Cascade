@@ -154,6 +154,14 @@ widgets_panel = media,system,weather,calendar
 widgets_notifications = true
 # 1 or 2 columns of cards.
 widgets_columns = 1
+# NVIDIA cards: which to show (all, or 1, 2... for one of them), on the taskbar
+# and in the panel.
+gpu_cards = all
+# The GPU widget on the taskbar: the temperature over each card's figure, what
+# the figure is (load, memory or power) and its label (number or name).
+gpu_temp = true
+gpu_value = load
+gpu_label = number
 # Seconds between system stats readings (only taken while one is on screen).
 stats_seconds = 2
 
@@ -313,6 +321,10 @@ pub struct Config {
     pub taskbar_right: String,
     pub widgets_panel: String,
     pub widgets_columns: u32,
+    pub gpu_cards: String,
+    pub gpu_temp: bool,
+    pub gpu_value: String,
+    pub gpu_label: String,
     pub widgets_notifications: bool,
     pub stats_seconds: u32,
     pub launcher: bool,
@@ -431,6 +443,10 @@ impl Default for Config {
             taskbar_right: "music,cpu,ram,desktops,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
             widgets_columns: 1,
+            gpu_cards: "all".into(),
+            gpu_temp: true,
+            gpu_value: "load".into(),
+            gpu_label: "number".into(),
             widgets_notifications: true,
             stats_seconds: 2,
             launcher: true,
@@ -665,6 +681,10 @@ impl Config {
                 "taskbar_right" => c.taskbar_right = v.trim_matches('"').to_string(),
                 "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
                 "widgets_columns" => set_u(&mut c.widgets_columns, 1.0, 2.0),
+                "gpu_cards" if v == "all" || matches!(v.parse::<u32>(), Ok(1..=8)) => c.gpu_cards = v.into(),
+                "gpu_temp" => set_b(&mut c.gpu_temp),
+                "gpu_value" if matches!(v, "load" | "memory" | "power") => c.gpu_value = v.into(),
+                "gpu_label" if matches!(v, "number" | "name") => c.gpu_label = v.into(),
                 "widgets_notifications" => set_b(&mut c.widgets_notifications),
                 "stats_seconds" => set_u(&mut c.stats_seconds, 1.0, 10.0),
                 "launcher" => set_b(&mut c.launcher),
@@ -800,6 +820,10 @@ impl Config {
             k if k.starts_with("place_") => self.place_of(&k["place_".len()..]).to_string(),
             "widgets_panel" => self.widgets_panel.clone(),
             "widgets_columns" => self.widgets_columns.to_string(),
+            "gpu_cards" => self.gpu_cards.clone(),
+            "gpu_temp" => b(self.gpu_temp),
+            "gpu_value" => self.gpu_value.clone(),
+            "gpu_label" => self.gpu_label.clone(),
             "widgets_notifications" => b(self.widgets_notifications),
             "stats_seconds" => self.stats_seconds.to_string(),
             "launcher" => b(self.launcher),

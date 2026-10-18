@@ -530,9 +530,8 @@ pub fn set_refraction(on: bool) {
 /// How `t` bends light, if it does and Refraction is on.
 fn lens_of(t: &Theme) -> Option<Lens> {
     let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
-    let lens = t
-        .refract
-        .filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Clear | Glass::Blur))?;
+    let lens =
+        t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Clear | Glass::Blur))?;
     // The Edge slider sets how strongly it bends.
     (k > 0.0).then_some(Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
 }

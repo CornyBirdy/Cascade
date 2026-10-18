@@ -718,6 +718,26 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row("widgets_columns", "Panel columns", "Cards side by side.", Choice(&[("1", "One"), ("2", "Two")])),
+            heading("h_gpu", "Graphics cards (NVIDIA)"),
+            row(
+                "gpu_cards",
+                "Cards",
+                "Every card, or just one of them, on the taskbar and in the panel.",
+                Choice(&[("all", "All"), ("1", "GPU 1"), ("2", "GPU 2")]),
+            ),
+            row("gpu_temp", "Temperature", "Each card's temperature on the taskbar widget.", Toggle),
+            row(
+                "gpu_value",
+                "Taskbar figure",
+                "What the GPU widget shows for each card.",
+                Choice(&[("load", "Load"), ("memory", "Memory"), ("power", "Power")]),
+            ),
+            row(
+                "gpu_label",
+                "Label",
+                "Each card by number (GPU 1) or by name (RTX 5070 Ti).",
+                Choice(&[("number", "Number"), ("name", "Name")]),
+            ),
             row(
                 "stats_seconds",
                 "Stats refresh",
@@ -847,6 +867,14 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             Board::Taskbar.read(get)[..2].iter().flatten().any(|n| matches!(*n, "cpu" | "ram" | "gpu" | "net"))
         }
         (6, "widgets_columns") => Board::Panel.read(get)[0].len() > 1,
+        // The GPU widget on the taskbar, or the panel's system card.
+        (6, "gpu_cards") => {
+            Board::Taskbar.read(get)[..2].iter().flatten().any(|n| *n == "gpu")
+                || Board::Panel.read(get)[0].contains(&"system")
+        }
+        (6, "gpu_temp" | "gpu_value" | "gpu_label") => {
+            Board::Taskbar.read(get)[..2].iter().flatten().any(|n| *n == "gpu")
+        }
         // Screens.
         (7, "mouse_align" | "screen_inches") => on("mouse_match"),
         // Weather.

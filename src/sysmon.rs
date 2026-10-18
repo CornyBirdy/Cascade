@@ -170,6 +170,17 @@ pub struct Readings {
 }
 
 impl Readings {
+    /// Keeps only NVIDIA card `index` (counting from 0). False, and nothing
+    /// changed, if there is no such card.
+    pub fn keep_gpu(&mut self, index: usize) -> bool {
+        if index >= self.gpus.len() || self.gpus.len() < 2 {
+            return false;
+        }
+        self.gpus = vec![self.gpus[index].clone()];
+        self.hist.gpus = self.hist.gpus.get(index).cloned().into_iter().collect();
+        true
+    }
+
     /// What the taskbar chips show (see `Stats::signature`), with each card's
     /// load and temperature, so they are only redrawn when it changes.
     pub fn signature(&self) -> String {
