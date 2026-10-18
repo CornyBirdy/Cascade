@@ -3958,6 +3958,7 @@ impl App {
             let data = dock::WidgetData {
                 stats: &self.sysmon.stats,
                 gpus: &[],
+                gpu_first: 0,
                 desks: (0, 0),
                 media: None,
                 art: None,
