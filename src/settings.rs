@@ -2065,7 +2065,7 @@ mod tests {
             vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "widgets"]]
         );
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
-        assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather"]]);
+        assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather", "phone"]]);
     }
 
     fn keys(section: usize, set: &[(&str, &str)]) -> Vec<&'static str> {
