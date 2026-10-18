@@ -588,8 +588,16 @@ impl Widgets {
         }
         let tx = x + 14.0 + art + 14.0;
         let tw = CARD_W - (tx - x) - 14.0;
-        p.text(&m.title, &f.title, tx, y + 12.0, tw, 24.0, Align::Left, Color::white(0.95));
-        p.text(&m.artist, &f.body, tx, y + 36.0, tw, 20.0, Align::Left, Color::white(0.6));
+        let mut text_w = tw;
+        if m.phone {
+            // Playing on your phone (Phone Link): a phone in the corner.
+            let (px, py) = (x + CARD_W - 22.0, y + 22.0);
+            p.stroke_rrect(px - 5.0, py - 8.0, 10.0, 16.0, 2.5, Color::white(0.6), 1.2);
+            p.line(px - 1.5, py + 5.0, px + 1.5, py + 5.0, Color::white(0.6), 1.2);
+            text_w -= 22.0;
+        }
+        p.text(&m.title, &f.title, tx, y + 12.0, text_w, 24.0, Align::Left, Color::white(0.95));
+        p.text(&m.artist, &f.body, tx, y + 36.0, text_w, 20.0, Align::Left, Color::white(0.6));
         // Progress.
         let (pos, dur) = (m.position_now(), m.duration);
         let by = y + 66.0;
