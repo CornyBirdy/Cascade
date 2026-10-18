@@ -690,6 +690,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row(
+                "desktop_osd",
+                "Desktop switch pop-up",
+                "Your desktops in the middle of the screen for a moment as you switch between them.",
+                Toggle,
+            ),
+            row(
                 "shortcuts_note",
                 "Turned off",
                 "The key opens Windows' own menu, as usual. Other Win+key shortcuts are never touched.",
@@ -724,6 +730,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row("widgets_columns", "Panel columns", "Cards side by side.", Choice(&[("1", "One"), ("2", "Two")])),
+            row(
+                "desktops_style",
+                "Desktops widget",
+                "A dot per desktop, or a numbered box for each.",
+                Choice(&[("dots", "Dots"), ("numbers", "Numbers")]),
+            ),
             heading("h_gpu", "Graphics cards (NVIDIA)"),
             row(
                 "gpu_cards",
@@ -873,6 +885,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             Board::Taskbar.read(get)[..2].iter().flatten().any(|n| matches!(*n, "cpu" | "ram" | "gpu" | "net"))
         }
         (6, "widgets_columns") => Board::Panel.read(get)[0].len() > 1,
+        (6, "desktops_style") => Board::Taskbar.read(get)[..2].iter().flatten().any(|n| *n == "desktops"),
         // The GPU widget on the taskbar, or the panel's system card.
         (6, "gpu_cards") => {
             Board::Taskbar.read(get)[..2].iter().flatten().any(|n| *n == "gpu")

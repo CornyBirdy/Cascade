@@ -84,6 +84,16 @@ const DESK_DOT: f32 = 6.0;
 const DESK_CURRENT_W: f32 = 16.0;
 const DESK_DOT_GAP: f32 = 4.0;
 
+/// The desktops widget's numbered boxes (`desktops_style = numbers`).
+const DESK_NUM_W: f32 = 18.0;
+const DESK_NUM_GAP: f32 = 3.0;
+
+/// How wide the desktops widget's numbered boxes are for `n` desktops.
+fn desk_nums_w(n: usize) -> f32 {
+    let n = n.max(1) as f32;
+    n * DESK_NUM_W + (n - 1.0) * DESK_NUM_GAP
+}
+
 /// How wide the desktops widget's dots are for `n` desktops.
 fn desk_dots_w(n: usize) -> f32 {
     let n = n.max(1) as f32;
@@ -327,6 +337,8 @@ pub struct Dock {
     gpu_temp: bool,
     gpu_value: GpuValue,
     gpu_names: bool,
+    /// The desktops widget as numbered boxes rather than dots.
+    desk_numbers: bool,
     right_cfg: Vec<Chip>,
 
     k: f32,
@@ -542,6 +554,7 @@ fn chip_width(
     gpus: usize,
     gpu_col: f32,
     desks: usize,
+    desk_numbers: bool,
 ) -> Option<f32> {
     match c {
         Chip::Weather => weather,
@@ -549,6 +562,7 @@ fn chip_width(
         Chip::Net => Some(CHIP_NET_W),
         Chip::Widgets => Some(WIDGETS_BTN_W),
         // Only with more than one desktop.
+        Chip::Desktops if desk_numbers => (desks > 1).then(|| desk_nums_w(desks) + 16.0),
         Chip::Desktops => (desks > 1).then(|| desk_dots_w(desks) + 16.0),
         Chip::Gpu if gpus > 0 => Some(gpu_col * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
@@ -600,6 +614,7 @@ impl Dock {
             gpu_temp: true,
             gpu_value: GpuValue::Load,
             gpu_names: false,
+            desk_numbers: false,
             right_cfg: Vec::new(),
             k: 1.0,
             monitor: RECT::default(),
@@ -842,6 +857,7 @@ impl Dock {
             _ => GpuValue::Load,
         };
         self.gpu_names = cfg.gpu_label == "name";
+        self.desk_numbers = cfg.desktops_style == "numbers";
         self.right_cfg = parse_chips(&cfg.taskbar_right);
         self.own_screen = cfg.taskbar_screens == "all" && cfg.taskbar_screen_apps == "screen";
         if self.secondary {
@@ -1117,7 +1133,7 @@ impl Dock {
         let mut left = Vec::new();
         let mut lx = x0 + pad;
         for &c in &self.left_cfg {
-            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks) {
+            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks, self.desk_numbers) {
                 left.push((c, Span { x: lx, w }));
                 lx += w + ITEM_GAP;
             }
@@ -1163,7 +1179,7 @@ impl Dock {
         // Right side widgets, ending at the tray.
         let mut right = Vec::new();
         for &c in self.right_cfg.iter().rev() {
-            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks) {
+            if let Some(w) = chip_width(c, music, weather, gpus, self.gpu_col(), desks, self.desk_numbers) {
                 rx -= w;
                 right.push((c, Span { x: rx, w }));
                 rx -= ITEM_GAP;
@@ -1730,6 +1746,31 @@ impl Dock {
                             white,
                         );
                         p.text(wx.describe(), &f.small, tx, mid_y, tw, 15.0, Align::Left, Color::white(0.6));
+                    }
+                    Chip::Desktops if self.desk_numbers => {
+                        // A numbered box per desktop, the one you're on filled.
+                        let (n, current) = wd.desks;
+                        let mut x = s.centre() - desk_nums_w(n) / 2.0;
+                        for i in 0..n {
+                            let on = i == current;
+                            let y = mid_y - DESK_NUM_W / 2.0;
+                            if on {
+                                p.rrect(x, y, DESK_NUM_W, DESK_NUM_W, 5.0, theme::accent());
+                            } else {
+                                p.stroke_rrect(
+                                    x + 0.5,
+                                    y + 0.5,
+                                    DESK_NUM_W - 1.0,
+                                    DESK_NUM_W - 1.0,
+                                    5.0,
+                                    Color::white(0.35),
+                                    1.0,
+                                );
+                            }
+                            let c = if on { Color::white(1.0) } else { Color::white(0.7) };
+                            p.text(&(i + 1).to_string(), &f.small, x, y, DESK_NUM_W, DESK_NUM_W, Align::Center, c);
+                            x += DESK_NUM_W + DESK_NUM_GAP;
+                        }
                     }
                     Chip::Desktops => {
                         // A dot per desktop; the one you're on a longer, lit one.

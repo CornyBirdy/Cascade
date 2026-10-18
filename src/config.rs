@@ -157,6 +157,8 @@ widgets_panel = media,system,weather,calendar
 widgets_notifications = true
 # 1 or 2 columns of cards.
 widgets_columns = 1
+# The taskbar's desktops widget: dots, or numbers (one box per desktop).
+desktops_style = dots
 # NVIDIA cards: which to show (all, or 1, 2... for one of them), on the taskbar
 # and in the panel.
 gpu_cards = all
@@ -187,6 +189,9 @@ shortcut_win_a = false
 shortcut_win_v = true
 # Win+Tab: Task View, the windows of this desktop and your virtual desktops.
 shortcut_win_tab = true
+# Show your desktops in the middle of the screen for a moment as you switch
+# between them (Ctrl+Win+Left/Right), the one you're on lit.
+desktop_osd = true
 # Where the Start menu opens: auto (follows the taskbar), center or left.
 start_position = auto
 start_height = 620
@@ -338,6 +343,8 @@ pub struct Config {
     pub shortcut_win_a: bool,
     pub shortcut_win_v: bool,
     pub shortcut_win_tab: bool,
+    pub desktop_osd: bool,
+    pub desktops_style: String,
     pub admin_helper: bool,
     pub start_position: String,
     pub start_height: f32,
@@ -461,6 +468,8 @@ impl Default for Config {
             shortcut_win_a: false,
             shortcut_win_v: true,
             shortcut_win_tab: true,
+            desktop_osd: true,
+            desktops_style: "dots".into(),
             focus_minutes: 25,
             break_minutes: 5,
             calendar_url: String::new(),
@@ -700,6 +709,8 @@ impl Config {
                 "shortcut_win_a" => set_b(&mut c.shortcut_win_a),
                 "shortcut_win_v" => set_b(&mut c.shortcut_win_v),
                 "shortcut_win_tab" => set_b(&mut c.shortcut_win_tab),
+                "desktop_osd" => set_b(&mut c.desktop_osd),
+                "desktops_style" if matches!(v, "dots" | "numbers") => c.desktops_style = v.into(),
                 "focus_minutes" => set_u(&mut c.focus_minutes, 1.0, 240.0),
                 "break_minutes" => set_u(&mut c.break_minutes, 1.0, 120.0),
                 "calendar_url" => c.calendar_url = v.trim_matches('"').to_string(),
@@ -840,6 +851,8 @@ impl Config {
             "shortcut_win_a" => b(self.shortcut_win_a),
             "shortcut_win_v" => b(self.shortcut_win_v),
             "shortcut_win_tab" => b(self.shortcut_win_tab),
+            "desktop_osd" => b(self.desktop_osd),
+            "desktops_style" => self.desktops_style.clone(),
             "focus_minutes" => self.focus_minutes.to_string(),
             "break_minutes" => self.break_minutes.to_string(),
             "calendar_url" => self.calendar_url.clone(),

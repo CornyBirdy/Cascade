@@ -34,6 +34,7 @@ use crate::brightness;
 use crate::calendar;
 use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
+use crate::deskosd::{self, DeskOsd};
 use crate::desktops::{self, Desktops};
 use crate::devices::{self, Device};
 use crate::dock::{self, Dock, Hot as DockHot};
@@ -373,6 +374,8 @@ struct App {
     flyout: Flyout,
     /// The Win+X menu.
     quick: QuickMenu,
+    /// The pop-up showing your desktops as you switch between them.
+    deskosd: DeskOsd,
     /// The Win+V menu (made the first time it's opened), its reader, and the
     /// window it pastes into.
     clips: Option<ClipMenu>,
@@ -488,6 +491,9 @@ pub fn run() -> Result<()> {
         let switcher = (switcher_hwnd, Backdrop::create(instance)?);
         let quick_hwnd = create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)?;
         let quick = (quick_hwnd, Backdrop::create(instance)?);
+        let osd_hwnd =
+            create_window(class, instance, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)?;
+        let osd = (osd_hwnd, Backdrop::create(instance)?);
         let notch_backdrop = Backdrop::create(instance)?;
 
         let app = App::new(
@@ -502,6 +508,7 @@ pub fn run() -> Result<()> {
             widgets,
             switcher,
             quick,
+            osd,
             instance,
         )?;
         APP.with(|c| *c.borrow_mut() = Some(app));
@@ -928,6 +935,7 @@ impl App {
         (widgets_hwnd, widgets_backdrop): (HWND, Backdrop),
         (switcher_hwnd, switcher_backdrop): (HWND, Backdrop),
         (quick_hwnd, quick_backdrop): (HWND, Backdrop),
+        (osd_hwnd, osd_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
         let cfg = Config::load();
@@ -1033,6 +1041,7 @@ impl App {
             switcher: Switcher::new(switcher_hwnd, switcher_backdrop),
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
+            deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
             clips: None,
             clip_tx: clipboard::spawn(),
             clip_target: HWND::default(),
@@ -1240,6 +1249,7 @@ impl App {
         self.launcher.configure(&self.cfg);
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.quick.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        self.deskosd.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         if let Some(c) = &mut self.clips {
             c.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
             if !self.cfg.shortcut_win_v {
@@ -1510,6 +1520,13 @@ impl App {
         }
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
+        }
+        if hwnd == self.deskosd.hwnd {
+            if m == WM_TIMER && wp.0 == deskosd::TIMER_HIDE {
+                self.deskosd.on_timer();
+                return Some(LRESULT(0));
+            }
+            return None;
         }
         if self.clips.as_ref().is_some_and(|c| c.hwnd == hwnd) {
             return self.handle_clips(m, wp, lp);
@@ -3417,6 +3434,18 @@ impl App {
     fn on_desktops(&mut self) {
         let desks = desktops::read();
         if desks != self.desks {
+            // A switch (not a rename, a new or a closed desktop) shows the
+            // pop-up, unless Task View is up showing them already.
+            if self.cfg.desktop_osd
+                && desks.current != self.desks.current
+                && desks.names.len() == self.desks.names.len()
+                && !self.switcher.view
+            {
+                let d = self.dock_ref(self.dock_under_cursor());
+                let (k, monitor) = (d.k(), d.monitor());
+                let (k, monitor) = if monitor.right > monitor.left { (k, monitor) } else { (self.dpi, self.monitor) };
+                self.deskosd.switched(&self.desks, &desks, monitor, k);
+            }
             self.desks = desks;
             self.dock.dirty = true;
             self.switcher.set_desktops(self.desks.clone());
@@ -3938,6 +3967,7 @@ impl App {
             || self.launcher.wants_frame()
             || self.flyout.wants_frame()
             || self.quick.wants_frame()
+            || self.deskosd.wants_frame()
             || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
@@ -4045,6 +4075,10 @@ impl App {
             let t = self.perf.start();
             let _ = self.quick.render(&mut self.gfx);
             self.perf.end(Surface::Quick, t);
+        }
+        if self.deskosd.wants_frame() {
+            fast |= self.deskosd.step(dt);
+            let _ = self.deskosd.render(&mut self.gfx);
         }
         if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
             fast |= c.step(dt);

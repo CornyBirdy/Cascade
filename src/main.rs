@@ -10,6 +10,7 @@ mod brightness;
 mod calendar;
 mod clipboard;
 mod config;
+mod deskosd;
 mod desktops;
 mod devices;
 mod dock;
