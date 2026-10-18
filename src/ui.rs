@@ -2900,9 +2900,13 @@ impl App {
                     }
                     let _ = KillTimer(Some(dock), TIMER_PREVIEW_SHOW);
                 }
-                WM_LBUTTONDOWN => self.dock_mut(di).on_down(lparam_xy(lp).0),
+                WM_LBUTTONDOWN => {
+                    let (x, y) = lparam_xy(lp);
+                    self.dock_mut(di).on_down(x, y);
+                }
                 WM_LBUTTONUP => {
-                    if let Some(hot) = self.dock_mut(di).on_up() {
+                    let (x, y) = lparam_xy(lp);
+                    if let Some(hot) = self.dock_mut(di).on_up(x, y) {
                         self.preview.hide();
                         self.on_dock_click(di, hot);
                     }

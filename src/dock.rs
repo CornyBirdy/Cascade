@@ -483,6 +483,12 @@ pub fn focus_window(h: HWND) {
             let _ = ShowWindow(h, SW_RESTORE);
         }
         let _ = SetForegroundWindow(h);
+        // Windows' foreground lock can turn that down (a click that took a
+        // moment to handle, focus stolen in between): Alt+Tab's own way in
+        // isn't subject to it.
+        if GetForegroundWindow() != h {
+            SwitchToThisWindow(h, true);
+        }
         // Windows won't let us bring an admin app to the front (or restore
         // it); the admin helper, if it's on, can.
         if GetForegroundWindow() != h || IsIconic(h).as_bool() {
@@ -1292,7 +1298,17 @@ impl Dock {
         self.dirty = true;
     }
 
-    pub fn on_down(&mut self, x: i32) {
+    /// Mouse pressed at (x, y). What's under it is looked up again here, not
+    /// taken from the last mouse move: the buttons shift when an app opens
+    /// or closes, so a click without moving the mouse first would otherwise
+    /// land on whichever app used to be there (or nothing).
+    pub fn on_down(&mut self, x: i32, y: i32) {
+        let hit = self.hit(x as f32 / self.k, y as f32 / self.k);
+        if hit != self.hovered {
+            self.hovered = hit;
+            self.hover_x = Some(x as f32 / self.k);
+            self.dirty = true;
+        }
         if let Some(h) = self.hovered {
             self.pressed = Some((h, x));
             unsafe {
@@ -1302,8 +1318,9 @@ impl Dock {
         }
     }
 
-    /// Mouse released. Returns what was clicked.
-    pub fn on_up(&mut self) -> Option<Hot> {
+    /// Mouse released at (x, y). Returns what was clicked: what it was
+    /// pressed on, if it's still under the pointer.
+    pub fn on_up(&mut self, x: i32, y: i32) -> Option<Hot> {
         unsafe {
             let _ = ReleaseCapture();
         }
@@ -1313,7 +1330,8 @@ impl Dock {
             self.save_pinned();
             return None;
         }
-        match (pressed, self.hovered) {
+        let under = self.hit(x as f32 / self.k, y as f32 / self.k);
+        match (pressed, under.or(self.hovered)) {
             (Some((p, _)), Some(h)) if p == h => Some(p),
             _ => None,
         }

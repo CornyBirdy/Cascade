@@ -23,6 +23,12 @@ pub const ICON_SIZE: u32 = 96;
 /// System.Link.TargetParsingPath: the program behind a Start menu entry.
 const PKEY_LINK_TARGET: PROPERTYKEY =
     PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25), pid: 2 };
+/// System.AppUserModel.PackageInstallPath: a Store app's folder.
+const PKEY_PACKAGE_PATH: PROPERTYKEY =
+    PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 15 };
+/// System.Tile.SmallLogoPath: its small logo, inside that folder.
+const PKEY_SMALL_LOGO: PROPERTYKEY =
+    PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x86D40B4D_9069_443C_819A_2A54090DCCEC), pid: 2 };
 
 #[derive(Clone)]
 pub struct IconResult {
@@ -46,7 +52,10 @@ pub fn spawn() -> Sender<String> {
             let is_own = own.as_deref() == Some(id.to_lowercase().as_str());
             let pixels = match (&item, &wic) {
                 (_, Some(wic)) if is_own => own_icon(wic).or_else(|_| load_icon(item.as_ref().ok_or(E_FAIL)?, wic)),
-                (Some(item), Some(wic)) => small_icon(item, wic).map(Ok).unwrap_or_else(|| load_icon(item, wic)),
+                (Some(item), Some(wic)) => store_icon(item, wic)
+                    .or_else(|| small_icon(item, wic))
+                    .map(Ok)
+                    .unwrap_or_else(|| load_icon(item, wic)),
                 _ => Ok(Vec::new()),
             }
             .unwrap_or_default();
@@ -92,6 +101,66 @@ unsafe fn small_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Option<Vec<
         return result.ok();
     }
     None
+}
+
+/// A Store app's logo straight from its package, without the coloured tile
+/// "plate" the shell draws it on when asked for an image (a square round
+/// the icon, on many apps). As the taskbar does, the `altform-unplated`
+/// asset (made for dark backgrounds) is used when the app has one, at the
+/// size nearest the slot; otherwise any of the logo's sizes, which are all
+/// see-through. None for anything that isn't a Store app.
+unsafe fn store_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Option<Vec<u8>> {
+    let item: IShellItem2 = item.cast().ok()?;
+    let read = |key: &PROPERTYKEY| -> Option<String> {
+        let p = item.GetString(key).ok()?;
+        let s = p.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(p.0 as *const _));
+        (!s.is_empty()).then_some(s)
+    };
+    let root = read(&PKEY_PACKAGE_PATH)?;
+    let logo = std::path::Path::new(&root).join(read(&PKEY_SMALL_LOGO)?);
+    let file = best_logo(&logo)?;
+    let decoder = wic
+        .CreateDecoderFromFilename(
+            &HSTRING::from(file.as_os_str()),
+            None,
+            windows::Win32::Foundation::GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+        )
+        .ok()?;
+    let frame = decoder.GetFrame(0).ok()?;
+    let bmp = wic.CreateBitmapFromSource(&frame, WICBitmapCacheOnLoad).ok()?;
+    to_pixels(wic, &bmp).ok()
+}
+
+/// The best file for a logo named like `Assets\Square44x44Logo.png`: its
+/// variants sit beside it as `Square44x44Logo.targetsize-48_altform-unplated.png`,
+/// `….scale-200.png` and so on.
+fn best_logo(logo: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = logo.parent()?;
+    let stem = logo.file_stem()?.to_string_lossy().to_lowercase();
+    let ext = logo.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut best: Option<(u32, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let Some(rest) = name.strip_prefix(&format!("{stem}.")) else { continue };
+        let Some(quals) = rest.strip_suffix(&format!(".{ext}")) else { continue };
+        if name.contains("contrast-") || name.contains("lightunplated") {
+            continue; // high-contrast and light-taskbar versions
+        }
+        let size =
+            |key: &str| quals.split(['_', '.']).find_map(|q| q.strip_prefix(key)).and_then(|n| n.parse::<u32>().ok());
+        // Pixel size: targetsize-N is N px; scale-N is the 44 px logo at N%.
+        let px = size("targetsize-").or_else(|| size("scale-").map(|s| 44 * s / 100)).unwrap_or(44);
+        // Unplated first, then the size nearest the slot (bigger is better than smaller).
+        let unplated = quals.contains("altform-unplated");
+        let fit = if px >= ICON_SIZE { px - ICON_SIZE } else { 1000 + ICON_SIZE - px };
+        let score = if unplated { fit } else { 10_000 + fit };
+        if best.as_ref().is_none_or(|(b, _)| score < *b) {
+            best = Some((score, entry.path()));
+        }
+    }
+    best.map(|(_, p)| p).or_else(|| logo.exists().then(|| logo.to_path_buf()))
 }
 
 /// Where an item's icon may come from, best first: (file, index as for
@@ -225,10 +294,9 @@ unsafe fn own_icon(wic: &IWICImagingFactory) -> Result<Vec<u8>> {
 
 /// Scales a bitmap to ICON_SIZE square, premultiplied BGRA.
 unsafe fn to_pixels(wic: &IWICImagingFactory, bmp: &IWICBitmap) -> Result<Vec<u8>> {
-    let (mut w, mut h) = (0u32, 0u32);
-    bmp.GetSize(&mut w, &mut h)?;
-    // Fant shrinks best; small icons grow smoothly with a cubic.
-    let mode = if w < ICON_SIZE { WICBitmapInterpolationModeHighQualityCubic } else { WICBitmapInterpolationModeFant };
+    // Fant both ways: a cubic grows small icons a little sharper, but rings
+    // at their see-through edges, which reads as a faint outline.
+    let mode = WICBitmapInterpolationModeFant;
     let scaler = wic.CreateBitmapScaler()?;
     scaler.Initialize(bmp, ICON_SIZE, ICON_SIZE, mode)?;
     let conv = wic.CreateFormatConverter()?;
