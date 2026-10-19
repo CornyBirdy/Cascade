@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
+use crate::bt;
 use crate::calendar;
 use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
@@ -252,6 +253,12 @@ enum Hot {
     WifiNet(usize),
     WifiSettings,
     WifiQuick,
+    /// The Bluetooth list (Controls): the chevron on the Bluetooth tile, its
+    /// back button, a device, and Windows' Bluetooth settings.
+    BtMore,
+    BtBack,
+    BtDev(usize),
+    BtSettings,
     /// Media: switch to the next app (or phone) with media.
     MediaSource,
 }
@@ -348,6 +355,10 @@ struct App {
     wifi_tx: Sender<wifi::Cmd>,
     wifi: wifi::Report,
     wifi_open: bool,
+    /// The paired Bluetooth devices, shown in Controls' Bluetooth list while it's open.
+    bt_tx: Sender<bt::Cmd>,
+    bt: bt::Report,
+    bt_open: bool,
     pomo: Pomodoro,
     weather: Option<Weather>,
     visualizer: Visualizer,
@@ -737,6 +748,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::BLUETOOTH => {
+            let report = Box::from_raw(lp.0 as *mut bt::Report);
+            with_app(move |a| {
+                a.bt = *report;
+                a.dirty = true;
+                if a.bt_open {
+                    a.retarget();
+                }
+            });
+            return LRESULT(0);
+        }
         msg::NOTIFS => {
             let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
             with_app(move |a| {
@@ -1026,6 +1048,9 @@ impl App {
             wifi_tx: wifi::spawn(),
             wifi: wifi::Report::default(),
             wifi_open: false,
+            bt_tx: bt::spawn(),
+            bt: bt::Report::default(),
+            bt_open: false,
             pomo: Pomodoro::new(cfg.focus_minutes, cfg.break_minutes),
             weather: None,
             visualizer: Visualizer::default(),
@@ -1427,6 +1452,7 @@ impl App {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
                 Mode::Controls if self.wifi_open => (420.0, self.wifi_layout().total + TAB_BAR, 30.0),
+                Mode::Controls if self.bt_open => (420.0, self.bt_layout().total + TAB_BAR, 30.0),
                 Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
                 Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
@@ -1436,9 +1462,10 @@ impl App {
 
     /// Re-derives the view and animation targets after any state change.
     fn retarget(&mut self) {
-        // The Wi-Fi list closes with the notch.
+        // The Wi-Fi and Bluetooth lists close with the notch.
         if !self.expanded {
             self.wifi_open = false;
+            self.bt_open = false;
         }
         let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen);
         if visible != self.shown {
@@ -1525,6 +1552,7 @@ impl App {
         if mode != self.mode {
             self.mode = mode;
             self.wifi_open = false;
+            self.bt_open = false;
             if mode == Mode::Controls {
                 self.read_mixer();
             }
@@ -1781,7 +1809,12 @@ impl App {
             }
             msg::RADIOS => {
                 let was = self.radios.wifi;
+                let bt_was = self.radios.bluetooth;
                 self.radios = Radios::unpack(wp.0);
+                // Bluetooth came on with its list open: the devices can connect now.
+                if self.bt_open && self.radios.bluetooth == Some(true) && bt_was != Some(true) {
+                    let _ = self.bt_tx.send(bt::Cmd::List);
+                }
                 // Wi-Fi just came on with the list open: see what's there.
                 if self.wifi_open && self.radios.wifi == Some(true) && was != Some(true) {
                     let _ = self.wifi_tx.send(wifi::Cmd::Scan);
@@ -2131,6 +2164,10 @@ impl App {
     fn read_mixer(&mut self) {
         self.outputs_open = false;
         self.mixer = if self.cfg.controls_mixer { Mixer::read() } else { Mixer::default() };
+        // And the Bluetooth tile names what's connected.
+        if self.radios.bluetooth == Some(true) {
+            let _ = self.bt_tx.send(bt::Cmd::List);
+        }
     }
 
     /// The mixer's rows: the output (and the list of them when open), then
@@ -2279,6 +2316,27 @@ impl App {
                 let _ = self.wifi_tx.send(wifi::Cmd::Scan);
             }
             Hot::WifiBack => self.wifi_open = false,
+            Hot::BtMore => {
+                self.bt_open = true;
+                self.bt.note = None;
+                let _ = self.bt_tx.send(bt::Cmd::List);
+            }
+            Hot::BtBack => self.bt_open = false,
+            Hot::BtDev(i) => match self.bt.devices.get(i) {
+                Some(d) if d.audio && self.radios.bluetooth != Some(false) => {
+                    let _ = self.bt_tx.send(bt::Cmd::Set(d.name.clone(), !d.connected));
+                }
+                // Mice, keyboards and the like connect by themselves.
+                Some(_) => {
+                    shell::open("ms-settings:bluetooth");
+                    self.expanded = false;
+                }
+                None => {}
+            },
+            Hot::BtSettings => {
+                shell::open("ms-settings:bluetooth");
+                self.expanded = false;
+            }
             Hot::WifiNet(i) => {
                 if let Some(n) = self.wifi.nets.get(i).filter(|n| !n.connected) {
                     self.wifi.note = Some(format!("Joining {}\u{2026}", n.ssid));
@@ -4441,6 +4499,17 @@ impl App {
                 }
             }
             Mode::Media => {}
+            Mode::Controls if self.bt_open => {
+                let l = self.bt_layout();
+                out.push((Hot::BtBack, 14.0, 14.0, 36.0, 34.0));
+                out.push((Hot::Bluetooth, tw - 18.0 - WIFI_SWITCH_W, 17.0, WIFI_SWITCH_W, 28.0));
+                for i in 0..l.rows {
+                    out.push((Hot::BtDev(i), 14.0, l.top + i as f32 * WIFI_ROW, tw - 28.0, WIFI_ROW));
+                }
+                let bw = (tw - 36.0 - 8.0) / 2.0;
+                out.push((Hot::BtSettings, 18.0, l.foot, bw, WIFI_BTN_H));
+                out.push((Hot::WifiQuick, 18.0 + bw + 8.0, l.foot, bw, WIFI_BTN_H));
+            }
             Mode::Controls if self.wifi_open => {
                 let l = self.wifi_layout();
                 out.push((Hot::WifiBack, 14.0, 14.0, 36.0, 34.0));
@@ -4457,6 +4526,10 @@ impl App {
                 // The Wi-Fi tile's chevron (opens the list) before the tile itself.
                 if self.radios.wifi.is_some() {
                     out.push((Hot::WifiMore, 18.0 + tile_w - WIFI_MORE_W, 14.0, WIFI_MORE_W, 54.0));
+                }
+                if self.radios.bluetooth.is_some() {
+                    let x = 18.0 + tile_w + 8.0 + tile_w - WIFI_MORE_W;
+                    out.push((Hot::BtMore, x, 14.0, WIFI_MORE_W, 54.0));
                 }
                 for (i, h) in [Hot::Wifi, Hot::Bluetooth, Hot::Notifications].into_iter().enumerate() {
                     out.push((h, 18.0 + i as f32 * (tile_w + 8.0), 14.0, tile_w, 54.0));
@@ -4976,9 +5049,108 @@ impl App {
         }
     }
 
+    /// Where the Bluetooth list's parts are (content-relative y), laid out
+    /// like the Wi-Fi list.
+    fn bt_layout(&self) -> WifiLayout {
+        let top = 60.0;
+        let rows = self.bt.devices.len().min(WIFI_ROWS);
+        let note = top + rows as f32 * WIFI_ROW + 4.0;
+        let note_h = if self.bt_note().is_some() { 24.0 } else { 0.0 };
+        let foot = note + note_h + 6.0;
+        WifiLayout { top, rows, note, foot, total: foot + WIFI_BTN_H + 14.0 }
+    }
+
+    /// The line under the Bluetooth list, if there's something to say.
+    fn bt_note(&self) -> Option<String> {
+        if self.radios.bluetooth == Some(false) {
+            return Some("Bluetooth is off.".into());
+        }
+        if let Some(n) = &self.bt.note {
+            return Some(n.clone());
+        }
+        if self.bt.loading && self.bt.devices.is_empty() {
+            return Some("Looking for your devices\u{2026}".into());
+        }
+        self.bt.devices.is_empty().then(|| "Nothing paired yet: add devices in Bluetooth settings.".into())
+    }
+
+    /// The name of the first connected Bluetooth device, for its tile.
+    fn bt_connected(&self) -> Option<&str> {
+        self.bt.devices.iter().find(|d| d.connected).map(|d| d.name.as_str())
+    }
+
+    /// Controls' Bluetooth list: back, the Bluetooth switch, your paired
+    /// devices (connected first; click one that plays sound to connect or
+    /// disconnect it), then Windows' own settings.
+    fn draw_bt(&self, p: &Painter, alpha: f32) {
+        let ox = self.origin;
+        let tw = self.content_w;
+        let fonts = &self.gfx.fonts;
+        let white = Color::white(0.95 * alpha);
+        let dim = Color::white(0.55 * alpha);
+        let l = self.bt_layout();
+        if self.hovered == Some(Hot::BtBack) {
+            p.rrect(ox + 14.0, 14.0, 36.0, 34.0, 10.0, Color::white(0.08 * alpha));
+        }
+        let (bx, by) = (ox + 34.0, 31.0);
+        p.line(bx + 3.0, by - 7.0, bx - 4.0, by, white, 1.8);
+        p.line(bx - 4.0, by, bx + 3.0, by + 7.0, white, 1.8);
+        p.text("Bluetooth", &fonts.title, ox + 58.0, 14.0, tw - 160.0, 34.0, Align::Left, white);
+        let on = self.radios.bluetooth == Some(true);
+        let (sx, sy) = (ox + tw - 18.0 - WIFI_SWITCH_W, 21.0);
+        p.rrect(
+            sx,
+            sy,
+            WIFI_SWITCH_W,
+            20.0,
+            10.0,
+            if on { theme::accent().alpha(alpha) } else { Color::white(0.18 * alpha) },
+        );
+        let knob = if on { sx + WIFI_SWITCH_W - 10.0 } else { sx + 10.0 };
+        p.circle(knob, sy + 10.0, 7.0, white);
+        for (i, d) in self.bt.devices.iter().take(l.rows).enumerate() {
+            let y = l.top + i as f32 * WIFI_ROW;
+            if self.hovered == Some(Hot::BtDev(i)) {
+                p.rrect(ox + 14.0, y + 1.0, tw - 28.0, WIFI_ROW - 2.0, 9.0, Color::white(0.07 * alpha));
+            }
+            let cy = y + WIFI_ROW / 2.0;
+            let c = if d.connected { theme::accent().alpha(alpha) } else { white };
+            device_glyph(p, ox + 32.0, cy, d.kind, c);
+            p.text(&d.name, &fonts.label, ox + 52.0, y, tw - 170.0, WIFI_ROW, Align::Left, white);
+            let hovered = self.hovered == Some(Hot::BtDev(i));
+            let status = match (d.connected, d.audio && hovered && on) {
+                (true, true) => "Disconnect",
+                (false, true) => "Connect",
+                (true, false) => "Connected",
+                (false, false) => "",
+            };
+            if !status.is_empty() {
+                let c = if d.connected && !hovered { theme::accent().alpha(alpha) } else { dim };
+                p.text(status, &fonts.small, ox + tw - 26.0 - 96.0, y, 96.0, WIFI_ROW, Align::Right, c);
+            }
+        }
+        if let Some(note) = self.bt_note() {
+            p.text(&note, &fonts.small, ox + 20.0, l.note, tw - 40.0, 22.0, Align::Left, dim);
+        }
+        let bw = (tw - 36.0 - 8.0) / 2.0;
+        for (i, (hot, label)) in
+            [(Hot::BtSettings, "More Bluetooth settings"), (Hot::WifiQuick, "Windows quick settings")]
+                .into_iter()
+                .enumerate()
+        {
+            let x = ox + 18.0 + i as f32 * (bw + 8.0);
+            let fill = if self.hovered == Some(hot) { 0.13 } else { 0.08 };
+            p.rrect(x, l.foot, bw, WIFI_BTN_H, 10.0, Color::white(fill * alpha));
+            p.text(label, &fonts.small, x, l.foot, bw, WIFI_BTN_H, Align::Center, white);
+        }
+    }
+
     fn draw_controls(&self, p: &Painter, alpha: f32) {
         if self.wifi_open {
             return self.draw_wifi(p, alpha);
+        }
+        if self.bt_open {
+            return self.draw_bt(p, alpha);
         }
         let ox = self.origin;
         let tw = self.content_w;
@@ -5008,20 +5180,27 @@ impl App {
             let joined = (hot == Hot::Wifi && state == Some(true))
                 .then(|| self.wifi.nets.iter().find(|n| n.connected).map(|n| n.ssid.as_str()))
                 .flatten();
+            let paired = (hot == Hot::Bluetooth && state == Some(true)).then(|| self.bt_connected()).flatten();
             let status = match (hot, state) {
                 (Hot::Notifications, _) => "Open",
                 (Hot::Wifi, Some(true)) if joined.is_some() => joined.unwrap_or("On"),
+                (Hot::Bluetooth, Some(true)) if paired.is_some() => paired.unwrap_or("On"),
                 (_, Some(true)) => "On",
                 (_, Some(false)) => "Off",
                 (_, None) => "Unavailable",
             };
-            let text_w =
-                if hot == Hot::Wifi && state.is_some() { tile_w - 50.0 - WIFI_MORE_W + 8.0 } else { tile_w - 50.0 };
+            // The Wi-Fi and Bluetooth tiles have a chevron that opens their list.
+            let more = match hot {
+                Hot::Wifi if state.is_some() => Some(Hot::WifiMore),
+                Hot::Bluetooth if state.is_some() => Some(Hot::BtMore),
+                _ => None,
+            };
+            let text_w = if more.is_some() { tile_w - 50.0 - WIFI_MORE_W + 8.0 } else { tile_w - 50.0 };
             p.text(label, &fonts.label, x + 46.0, y + 9.0, text_w, 18.0, Align::Left, white);
             p.text(status, &fonts.small, x + 46.0, y + 27.0, text_w, 16.0, Align::Left, Color::white(0.55 * alpha));
-            if hot == Hot::Wifi && state.is_some() {
+            if let Some(more) = more {
                 let mx = x + tile_w - WIFI_MORE_W;
-                if self.hovered == Some(Hot::WifiMore) {
+                if self.hovered == Some(more) {
                     p.rrect(mx + 2.0, y + 6.0, WIFI_MORE_W - 6.0, 42.0, 10.0, Color::white(0.10 * alpha));
                 }
                 let (cx, cy, c) = (mx + WIFI_MORE_W / 2.0 - 1.0, y + 27.0, Color::white(0.75 * alpha));
@@ -5478,6 +5657,34 @@ fn bluetooth(p: &Painter, cx: f32, cy: f32, c: Color) {
     ];
     for w in pts.windows(2) {
         p.line(w[0].0, w[0].1, w[1].0, w[1].1, c, 1.6);
+    }
+}
+
+/// A small picture of a Bluetooth device's kind: headphones, a mouse, a phone,
+/// or the Bluetooth mark.
+fn device_glyph(p: &Painter, cx: f32, cy: f32, kind: bt::Kind, c: Color) {
+    match kind {
+        bt::Kind::Audio => {
+            // A headband over two ear cups.
+            let pts: Vec<(f32, f32)> = (0..=8)
+                .map(|i| std::f32::consts::PI * (1.0 + i as f32 / 8.0))
+                .map(|t| (cx + 6.5 * t.cos(), cy + 1.0 + 7.0 * t.sin()))
+                .collect();
+            for w in pts.windows(2) {
+                p.line(w[0].0, w[0].1, w[1].0, w[1].1, c, 1.5);
+            }
+            p.rrect(cx - 8.0, cy + 1.0, 4.0, 6.5, 1.5, c);
+            p.rrect(cx + 4.0, cy + 1.0, 4.0, 6.5, 1.5, c);
+        }
+        bt::Kind::Input => {
+            p.stroke_rrect(cx - 4.5, cy - 7.0, 9.0, 14.0, 4.5, c, 1.4);
+            p.line(cx, cy - 7.0, cx, cy - 2.5, c, 1.2);
+        }
+        bt::Kind::Phone => {
+            p.stroke_rrect(cx - 4.5, cy - 7.5, 9.0, 15.0, 2.0, c, 1.4);
+            p.line(cx - 1.5, cy + 5.0, cx + 1.5, cy + 5.0, c, 1.2);
+        }
+        bt::Kind::Other => bluetooth(p, cx, cy, c),
     }
 }
 
