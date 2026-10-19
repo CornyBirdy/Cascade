@@ -480,7 +480,7 @@ pub fn window_app_id(h: HWND) -> Option<String> {
     }
 }
 
-fn app_user_model_id(h: HWND) -> Option<String> {
+pub(crate) fn app_user_model_id(h: HWND) -> Option<String> {
     unsafe {
         let store: IPropertyStore = SHGetPropertyStoreForWindow(h).ok()?;
         let value = store.GetValue(&PKEY_APP_USER_MODEL_ID).ok()?;

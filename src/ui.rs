@@ -2023,6 +2023,10 @@ impl App {
     }
 
     fn on_media(&mut self, info: Option<MediaInfo>) {
+        if let Some(m) = &info {
+            // The bars follow the app that's playing, not everything.
+            self.visualizer.set_source(&m.source);
+        }
         self.media = info;
         // A new song, its art, or play / pause on the music widget.
         self.dock.dirty = true;

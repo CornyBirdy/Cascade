@@ -39,8 +39,16 @@ pub enum MediaCmd {
     NextSource,
 }
 
-/// Phone Link's AppUserModelID prefix: media from your phone.
-const PHONE_LINK: &str = "Microsoft.YourPhone";
+/// Whether a media session (or notification) comes from your phone: Phone
+/// Link (once called Your Phone, with its PhoneExperienceHost), Windows'
+/// newer built-in phone link (Cross Device), or a phone playing to the PC
+/// over Bluetooth.
+pub fn is_phone(aumid: &str) -> bool {
+    let a = aumid.to_ascii_lowercase();
+    // (Windows' own Bluetooth pop-ups aren't from the phone.)
+    !a.starts_with("windows.systemtoast")
+        && ["microsoft.yourphone", "phoneexperiencehost", "crossdevice", "bluetooth"].iter().any(|k| a.contains(k))
+}
 
 /// Album art, pre-scaled and pre-rounded, as premultiplied BGRA.
 pub struct Art {
@@ -62,6 +70,8 @@ pub struct MediaInfo {
     pub art: Option<Arc<Art>>,
     /// Playing on your phone, through Phone Link.
     pub phone: bool,
+    /// The app playing it (its AppUserModelID), for the visualizer.
+    pub source: String,
     /// How many apps (and phones) have media to show, so the UI can offer a
     /// way to switch between them when there's more than one.
     pub sources: usize,
@@ -103,6 +113,8 @@ struct Watcher {
     /// The source picked with `NextSource` (its AppUserModelID), shown even
     /// while another plays, until it goes away.
     pinned: Option<String>,
+    /// The sessions last written to the log, so it says when they change.
+    logged: String,
 }
 
 fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
@@ -128,6 +140,7 @@ fn run(rx: Receiver<MediaCmd>, tx: Sender<MediaCmd>) -> Result<()> {
         art: None,
         wic: None,
         pinned: None,
+        logged: String::new(),
     };
     w.resubscribe(&tx);
     w.refresh();
@@ -207,6 +220,14 @@ impl Watcher {
         }
         let Ok(sessions) = self.manager.GetSessions() else { return };
         let count = sessions.Size().unwrap_or(0);
+        // Which apps have media sessions, in the log: when your phone's music
+        // doesn't show, it says what Windows offers instead.
+        let ids: Vec<String> = (0..count).filter_map(|i| sessions.GetAt(i).ok()).map(|s| aumid(&s)).collect();
+        let line = ids.join(", ");
+        if line != self.logged {
+            crate::config::log(&format!("media sessions: {}", if line.is_empty() { "none" } else { &line }));
+            self.logged = line;
+        }
         for i in 0..count {
             let Ok(s) = sessions.GetAt(i) else { continue };
             let (t1, t2, t3) = (tx.clone(), tx.clone(), tx.clone());
@@ -314,7 +335,7 @@ impl Watcher {
         }
 
         // From your phone, through Phone Link: say so where the artist goes.
-        let phone = aumid(s).starts_with(PHONE_LINK);
+        let phone = is_phone(&aumid(s));
         let artist = match (phone, artist.is_empty()) {
             (true, true) => "Your phone".to_string(),
             (true, false) => format!("Phone \u{b7} {artist}"),
@@ -342,6 +363,7 @@ impl Watcher {
             stamp: Instant::now(),
             art: self.art.clone(),
             phone,
+            source: aumid(s),
             sources: self.with_media().len(),
         }))
     }
@@ -430,5 +452,18 @@ fn round_corners(px: &mut [u8], size: u32, radius: f32) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_phone;
+
+    #[test]
+    fn tells_phone_sessions() {
+        assert!(is_phone("Microsoft.YourPhone_8wekyb3d8bbwe!App"));
+        assert!(is_phone("MicrosoftWindows.CrossDevice_cw5n1h2txyewy!CrossDeviceHost"));
+        assert!(!is_phone("Spotify.exe"));
+        assert!(!is_phone("Windows.SystemToast.Bluetooth"));
     }
 }

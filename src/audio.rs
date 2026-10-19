@@ -1,15 +1,27 @@
 //! Volume (event-driven via endpoint callbacks, no polling) and the
 //! visualizer (loopback capture + FFT), which only runs while it is on screen.
+//!
+//! The visualizer listens to the app that's playing (the media session's
+//! app and the processes it started), not everything the speakers play, so
+//! a voice call or a game alongside the music doesn't move the bars. Where
+//! that app can't be found, or Windows is older than 10 version 2004, it
+//! falls back to the whole mix.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::core::{implement, Result, GUID, PCWSTR};
-use windows::Win32::Foundation::PROPERTYKEY;
+use windows::core::{implement, w, Interface, Result, BOOL, GUID, HRESULT, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, LPARAM, PROPERTYKEY};
 use windows::Win32::Media::Audio::Endpoints::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Variant::VT_BLOB;
+use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
 
 use crate::msg;
 
@@ -143,11 +155,21 @@ pub fn unpack(w: usize) -> [f32; BANDS] {
 #[derive(Default)]
 pub struct Visualizer {
     stop: Option<Arc<AtomicBool>>,
+    /// The playing app's AppUserModelID (from the media session).
+    source: String,
 }
 
 impl Visualizer {
     pub fn running(&self) -> bool {
         self.stop.is_some()
+    }
+
+    /// Listens to the app with media session `aumid` from now on.
+    pub fn set_source(&mut self, aumid: &str) {
+        if aumid != self.source {
+            self.source = aumid.to_string();
+            self.restart();
+        }
     }
 
     pub fn set(&mut self, on: bool) {
@@ -160,9 +182,11 @@ impl Visualizer {
         if on {
             let stop = Arc::new(AtomicBool::new(false));
             self.stop = Some(stop.clone());
+            let source = self.source.clone();
             std::thread::spawn(move || unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                let _ = capture(&stop);
+                let pid = source_process(&source);
+                let _ = capture(&stop, pid);
             });
         }
     }
@@ -185,7 +209,16 @@ const FFT_SIZE: usize = 1024;
 const IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 const BAND_EDGES: [f32; BANDS + 1] = [40.0, 150.0, 400.0, 1000.0, 3000.0, 10000.0];
 
-unsafe fn capture(stop: &AtomicBool) -> Result<()> {
+/// The samples a capture client hands over.
+struct Format {
+    channels: usize,
+    bits: u16,
+    float: bool,
+    rate: f32,
+}
+
+/// Everything the default output plays.
+unsafe fn mix_client() -> Result<(IAudioClient, Format)> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -203,6 +236,195 @@ unsafe fn capture(stop: &AtomicBool) -> Result<()> {
     let init = client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 1_000_000, 0, fmt, None);
     CoTaskMemFree(Some(fmt as *const _));
     init?;
+    Ok((client, Format { channels, bits, float, rate }))
+}
+
+/// Says when Windows has made the process capture client.
+#[implement(IActivateAudioInterfaceCompletionHandler)]
+struct Activated(isize);
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
+    fn ActivateCompleted(&self, _: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>) -> Result<()> {
+        unsafe { SetEvent(HANDLE(self.0 as *mut _)) }
+    }
+}
+
+/// Closes an event handle when it goes.
+struct Event(HANDLE);
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+/// What process `pid` and the ones it started play, whatever the output
+/// (Windows 10 2004 and later). Asked for as 48 kHz stereo floats.
+unsafe fn app_client(pid: u32) -> Result<(IAudioClient, Format, Event)> {
+    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    let raw = windows::core::imp::PROPVARIANT {
+        Anonymous: windows::core::imp::PROPVARIANT_0 {
+            Anonymous: windows::core::imp::PROPVARIANT_0_0 {
+                vt: VT_BLOB.0,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: windows::core::imp::PROPVARIANT_0_0_0 {
+                    blob: windows::core::imp::BLOB {
+                        cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        pBlobData: &mut params as *mut _ as *mut u8,
+                    },
+                },
+            },
+        },
+    };
+    // The blob points at `params` on this stack: never let it be freed.
+    let prop = std::mem::ManuallyDrop::new(windows::core::PROPVARIANT::from_raw(raw));
+    let done = Event(CreateEventW(None, false, false, PCWSTR::null())?);
+    let handler: IActivateAudioInterfaceCompletionHandler = Activated(done.0 .0 as isize).into();
+    let op = ActivateAudioInterfaceAsync(
+        w!("VAD\\Process_Loopback"),
+        &IAudioClient::IID,
+        Some(&*prop as *const _),
+        &handler,
+    )?;
+    if WaitForSingleObject(done.0, 3000).0 != 0 {
+        return Err(E_FAIL.into());
+    }
+    let mut result = HRESULT(0);
+    let mut unknown: Option<windows::core::IUnknown> = None;
+    op.GetActivateResult(&mut result, &mut unknown)?;
+    result.ok()?;
+    let client: IAudioClient = unknown.ok_or_else(|| windows::core::Error::from(E_FAIL))?.cast()?;
+    let (channels, rate) = (2u16, 48_000u32);
+    let fmt = WAVEFORMATEX {
+        wFormatTag: 3, // IEEE float
+        nChannels: channels,
+        nSamplesPerSec: rate,
+        nAvgBytesPerSec: rate * 4 * channels as u32,
+        nBlockAlign: 4 * channels,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    };
+    // This kind of client only works event-driven; the loop below still
+    // checks on its own schedule, the event just has to be there.
+    let ready = Event(CreateEventW(None, false, false, PCWSTR::null())?);
+    client.Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        1_000_000,
+        0,
+        &fmt,
+        None,
+    )?;
+    client.SetEventHandle(ready.0)?;
+    Ok((client, Format { channels: channels as usize, bits: 32, float: true, rate: rate as f32 }, ready))
+}
+
+/// The process to listen to for media session `aumid`: the top of the app's
+/// own process tree (a browser's main process, not its audio helper), so its
+/// whole tree is heard. None if it can't be told (the whole mix is used).
+fn source_process(aumid: &str) -> Option<u32> {
+    if aumid.is_empty() {
+        return None;
+    }
+    let procs = processes();
+    let exe = |pid: u32| procs.iter().find(|p| p.0 == pid).map(|p| p.2.as_str());
+    // Up the tree while the parent is the same program.
+    let root = |mut pid: u32| {
+        for _ in 0..16 {
+            let Some(&(_, parent, ref name)) = procs.iter().find(|p| p.0 == pid) else { break };
+            if parent == 0 || parent == pid || exe(parent) != Some(name.as_str()) {
+                break;
+            }
+            pid = parent;
+        }
+        pid
+    };
+    let lower = aumid.to_ascii_lowercase();
+    if let Some((family, _)) = lower.split_once('!') {
+        // A Store app: "Name_publisherid!App". Its processes run from
+        // WindowsApps\Name_version_arch__publisherid\.
+        let (name, publisher) = family.rsplit_once('_')?;
+        let (dir, tail) = (format!("\\windowsapps\\{name}_"), format!("__{publisher}\\"));
+        let found = procs.iter().find(|p| {
+            crate::dock::process_path(p.0)
+                .map(|path| path.to_ascii_lowercase())
+                .is_some_and(|path| path.contains(&dir) && path.contains(&tail))
+        })?;
+        return Some(root(found.0));
+    }
+    // An app that names its own windows with the id (Firefox, among others).
+    if let Some(pid) = window_with_aumid(aumid) {
+        return Some(root(pid));
+    }
+    // Otherwise the id is the program's name: "Spotify.exe", "Chrome", "MSEdge".
+    let stem = lower.trim_end_matches(".exe");
+    let found = procs.iter().find(|p| p.2.trim_end_matches(".exe") == stem)?;
+    Some(root(found.0))
+}
+
+/// Every process: (id, parent, exe name in lower case).
+fn processes() -> Vec<(u32, u32, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snap, &mut e).is_ok();
+        while more {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name = String::from_utf16_lossy(&e.szExeFile[..n]).to_ascii_lowercase();
+            out.push((e.th32ProcessID, e.th32ParentProcessID, name));
+            more = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// The process with a visible window carrying AppUserModelID `aumid`.
+fn window_with_aumid(aumid: &str) -> Option<u32> {
+    struct Find<'a> {
+        aumid: &'a str,
+        pid: u32,
+    }
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> BOOL {
+        let f = &mut *(lp.0 as *mut Find);
+        if IsWindowVisible(h).as_bool() && crate::dock::app_user_model_id(h).is_some_and(|a| a == f.aumid) {
+            GetWindowThreadProcessId(h, Some(&mut f.pid));
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut f = Find { aumid, pid: 0 };
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut f as *mut _ as isize));
+    }
+    (f.pid != 0).then_some(f.pid)
+}
+
+/// Captures what `source` (a process, with what it started) plays, or the
+/// whole mix, and posts the bands until `stop`.
+unsafe fn capture(stop: &AtomicBool, source: Option<u32>) -> Result<()> {
+    let app = source.and_then(|pid| app_client(pid).ok());
+    let (client, fmt, _ready) = match app {
+        Some((c, f, e)) => (c, f, Some(e)),
+        None => {
+            let (c, f) = mix_client()?;
+            (c, f, None)
+        }
+    };
+    let Format { channels, bits, float, rate } = fmt;
     if channels == 0 || !(float && bits == 32 || !float && (bits == 16 || bits == 32)) {
         return Ok(());
     }

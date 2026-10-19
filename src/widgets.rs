@@ -45,14 +45,12 @@ enum Card {
     Phone,
 }
 
-/// Phone Link's AppUserModelID prefix (the app was once called Your Phone).
-const PHONE_LINK: &str = "Microsoft.YourPhone";
 /// How many of the phone's notifications the Phone card lists.
 const PHONE_MAX: usize = 3;
 
 /// Whether a notification came from your phone, through Phone Link.
 pub fn from_phone(aumid: &str) -> bool {
-    aumid.starts_with(PHONE_LINK)
+    crate::media::is_phone(aumid)
 }
 
 /// "media,system" -> the cards, in that order (unknown names and repeats ignored).
