@@ -951,9 +951,11 @@ fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, b
         // Without the notch growing for music, the Media tab is all that's left.
         "visualizer" if lip || side || !on("live_activity") => ("Moving bars on the open notch's Media tab.", false),
         "shortcut_win_n" if !on("dock") => (taskbar_off, true),
-        "shortcut_win_a" if !on("notch") => ("Needs the notch: turn on Notch > Show the notch.", true),
+        "shortcut_win_a" if !on("notch") => {
+            ("The notch's Controls instead of Windows' quick settings. The notch is off, so they come down on their own.", false)
+        }
         "status_click" if get("status_click") == "notch" && !on("notch") => {
-            ("The notch is off, so they open Windows' quick settings.", true)
+            ("The notch is off, so Controls come down on their own and go again once they close.", false)
         }
         "taskbar_board" | "panel_board" if !on("dock") => (taskbar_off, true),
         "start_opacity" if !on("launcher") => {

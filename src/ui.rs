@@ -97,6 +97,8 @@ const TIMER_PASTE: usize = 20;
 /// The next moment the calendar needs a look: a countdown to show or step,
 /// or an event starting.
 const TIMER_CAL: usize = 21;
+/// Started at sign-in before Explorer: looks for its taskbar until it's up.
+const TIMER_SHELL: usize = 22;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -318,6 +320,9 @@ struct App {
     /// Opened from the taskbar's status icons rather than by hovering: stays
     /// open until a click elsewhere, or a while if the pointer never comes.
     pinned: bool,
+    /// With the notch turned off, it's brought up for Controls alone (from
+    /// the taskbar's status icons or Win+A) and goes again once it closes.
+    summoned: bool,
     tracking: bool,
     hovered: Option<Hot>,
     dragging: Option<Hot>,
@@ -434,7 +439,7 @@ struct App {
     drag: Option<(usize, usize, Instant, bool)>,
     /// Windows' virtual desktops (see `desktops`).
     desks: Desktops,
-    /// Your calendar's events (this month and the next six weeks), the
+    /// Your calendar's events (last month to about three months ahead), the
     /// reader, the link it was last given, and what's been announced:
     /// (event start, 0 coming up / 1 starting).
     events: Vec<ics::Event>,
@@ -835,7 +840,7 @@ fn date_at(t: i64, format: PCWSTR) -> String {
 }
 
 /// The time of day of `t`, as the clock shows it ("10:30", "10:30 am").
-fn time_at(t: i64) -> String {
+pub(crate) fn time_at(t: i64) -> String {
     let st = calendar::system_time(t);
     let mut b = [0u16; 32];
     unsafe {
@@ -998,6 +1003,7 @@ impl App {
             expanded: false,
             expand_pending: false,
             pinned: false,
+            summoned: false,
             tracking: false,
             hovered: None,
             dragging: None,
@@ -1084,6 +1090,15 @@ impl App {
     }
 
     fn start(&mut self) {
+        let ready = shell::shell_ready();
+        config::log(&format!("started (Explorer's taskbar up: {ready})"));
+        if !ready {
+            // Signed in a moment ago: Explorer is still on its way. Its
+            // TaskbarCreated says when it's up; this is in case that's missed.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_SHELL, 1000, None);
+            }
+        }
         shell::ensure_shortcuts();
         launcher::spawn_scan();
         crate::drop::register(self.dock.hwnd, 0);
@@ -1271,17 +1286,7 @@ impl App {
         mouseedge::raise();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
-            (true, None) => {
-                self.systray.hwnd = systray::start(self.instance);
-                self.tray_rect = RECT::default();
-                // Apps still starting (or Explorer, at sign-in) miss the first
-                // announcement: ask again a few times.
-                self.tray_announced = Some(Instant::now());
-                self.tray_syncs = 3;
-                unsafe {
-                    SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 4000, None);
-                }
-            }
+            (true, None) => self.start_systray(),
             (false, Some(h)) => {
                 systray::stop(h);
                 self.systray = Systray::default();
@@ -1295,6 +1300,69 @@ impl App {
             self.preview.hide();
         }
         self.arm_clock();
+    }
+
+    /// Puts Cascade's hidden tray window in front of Explorer's. Not before
+    /// Explorer's taskbar is up: a window of its class already there at
+    /// sign-in can stop Explorer starting as the desktop, and it would have
+    /// nothing to pass the icons on to anyway. TaskbarCreated tries again.
+    fn start_systray(&mut self) {
+        if self.systray.hwnd.is_some() || !shell::shell_ready() {
+            return;
+        }
+        self.systray.hwnd = systray::start(self.instance);
+        self.tray_rect = RECT::default();
+        // Apps still starting (or Explorer, at sign-in) miss the first
+        // announcement: ask again a few times.
+        self.tray_announced = Some(Instant::now());
+        self.tray_syncs = 3;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 4000, None);
+        }
+    }
+
+    /// A fullscreen app came to the front (true) or went.
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        self.retarget();
+        self.show_docks();
+        self.sync_visualizer();
+        if self.fullscreen {
+            self.preview.hide();
+        }
+        mouseedge::pause(self.fullscreen);
+        mouseedge::raise();
+        self.arm_stats();
+    }
+
+    /// Explorer made its taskbar: at sign-in, or after it restarted.
+    fn on_shell_ready(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_SHELL);
+        }
+        if let Some(t) = &self.tray {
+            t.add();
+        }
+        // App bars registered before Explorer was up went nowhere, so the
+        // shell never says when fullscreen apps come and go: register again,
+        // and don't stay hidden for a fullscreen app that was never there.
+        shell::register_appbar(self.hwnd);
+        let fullscreen = shell::fullscreen_now();
+        if fullscreen != self.fullscreen {
+            self.set_fullscreen(fullscreen);
+        }
+        if self.taskbar_hidden {
+            shell::hide_taskbar();
+        }
+        self.hook_taskbar();
+        self.update_display();
+        self.configure_docks();
+        self.show_docks();
+        if self.cfg.dock && self.cfg.tray_icons {
+            self.start_systray();
+        }
+        self.apply_flyout();
+        self.retarget();
     }
 
     // ------------------------------------------------------------ state --
@@ -1372,7 +1440,7 @@ impl App {
         if !self.expanded {
             self.wifi_open = false;
         }
-        let visible = self.cfg.notch && !(self.cfg.hide_in_fullscreen && self.fullscreen);
+        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen);
         if visible != self.shown {
             self.shown = visible;
             unsafe {
@@ -1553,18 +1621,7 @@ impl App {
                 return Some(LRESULT(0));
             }
             match wp.0 as u32 {
-                ABN_FULLSCREENAPP => {
-                    self.fullscreen = lp.0 != 0;
-                    self.retarget();
-                    self.show_docks();
-                    self.sync_visualizer();
-                    if self.fullscreen {
-                        self.preview.hide();
-                    }
-                    mouseedge::pause(self.fullscreen);
-                    mouseedge::raise();
-                    self.arm_stats();
-                }
+                ABN_FULLSCREENAPP => self.set_fullscreen(lp.0 != 0),
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => {
                     self.dock.reposition();
                     mouseedge::raise();
@@ -1584,15 +1641,9 @@ impl App {
                     SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 500, None);
                 }
             }
-            if let Some(t) = &self.tray {
-                t.add();
+            if !echo {
+                self.on_shell_ready();
             }
-            shell::register_appbar(self.hwnd);
-            if self.taskbar_hidden {
-                shell::hide_taskbar();
-            }
-            self.hook_taskbar();
-            self.configure_docks();
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
@@ -1839,6 +1890,7 @@ impl App {
             return; // read before the link was taken away
         }
         self.events = events;
+        self.widgets.dirty = true;
         self.retarget();
         self.arm_calendar();
     }
@@ -2304,6 +2356,11 @@ impl App {
                 }
             }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
+            TIMER_SHELL => {
+                if shell::shell_ready() {
+                    self.on_shell_ready();
+                }
+            }
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
                 if self.widgets.open && (self.cfg.widgets_notifications || self.widgets.shows_phone()) {
@@ -3280,17 +3337,21 @@ impl App {
         if self.just_closed() {
             return; // that click already closed the notch
         }
-        if self.cfg.status_click != "notch" || !self.shown {
+        if self.cfg.status_click != "notch" || !self.open_controls() {
             shell::open("ms-actioncenter:controlcenter/&showFooter=true");
-            return;
         }
-        self.open_controls();
     }
 
-    /// Opens the notch on its Controls.
-    fn open_controls(&mut self) {
+    /// Opens the notch on its Controls; with the notch turned off it comes
+    /// down for them alone. False if it can't show (a fullscreen app).
+    fn open_controls(&mut self) -> bool {
+        if !self.shown && !self.cfg.notch {
+            self.summoned = true;
+            self.retarget();
+        }
         if !self.shown {
-            return;
+            self.summoned = false;
+            return false;
         }
         self.expanded = true;
         self.expand_pending = false;
@@ -3306,6 +3367,7 @@ impl App {
             SetTimer(Some(self.hwnd), TIMER_COLLAPSE, PINNED_MS, None);
         }
         self.retarget();
+        true
     }
 
     /// Redraws the taskbar clock at the start of each minute (and not more).
@@ -3560,6 +3622,10 @@ impl App {
                         self.widgets.hide();
                         shell::open("shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App");
                     }
+                    Some(widgets::Action::TaskManager) => {
+                        self.widgets.hide();
+                        shell::open("taskmgr.exe");
+                    }
                     None => {}
                 }
             }
@@ -3661,7 +3727,9 @@ impl App {
             b'X' => self.open_quick(true),
             b'N' => self.toggle_widgets(),
             b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
-            b'A' => self.open_controls(),
+            b'A' => {
+                self.open_controls();
+            }
             b'\t' => self.toggle_task_view(),
             b'V' => match &mut self.clips {
                 Some(c) if c.open => c.hide(),
@@ -4024,6 +4092,11 @@ impl App {
             let t = self.perf.start();
             let _ = self.render();
             self.perf.end(Surface::Notch, t);
+            // Brought up for Controls with the notch off: gone once it has closed.
+            if self.summoned && !self.expanded && self.w.settled() && self.h.settled() {
+                self.summoned = false;
+                self.retarget();
+            }
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
@@ -4114,6 +4187,7 @@ impl App {
                 art,
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
+                events: &self.events,
             };
             let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);

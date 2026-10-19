@@ -63,7 +63,7 @@ fn https(url: &str) -> String {
 
 /// Starts reading `url` (empty: nothing). Send a new link to switch, or an
 /// empty one to stop. Events arrive as a boxed `Vec<Event>` in
-/// `msg::CALENDAR`: this month's and the next six weeks'.
+/// `msg::CALENDAR`: from last month's to about three months ahead.
 pub fn spawn() -> Sender<String> {
     let (tx, rx) = channel::<String>();
     std::thread::spawn(move || {
@@ -85,9 +85,12 @@ pub fn spawn() -> Sender<String> {
             // Offline (or a bad link): keep what was there and try again later.
             let Some(text) = crate::http::get_text(&url) else { continue };
             let today = now().div_euclid(DAY);
+            // From the start of last month to about three months on, for
+            // the widgets panel's calendar to step through.
             let (y, m, _) = ics::civil_from_days(today);
+            let (y, m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
             let from = ics::days_from_civil(y, m, 1) * DAY;
-            let to = (today + 43) * DAY;
+            let to = (today + 100) * DAY;
             let events = ics::occurrences(&text, from, to, &to_local);
             let ptr = Box::into_raw(Box::new(events));
             if !msg::post(msg::CALENDAR, 0, ptr as isize) {
