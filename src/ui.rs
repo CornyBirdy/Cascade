@@ -318,6 +318,9 @@ struct App {
     /// move on it at a gentler rate).
     dock_bars_at: Instant,
     last_frame: Instant,
+    /// The last frame ran at the screen's refresh rate: pace the next one
+    /// to the compositor.
+    vsync: bool,
     dirty: bool,
 
     view: View,
@@ -547,6 +550,17 @@ pub fn run() -> Result<()> {
                     DispatchMessageW(&m);
                 }
                 let wait = with_app(|a| a.frame()).unwrap_or(Duration::ZERO);
+                // Animating at the screen's rate: wait for the compositor's
+                // next frame, so motion steps evenly with the refresh instead
+                // of drifting against it. If it comes back at once (nothing
+                // for it to compose) the timer below paces it instead.
+                if with_app(|a| a.vsync).unwrap_or(false) {
+                    let t = Instant::now();
+                    let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                    if t.elapsed() >= Duration::from_millis(1) {
+                        continue;
+                    }
+                }
                 if !wait.is_zero() {
                     let due = -((wait.as_nanos() / 100) as i64);
                     if SetWaitableTimer(timer, &due, 0, None, None, false).is_ok() {
@@ -1019,6 +1033,7 @@ impl App {
             dock_bars: false,
             dock_bars_at: Instant::now(),
             last_frame: Instant::now(),
+            vsync: false,
             dirty: true,
             view: View::Idle,
             mode: Mode::Media,
@@ -4301,6 +4316,9 @@ impl App {
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.
         let fps = if fast { self.cfg.max_fps } else { 60 }.min(self.refresh_hz).max(15);
+        // At the screen's own rate, wait for the compositor's next frame
+        // rather than a timer, so each step lands on a refresh (see `run`).
+        self.vsync = fps >= self.refresh_hz;
         Duration::from_secs_f64(1.0 / fps as f64).saturating_sub(now.elapsed())
     }
 
