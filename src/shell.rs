@@ -51,11 +51,44 @@ pub fn unregister_appbar(hwnd: HWND) {
 }
 
 /// Whether something fullscreen is in front right now (used at startup).
+/// While you sign in Windows can say it's busy before any app is up, which
+/// would keep Cascade hidden until the next fullscreen change (that can be
+/// minutes, or never): so a window in front has to cover its screen too.
 pub fn fullscreen_now() -> bool {
-    matches!(
-        unsafe { SHQueryUserNotificationState() },
-        Ok(QUNS_BUSY) | Ok(QUNS_RUNNING_D3D_FULL_SCREEN) | Ok(QUNS_PRESENTATION_MODE)
-    )
+    match unsafe { SHQueryUserNotificationState() } {
+        Ok(QUNS_PRESENTATION_MODE) => true,
+        Ok(QUNS_BUSY) | Ok(QUNS_RUNNING_D3D_FULL_SCREEN) => foreground_covers_screen(),
+        _ => false,
+    }
+}
+
+/// Whether the window in front (not the desktop) covers its whole screen.
+fn foreground_covers_screen() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || fg == GetShellWindow() {
+            return false;
+        }
+        if class_is(fg, "Progman") || class_is(fg, "WorkerW") {
+            return false;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() {
+            return false;
+        }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// Whether Explorer's taskbar is up. Started at sign-in, Cascade can be
+/// running before it is.
+pub fn shell_ready() -> bool {
+    explorer_tray().is_some()
 }
 
 // ------------------------------------------------------------------ tray --
@@ -317,6 +350,11 @@ fn set_taskbar_state(state: u32) {
 /// screen space is given back; the original setting is saved to a marker
 /// file so it is restored even after a crash.
 pub fn hide_taskbar() {
+    if taskbars().is_empty() {
+        // Explorer isn't up yet: there's nothing to hide, and its setting
+        // can't be read. Cascade hides it once it's made (TaskbarCreated).
+        return;
+    }
     let marker = taskbar_marker();
     if !marker.exists() {
         let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, ..Default::default() };

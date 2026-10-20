@@ -26,9 +26,9 @@
 //! while a program with admin rights is in front and Cascade has none:
 //! Windows quietly drops the keys Cascade sends it then, replacement and all.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -117,6 +117,10 @@ static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 /// A Tab was swallowed while Alt was held: the switcher is in use.
 static TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TAB_CANCEL: AtomicBool = AtomicBool::new(false);
+/// Where the pointer was, and when, as Win went down: a Win key held while
+/// the mouse drags a window (window-drag tools) isn't a lone press.
+static WIN_AT: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+static WIN_SINCE: AtomicU32 = AtomicU32::new(0);
 
 /// An unassigned virtual key, used only to "break" a lone Win or Alt press.
 const MASK_KEY: u16 = 0xE8;
@@ -187,6 +191,25 @@ fn track(flag: &AtomicBool, down: bool, up: bool) {
     }
 }
 
+fn cursor() -> POINT {
+    let mut p = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut p) };
+    p
+}
+
+/// Whether the mouse was used while Win was held (a window-drag tool's
+/// Win+drag): a button is still down, or the pointer travelled while the key
+/// was held for longer than a tap.
+fn mouse_used(now: u32) -> bool {
+    let button = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON]
+        .iter()
+        .any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0);
+    let p = cursor();
+    let (dx, dy) = (p.x - WIN_AT[0].load(Ordering::Relaxed), p.y - WIN_AT[1].load(Ordering::Relaxed));
+    let held = now.wrapping_sub(WIN_SINCE.load(Ordering::Relaxed));
+    button || (held > 200 && dx * dx + dy * dy > 12 * 12)
+}
+
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
@@ -197,7 +220,13 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let vk = k.vkCode as u16;
         let is_win = vk == VK_LWIN.0 || vk == VK_RWIN.0;
         let is_alt = vk == VK_LMENU.0 || vk == VK_RMENU.0;
-        if !injected {
+        if injected {
+            // Window-drag tools press a key of their own while Win is held,
+            // to keep Windows' Start menu shut: that makes it a combination.
+            if down && !is_win && vk != MASK_KEY && WIN_DOWN.load(Ordering::Relaxed) {
+                COMBO.store(true, Ordering::Relaxed);
+            }
+        } else {
             if is_alt {
                 track(&ALT_DOWN, down, up);
             } else if vk == VK_LCONTROL.0 || vk == VK_RCONTROL.0 {
@@ -291,13 +320,17 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if (!WIN_DOWN.load(Ordering::Relaxed) || stale) && handled_here() {
                         WIN_DOWN.store(true, Ordering::Relaxed);
                         COMBO.store(false, Ordering::Relaxed);
+                        let p = cursor();
+                        WIN_AT[0].store(p.x, Ordering::Relaxed);
+                        WIN_AT[1].store(p.y, Ordering::Relaxed);
+                        WIN_SINCE.store(k.time, Ordering::Relaxed);
                         // Break the lone Win now, while it's held; the real
                         // release then passes through untouched.
                         mask_tap();
                     }
                 } else if is_win && up {
                     let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
-                    if was_down && !COMBO.load(Ordering::Relaxed) {
+                    if was_down && !COMBO.load(Ordering::Relaxed) && !mouse_used(k.time) {
                         // The mask tap at key-down can land before Windows has
                         // registered the Win press, and then its Start menu
                         // opens too. Send another one right before the release,
@@ -326,9 +359,10 @@ pub const TAB_BIT: u32 = 1 << 26;
 pub fn shortcuts(cfg: &crate::config::Config) -> u32 {
     let bit = |c: u8, on: bool| if on { 1u32 << (c - b'A') } else { 0 };
     bit(b'X', cfg.shortcut_win_x)
-        // The widgets panel opens from Cascade's taskbar, and Controls are in the notch.
+        // The widgets panel opens from Cascade's taskbar. Controls come down
+        // from the notch, or on their own with the notch off.
         | bit(b'N', cfg.shortcut_win_n && cfg.dock)
-        | bit(b'A', cfg.shortcut_win_a && cfg.notch)
+        | bit(b'A', cfg.shortcut_win_a)
         | bit(b'V', cfg.shortcut_win_v)
         | if cfg.shortcut_win_tab { TAB_BIT } else { 0 }
 }

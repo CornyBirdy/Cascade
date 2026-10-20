@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::{self, Visualizer, Volume, BANDS};
 use crate::backdrop::{self, Backdrop};
 use crate::brightness;
+use crate::bt;
 use crate::calendar;
 use crate::clipboard::{self, ClipCmd, ClipMenu};
 use crate::config::{self, Config};
@@ -97,6 +98,8 @@ const TIMER_PASTE: usize = 20;
 /// The next moment the calendar needs a look: a countdown to show or step,
 /// or an event starting.
 const TIMER_CAL: usize = 21;
+/// Started at sign-in before Explorer: looks for its taskbar until it's up.
+const TIMER_SHELL: usize = 22;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -250,6 +253,12 @@ enum Hot {
     WifiNet(usize),
     WifiSettings,
     WifiQuick,
+    /// The Bluetooth list (Controls): the chevron on the Bluetooth tile, its
+    /// back button, a device, and Windows' Bluetooth settings.
+    BtMore,
+    BtBack,
+    BtDev(usize),
+    BtSettings,
     /// Media: switch to the next app (or phone) with media.
     MediaSource,
 }
@@ -309,6 +318,9 @@ struct App {
     /// move on it at a gentler rate).
     dock_bars_at: Instant,
     last_frame: Instant,
+    /// The last frame ran at the screen's refresh rate: pace the next one
+    /// to the compositor.
+    vsync: bool,
     dirty: bool,
 
     view: View,
@@ -318,6 +330,9 @@ struct App {
     /// Opened from the taskbar's status icons rather than by hovering: stays
     /// open until a click elsewhere, or a while if the pointer never comes.
     pinned: bool,
+    /// With the notch turned off, it's brought up for Controls alone (from
+    /// the taskbar's status icons or Win+A) and goes again once it closes.
+    summoned: bool,
     tracking: bool,
     hovered: Option<Hot>,
     dragging: Option<Hot>,
@@ -343,6 +358,10 @@ struct App {
     wifi_tx: Sender<wifi::Cmd>,
     wifi: wifi::Report,
     wifi_open: bool,
+    /// The paired Bluetooth devices, shown in Controls' Bluetooth list while it's open.
+    bt_tx: Sender<bt::Cmd>,
+    bt: bt::Report,
+    bt_open: bool,
     pomo: Pomodoro,
     weather: Option<Weather>,
     visualizer: Visualizer,
@@ -434,7 +453,7 @@ struct App {
     drag: Option<(usize, usize, Instant, bool)>,
     /// Windows' virtual desktops (see `desktops`).
     desks: Desktops,
-    /// Your calendar's events (this month and the next six weeks), the
+    /// Your calendar's events (last month to about three months ahead), the
     /// reader, the link it was last given, and what's been announced:
     /// (event start, 0 coming up / 1 starting).
     events: Vec<ics::Event>,
@@ -531,6 +550,17 @@ pub fn run() -> Result<()> {
                     DispatchMessageW(&m);
                 }
                 let wait = with_app(|a| a.frame()).unwrap_or(Duration::ZERO);
+                // Animating at the screen's rate: wait for the compositor's
+                // next frame, so motion steps evenly with the refresh instead
+                // of drifting against it. If it comes back at once (nothing
+                // for it to compose) the timer below paces it instead.
+                if with_app(|a| a.vsync).unwrap_or(false) {
+                    let t = Instant::now();
+                    let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                    if t.elapsed() >= Duration::from_millis(1) {
+                        continue;
+                    }
+                }
                 if !wait.is_zero() {
                     let due = -((wait.as_nanos() / 100) as i64);
                     if SetWaitableTimer(timer, &due, 0, None, None, false).is_ok() {
@@ -732,6 +762,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::BLUETOOTH => {
+            let report = Box::from_raw(lp.0 as *mut bt::Report);
+            with_app(move |a| {
+                a.bt = *report;
+                a.dirty = true;
+                if a.bt_open {
+                    a.retarget();
+                }
+            });
+            return LRESULT(0);
+        }
         msg::NOTIFS => {
             let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
             with_app(move |a| {
@@ -835,7 +876,7 @@ fn date_at(t: i64, format: PCWSTR) -> String {
 }
 
 /// The time of day of `t`, as the clock shows it ("10:30", "10:30 am").
-fn time_at(t: i64) -> String {
+pub(crate) fn time_at(t: i64) -> String {
     let st = calendar::system_time(t);
     let mut b = [0u16; 32];
     unsafe {
@@ -992,12 +1033,14 @@ impl App {
             dock_bars: false,
             dock_bars_at: Instant::now(),
             last_frame: Instant::now(),
+            vsync: false,
             dirty: true,
             view: View::Idle,
             mode: Mode::Media,
             expanded: false,
             expand_pending: false,
             pinned: false,
+            summoned: false,
             tracking: false,
             hovered: None,
             dragging: None,
@@ -1020,6 +1063,9 @@ impl App {
             wifi_tx: wifi::spawn(),
             wifi: wifi::Report::default(),
             wifi_open: false,
+            bt_tx: bt::spawn(),
+            bt: bt::Report::default(),
+            bt_open: false,
             pomo: Pomodoro::new(cfg.focus_minutes, cfg.break_minutes),
             weather: None,
             visualizer: Visualizer::default(),
@@ -1084,6 +1130,15 @@ impl App {
     }
 
     fn start(&mut self) {
+        let ready = shell::shell_ready();
+        config::log(&format!("started (Explorer's taskbar up: {ready})"));
+        if !ready {
+            // Signed in a moment ago: Explorer is still on its way. Its
+            // TaskbarCreated says when it's up; this is in case that's missed.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_SHELL, 1000, None);
+            }
+        }
         shell::ensure_shortcuts();
         launcher::spawn_scan();
         crate::drop::register(self.dock.hwnd, 0);
@@ -1271,17 +1326,7 @@ impl App {
         mouseedge::raise();
         let want_tray = self.cfg.dock && self.cfg.tray_icons;
         match (want_tray, self.systray.hwnd) {
-            (true, None) => {
-                self.systray.hwnd = systray::start(self.instance);
-                self.tray_rect = RECT::default();
-                // Apps still starting (or Explorer, at sign-in) miss the first
-                // announcement: ask again a few times.
-                self.tray_announced = Some(Instant::now());
-                self.tray_syncs = 3;
-                unsafe {
-                    SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 4000, None);
-                }
-            }
+            (true, None) => self.start_systray(),
             (false, Some(h)) => {
                 systray::stop(h);
                 self.systray = Systray::default();
@@ -1295,6 +1340,69 @@ impl App {
             self.preview.hide();
         }
         self.arm_clock();
+    }
+
+    /// Puts Cascade's hidden tray window in front of Explorer's. Not before
+    /// Explorer's taskbar is up: a window of its class already there at
+    /// sign-in can stop Explorer starting as the desktop, and it would have
+    /// nothing to pass the icons on to anyway. TaskbarCreated tries again.
+    fn start_systray(&mut self) {
+        if self.systray.hwnd.is_some() || !shell::shell_ready() {
+            return;
+        }
+        self.systray.hwnd = systray::start(self.instance);
+        self.tray_rect = RECT::default();
+        // Apps still starting (or Explorer, at sign-in) miss the first
+        // announcement: ask again a few times.
+        self.tray_announced = Some(Instant::now());
+        self.tray_syncs = 3;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 4000, None);
+        }
+    }
+
+    /// A fullscreen app came to the front (true) or went.
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        self.retarget();
+        self.show_docks();
+        self.sync_visualizer();
+        if self.fullscreen {
+            self.preview.hide();
+        }
+        mouseedge::pause(self.fullscreen);
+        mouseedge::raise();
+        self.arm_stats();
+    }
+
+    /// Explorer made its taskbar: at sign-in, or after it restarted.
+    fn on_shell_ready(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_SHELL);
+        }
+        if let Some(t) = &self.tray {
+            t.add();
+        }
+        // App bars registered before Explorer was up went nowhere, so the
+        // shell never says when fullscreen apps come and go: register again,
+        // and don't stay hidden for a fullscreen app that was never there.
+        shell::register_appbar(self.hwnd);
+        let fullscreen = shell::fullscreen_now();
+        if fullscreen != self.fullscreen {
+            self.set_fullscreen(fullscreen);
+        }
+        if self.taskbar_hidden {
+            shell::hide_taskbar();
+        }
+        self.hook_taskbar();
+        self.update_display();
+        self.configure_docks();
+        self.show_docks();
+        if self.cfg.dock && self.cfg.tray_icons {
+            self.start_systray();
+        }
+        self.apply_flyout();
+        self.retarget();
     }
 
     // ------------------------------------------------------------ state --
@@ -1359,6 +1467,7 @@ impl App {
                 Mode::Media if self.media.is_some() => (420.0, 148.0 + TAB_BAR, 30.0),
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
                 Mode::Controls if self.wifi_open => (420.0, self.wifi_layout().total + TAB_BAR, 30.0),
+                Mode::Controls if self.bt_open => (420.0, self.bt_layout().total + TAB_BAR, 30.0),
                 Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
                 Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
@@ -1368,11 +1477,12 @@ impl App {
 
     /// Re-derives the view and animation targets after any state change.
     fn retarget(&mut self) {
-        // The Wi-Fi list closes with the notch.
+        // The Wi-Fi and Bluetooth lists close with the notch.
         if !self.expanded {
             self.wifi_open = false;
+            self.bt_open = false;
         }
-        let visible = self.cfg.notch && !(self.cfg.hide_in_fullscreen && self.fullscreen);
+        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen);
         if visible != self.shown {
             self.shown = visible;
             unsafe {
@@ -1457,6 +1567,7 @@ impl App {
         if mode != self.mode {
             self.mode = mode;
             self.wifi_open = false;
+            self.bt_open = false;
             if mode == Mode::Controls {
                 self.read_mixer();
             }
@@ -1553,18 +1664,7 @@ impl App {
                 return Some(LRESULT(0));
             }
             match wp.0 as u32 {
-                ABN_FULLSCREENAPP => {
-                    self.fullscreen = lp.0 != 0;
-                    self.retarget();
-                    self.show_docks();
-                    self.sync_visualizer();
-                    if self.fullscreen {
-                        self.preview.hide();
-                    }
-                    mouseedge::pause(self.fullscreen);
-                    mouseedge::raise();
-                    self.arm_stats();
-                }
+                ABN_FULLSCREENAPP => self.set_fullscreen(lp.0 != 0),
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => {
                     self.dock.reposition();
                     mouseedge::raise();
@@ -1584,15 +1684,9 @@ impl App {
                     SetTimer(Some(self.hwnd), TIMER_TRAYSYNC, 500, None);
                 }
             }
-            if let Some(t) = &self.tray {
-                t.add();
+            if !echo {
+                self.on_shell_ready();
             }
-            shell::register_appbar(self.hwnd);
-            if self.taskbar_hidden {
-                shell::hide_taskbar();
-            }
-            self.hook_taskbar();
-            self.configure_docks();
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
@@ -1730,7 +1824,12 @@ impl App {
             }
             msg::RADIOS => {
                 let was = self.radios.wifi;
+                let bt_was = self.radios.bluetooth;
                 self.radios = Radios::unpack(wp.0);
+                // Bluetooth came on with its list open: the devices can connect now.
+                if self.bt_open && self.radios.bluetooth == Some(true) && bt_was != Some(true) {
+                    let _ = self.bt_tx.send(bt::Cmd::List);
+                }
                 // Wi-Fi just came on with the list open: see what's there.
                 if self.wifi_open && self.radios.wifi == Some(true) && was != Some(true) {
                     let _ = self.wifi_tx.send(wifi::Cmd::Scan);
@@ -1839,6 +1938,7 @@ impl App {
             return; // read before the link was taken away
         }
         self.events = events;
+        self.widgets.dirty = true;
         self.retarget();
         self.arm_calendar();
     }
@@ -1971,6 +2071,10 @@ impl App {
     }
 
     fn on_media(&mut self, info: Option<MediaInfo>) {
+        if let Some(m) = &info {
+            // The bars follow the app that's playing, not everything.
+            self.visualizer.set_source(&m.source);
+        }
         self.media = info;
         // A new song, its art, or play / pause on the music widget.
         self.dock.dirty = true;
@@ -2075,6 +2179,10 @@ impl App {
     fn read_mixer(&mut self) {
         self.outputs_open = false;
         self.mixer = if self.cfg.controls_mixer { Mixer::read() } else { Mixer::default() };
+        // And the Bluetooth tile names what's connected.
+        if self.radios.bluetooth == Some(true) {
+            let _ = self.bt_tx.send(bt::Cmd::List);
+        }
     }
 
     /// The mixer's rows: the output (and the list of them when open), then
@@ -2223,6 +2331,27 @@ impl App {
                 let _ = self.wifi_tx.send(wifi::Cmd::Scan);
             }
             Hot::WifiBack => self.wifi_open = false,
+            Hot::BtMore => {
+                self.bt_open = true;
+                self.bt.note = None;
+                let _ = self.bt_tx.send(bt::Cmd::List);
+            }
+            Hot::BtBack => self.bt_open = false,
+            Hot::BtDev(i) => match self.bt.devices.get(i) {
+                Some(d) if d.audio && self.radios.bluetooth != Some(false) => {
+                    let _ = self.bt_tx.send(bt::Cmd::Set(d.name.clone(), !d.connected));
+                }
+                // Mice, keyboards and the like connect by themselves.
+                Some(_) => {
+                    shell::open("ms-settings:bluetooth");
+                    self.expanded = false;
+                }
+                None => {}
+            },
+            Hot::BtSettings => {
+                shell::open("ms-settings:bluetooth");
+                self.expanded = false;
+            }
             Hot::WifiNet(i) => {
                 if let Some(n) = self.wifi.nets.get(i).filter(|n| !n.connected) {
                     self.wifi.note = Some(format!("Joining {}\u{2026}", n.ssid));
@@ -2304,6 +2433,11 @@ impl App {
                 }
             }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
+            TIMER_SHELL => {
+                if shell::shell_ready() {
+                    self.on_shell_ready();
+                }
+            }
             TIMER_KEYFIX => keyhook::fix_stuck(),
             TIMER_NOTIFS => {
                 if self.widgets.open && (self.cfg.widgets_notifications || self.widgets.shows_phone()) {
@@ -3280,17 +3414,21 @@ impl App {
         if self.just_closed() {
             return; // that click already closed the notch
         }
-        if self.cfg.status_click != "notch" || !self.shown {
+        if self.cfg.status_click != "notch" || !self.open_controls() {
             shell::open("ms-actioncenter:controlcenter/&showFooter=true");
-            return;
         }
-        self.open_controls();
     }
 
-    /// Opens the notch on its Controls.
-    fn open_controls(&mut self) {
+    /// Opens the notch on its Controls; with the notch turned off it comes
+    /// down for them alone. False if it can't show (a fullscreen app).
+    fn open_controls(&mut self) -> bool {
+        if !self.shown && !self.cfg.notch {
+            self.summoned = true;
+            self.retarget();
+        }
         if !self.shown {
-            return;
+            self.summoned = false;
+            return false;
         }
         self.expanded = true;
         self.expand_pending = false;
@@ -3306,6 +3444,7 @@ impl App {
             SetTimer(Some(self.hwnd), TIMER_COLLAPSE, PINNED_MS, None);
         }
         self.retarget();
+        true
     }
 
     /// Redraws the taskbar clock at the start of each minute (and not more).
@@ -3560,6 +3699,10 @@ impl App {
                         self.widgets.hide();
                         shell::open("shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App");
                     }
+                    Some(widgets::Action::TaskManager) => {
+                        self.widgets.hide();
+                        shell::open("taskmgr.exe");
+                    }
                     None => {}
                 }
             }
@@ -3661,7 +3804,9 @@ impl App {
             b'X' => self.open_quick(true),
             b'N' => self.toggle_widgets(),
             b'A' if self.expanded && self.mode == Mode::Controls => self.on_timer(TIMER_COLLAPSE),
-            b'A' => self.open_controls(),
+            b'A' => {
+                self.open_controls();
+            }
             b'\t' => self.toggle_task_view(),
             b'V' => match &mut self.clips {
                 Some(c) if c.open => c.hide(),
@@ -4024,6 +4169,11 @@ impl App {
             let t = self.perf.start();
             let _ = self.render();
             self.perf.end(Surface::Notch, t);
+            // Brought up for Controls with the notch off: gone once it has closed.
+            if self.summoned && !self.expanded && self.w.settled() && self.h.settled() {
+                self.summoned = false;
+                self.retarget();
+            }
         }
         if self.dock.wants_frame() {
             fast |= self.dock.step(dt);
@@ -4114,6 +4264,7 @@ impl App {
                 art,
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
+                events: &self.events,
             };
             let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);
@@ -4165,6 +4316,9 @@ impl App {
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.
         let fps = if fast { self.cfg.max_fps } else { 60 }.min(self.refresh_hz).max(15);
+        // At the screen's own rate, wait for the compositor's next frame
+        // rather than a timer, so each step lands on a refresh (see `run`).
+        self.vsync = fps >= self.refresh_hz;
         Duration::from_secs_f64(1.0 / fps as f64).saturating_sub(now.elapsed())
     }
 
@@ -4363,6 +4517,17 @@ impl App {
                 }
             }
             Mode::Media => {}
+            Mode::Controls if self.bt_open => {
+                let l = self.bt_layout();
+                out.push((Hot::BtBack, 14.0, 14.0, 36.0, 34.0));
+                out.push((Hot::Bluetooth, tw - 18.0 - WIFI_SWITCH_W, 17.0, WIFI_SWITCH_W, 28.0));
+                for i in 0..l.rows {
+                    out.push((Hot::BtDev(i), 14.0, l.top + i as f32 * WIFI_ROW, tw - 28.0, WIFI_ROW));
+                }
+                let bw = (tw - 36.0 - 8.0) / 2.0;
+                out.push((Hot::BtSettings, 18.0, l.foot, bw, WIFI_BTN_H));
+                out.push((Hot::WifiQuick, 18.0 + bw + 8.0, l.foot, bw, WIFI_BTN_H));
+            }
             Mode::Controls if self.wifi_open => {
                 let l = self.wifi_layout();
                 out.push((Hot::WifiBack, 14.0, 14.0, 36.0, 34.0));
@@ -4379,6 +4544,10 @@ impl App {
                 // The Wi-Fi tile's chevron (opens the list) before the tile itself.
                 if self.radios.wifi.is_some() {
                     out.push((Hot::WifiMore, 18.0 + tile_w - WIFI_MORE_W, 14.0, WIFI_MORE_W, 54.0));
+                }
+                if self.radios.bluetooth.is_some() {
+                    let x = 18.0 + tile_w + 8.0 + tile_w - WIFI_MORE_W;
+                    out.push((Hot::BtMore, x, 14.0, WIFI_MORE_W, 54.0));
                 }
                 for (i, h) in [Hot::Wifi, Hot::Bluetooth, Hot::Notifications].into_iter().enumerate() {
                     out.push((h, 18.0 + i as f32 * (tile_w + 8.0), 14.0, tile_w, 54.0));
@@ -4898,9 +5067,108 @@ impl App {
         }
     }
 
+    /// Where the Bluetooth list's parts are (content-relative y), laid out
+    /// like the Wi-Fi list.
+    fn bt_layout(&self) -> WifiLayout {
+        let top = 60.0;
+        let rows = self.bt.devices.len().min(WIFI_ROWS);
+        let note = top + rows as f32 * WIFI_ROW + 4.0;
+        let note_h = if self.bt_note().is_some() { 24.0 } else { 0.0 };
+        let foot = note + note_h + 6.0;
+        WifiLayout { top, rows, note, foot, total: foot + WIFI_BTN_H + 14.0 }
+    }
+
+    /// The line under the Bluetooth list, if there's something to say.
+    fn bt_note(&self) -> Option<String> {
+        if self.radios.bluetooth == Some(false) {
+            return Some("Bluetooth is off.".into());
+        }
+        if let Some(n) = &self.bt.note {
+            return Some(n.clone());
+        }
+        if self.bt.loading && self.bt.devices.is_empty() {
+            return Some("Looking for your devices\u{2026}".into());
+        }
+        self.bt.devices.is_empty().then(|| "Nothing paired yet: add devices in Bluetooth settings.".into())
+    }
+
+    /// The name of the first connected Bluetooth device, for its tile.
+    fn bt_connected(&self) -> Option<&str> {
+        self.bt.devices.iter().find(|d| d.connected).map(|d| d.name.as_str())
+    }
+
+    /// Controls' Bluetooth list: back, the Bluetooth switch, your paired
+    /// devices (connected first; click one that plays sound to connect or
+    /// disconnect it), then Windows' own settings.
+    fn draw_bt(&self, p: &Painter, alpha: f32) {
+        let ox = self.origin;
+        let tw = self.content_w;
+        let fonts = &self.gfx.fonts;
+        let white = Color::white(0.95 * alpha);
+        let dim = Color::white(0.55 * alpha);
+        let l = self.bt_layout();
+        if self.hovered == Some(Hot::BtBack) {
+            p.rrect(ox + 14.0, 14.0, 36.0, 34.0, 10.0, Color::white(0.08 * alpha));
+        }
+        let (bx, by) = (ox + 34.0, 31.0);
+        p.line(bx + 3.0, by - 7.0, bx - 4.0, by, white, 1.8);
+        p.line(bx - 4.0, by, bx + 3.0, by + 7.0, white, 1.8);
+        p.text("Bluetooth", &fonts.title, ox + 58.0, 14.0, tw - 160.0, 34.0, Align::Left, white);
+        let on = self.radios.bluetooth == Some(true);
+        let (sx, sy) = (ox + tw - 18.0 - WIFI_SWITCH_W, 21.0);
+        p.rrect(
+            sx,
+            sy,
+            WIFI_SWITCH_W,
+            20.0,
+            10.0,
+            if on { theme::accent().alpha(alpha) } else { Color::white(0.18 * alpha) },
+        );
+        let knob = if on { sx + WIFI_SWITCH_W - 10.0 } else { sx + 10.0 };
+        p.circle(knob, sy + 10.0, 7.0, white);
+        for (i, d) in self.bt.devices.iter().take(l.rows).enumerate() {
+            let y = l.top + i as f32 * WIFI_ROW;
+            if self.hovered == Some(Hot::BtDev(i)) {
+                p.rrect(ox + 14.0, y + 1.0, tw - 28.0, WIFI_ROW - 2.0, 9.0, Color::white(0.07 * alpha));
+            }
+            let cy = y + WIFI_ROW / 2.0;
+            let c = if d.connected { theme::accent().alpha(alpha) } else { white };
+            device_glyph(p, ox + 32.0, cy, d.kind, c);
+            p.text(&d.name, &fonts.label, ox + 52.0, y, tw - 170.0, WIFI_ROW, Align::Left, white);
+            let hovered = self.hovered == Some(Hot::BtDev(i));
+            let status = match (d.connected, d.audio && hovered && on) {
+                (true, true) => "Disconnect",
+                (false, true) => "Connect",
+                (true, false) => "Connected",
+                (false, false) => "",
+            };
+            if !status.is_empty() {
+                let c = if d.connected && !hovered { theme::accent().alpha(alpha) } else { dim };
+                p.text(status, &fonts.small, ox + tw - 26.0 - 96.0, y, 96.0, WIFI_ROW, Align::Right, c);
+            }
+        }
+        if let Some(note) = self.bt_note() {
+            p.text(&note, &fonts.small, ox + 20.0, l.note, tw - 40.0, 22.0, Align::Left, dim);
+        }
+        let bw = (tw - 36.0 - 8.0) / 2.0;
+        for (i, (hot, label)) in
+            [(Hot::BtSettings, "More Bluetooth settings"), (Hot::WifiQuick, "Windows quick settings")]
+                .into_iter()
+                .enumerate()
+        {
+            let x = ox + 18.0 + i as f32 * (bw + 8.0);
+            let fill = if self.hovered == Some(hot) { 0.13 } else { 0.08 };
+            p.rrect(x, l.foot, bw, WIFI_BTN_H, 10.0, Color::white(fill * alpha));
+            p.text(label, &fonts.small, x, l.foot, bw, WIFI_BTN_H, Align::Center, white);
+        }
+    }
+
     fn draw_controls(&self, p: &Painter, alpha: f32) {
         if self.wifi_open {
             return self.draw_wifi(p, alpha);
+        }
+        if self.bt_open {
+            return self.draw_bt(p, alpha);
         }
         let ox = self.origin;
         let tw = self.content_w;
@@ -4930,20 +5198,27 @@ impl App {
             let joined = (hot == Hot::Wifi && state == Some(true))
                 .then(|| self.wifi.nets.iter().find(|n| n.connected).map(|n| n.ssid.as_str()))
                 .flatten();
+            let paired = (hot == Hot::Bluetooth && state == Some(true)).then(|| self.bt_connected()).flatten();
             let status = match (hot, state) {
                 (Hot::Notifications, _) => "Open",
                 (Hot::Wifi, Some(true)) if joined.is_some() => joined.unwrap_or("On"),
+                (Hot::Bluetooth, Some(true)) if paired.is_some() => paired.unwrap_or("On"),
                 (_, Some(true)) => "On",
                 (_, Some(false)) => "Off",
                 (_, None) => "Unavailable",
             };
-            let text_w =
-                if hot == Hot::Wifi && state.is_some() { tile_w - 50.0 - WIFI_MORE_W + 8.0 } else { tile_w - 50.0 };
+            // The Wi-Fi and Bluetooth tiles have a chevron that opens their list.
+            let more = match hot {
+                Hot::Wifi if state.is_some() => Some(Hot::WifiMore),
+                Hot::Bluetooth if state.is_some() => Some(Hot::BtMore),
+                _ => None,
+            };
+            let text_w = if more.is_some() { tile_w - 50.0 - WIFI_MORE_W + 8.0 } else { tile_w - 50.0 };
             p.text(label, &fonts.label, x + 46.0, y + 9.0, text_w, 18.0, Align::Left, white);
             p.text(status, &fonts.small, x + 46.0, y + 27.0, text_w, 16.0, Align::Left, Color::white(0.55 * alpha));
-            if hot == Hot::Wifi && state.is_some() {
+            if let Some(more) = more {
                 let mx = x + tile_w - WIFI_MORE_W;
-                if self.hovered == Some(Hot::WifiMore) {
+                if self.hovered == Some(more) {
                     p.rrect(mx + 2.0, y + 6.0, WIFI_MORE_W - 6.0, 42.0, 10.0, Color::white(0.10 * alpha));
                 }
                 let (cx, cy, c) = (mx + WIFI_MORE_W / 2.0 - 1.0, y + 27.0, Color::white(0.75 * alpha));
@@ -5400,6 +5675,34 @@ fn bluetooth(p: &Painter, cx: f32, cy: f32, c: Color) {
     ];
     for w in pts.windows(2) {
         p.line(w[0].0, w[0].1, w[1].0, w[1].1, c, 1.6);
+    }
+}
+
+/// A small picture of a Bluetooth device's kind: headphones, a mouse, a phone,
+/// or the Bluetooth mark.
+fn device_glyph(p: &Painter, cx: f32, cy: f32, kind: bt::Kind, c: Color) {
+    match kind {
+        bt::Kind::Audio => {
+            // A headband over two ear cups.
+            let pts: Vec<(f32, f32)> = (0..=8)
+                .map(|i| std::f32::consts::PI * (1.0 + i as f32 / 8.0))
+                .map(|t| (cx + 6.5 * t.cos(), cy + 1.0 + 7.0 * t.sin()))
+                .collect();
+            for w in pts.windows(2) {
+                p.line(w[0].0, w[0].1, w[1].0, w[1].1, c, 1.5);
+            }
+            p.rrect(cx - 8.0, cy + 1.0, 4.0, 6.5, 1.5, c);
+            p.rrect(cx + 4.0, cy + 1.0, 4.0, 6.5, 1.5, c);
+        }
+        bt::Kind::Input => {
+            p.stroke_rrect(cx - 4.5, cy - 7.0, 9.0, 14.0, 4.5, c, 1.4);
+            p.line(cx, cy - 7.0, cx, cy - 2.5, c, 1.2);
+        }
+        bt::Kind::Phone => {
+            p.stroke_rrect(cx - 4.5, cy - 7.5, 9.0, 15.0, 2.0, c, 1.4);
+            p.line(cx - 1.5, cy + 5.0, cx + 1.5, cy + 5.0, c, 1.2);
+        }
+        bt::Kind::Other => bluetooth(p, cx, cy, c),
     }
 }
 

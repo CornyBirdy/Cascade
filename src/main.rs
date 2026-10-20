@@ -7,6 +7,7 @@ compile_error!("Cascade is a Windows app.");
 mod audio;
 mod backdrop;
 mod brightness;
+mod bt;
 mod calendar;
 mod clipboard;
 mod config;
@@ -92,6 +93,8 @@ pub mod msg {
     pub const DESKTOPS: u32 = WM_APP + 28;
     /// Wi-Fi networks in range (a boxed `wifi::Report`).
     pub const WIFI: u32 = WM_APP + 29;
+    /// Paired Bluetooth devices (a boxed `bt::Report`).
+    pub const BLUETOOTH: u32 = WM_APP + 30;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

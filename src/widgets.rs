@@ -15,6 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
+use crate::ics::{self, Event, DAY};
 use crate::media::MediaInfo;
 use crate::notifications::{Access, Snapshot};
 use crate::spring::Spring;
@@ -44,14 +45,12 @@ enum Card {
     Phone,
 }
 
-/// Phone Link's AppUserModelID prefix (the app was once called Your Phone).
-const PHONE_LINK: &str = "Microsoft.YourPhone";
 /// How many of the phone's notifications the Phone card lists.
 const PHONE_MAX: usize = 3;
 
 /// Whether a notification came from your phone, through Phone Link.
 pub fn from_phone(aumid: &str) -> bool {
-    aumid.starts_with(PHONE_LINK)
+    crate::media::is_phone(aumid)
 }
 
 /// "media,system" -> the cards, in that order (unknown names and repeats ignored).
@@ -85,6 +84,13 @@ enum Target {
     NotifRemove(u32),
     NotifSettings,
     OpenPhoneLink,
+    /// The System card (opens Task Manager).
+    System,
+    /// The calendar card's month arrows (-1, +1), its title (back to this
+    /// month) and a day (days since 1970).
+    CalMonth(i32),
+    CalToday,
+    CalDay(i64),
 }
 
 pub enum Action {
@@ -98,6 +104,7 @@ pub enum Action {
     RemoveNotification(u32),
     NotificationSettings,
     OpenPhoneLink,
+    TaskManager,
 }
 
 /// What the cards show.
@@ -109,6 +116,8 @@ pub struct Ctx<'a> {
     pub art: Option<ID2D1Bitmap>,
     pub weather: Option<&'a Weather>,
     pub notifs: &'a Snapshot,
+    /// Your calendar's events (see `calendar`).
+    pub events: &'a [Event],
 }
 
 pub struct Widgets {
@@ -133,7 +142,15 @@ pub struct Widgets {
     opacity: f32,
     radius: f32,
     pub dirty: bool,
+    /// The calendar card's month, as months from this one, and the day
+    /// picked on it (None: today).
+    cal_month: i32,
+    cal_day: Option<i64>,
 }
+
+/// The calendar card's events listed for a day at most.
+const CAL_EVENTS: usize = 4;
+const CAL_ROW: f32 = 22.0;
 
 fn fmt_time(d: Duration) -> String {
     let s = d.as_secs();
@@ -186,7 +203,7 @@ fn spark(p: &Painter, hist: &VecDeque<f32>, x: f32, y: f32, w: f32, h: f32, max:
     }
 }
 
-fn card_height(card: Card, ctx: &Ctx) -> f32 {
+fn card_height(card: Card, ctx: &Ctx, cal_rows: usize) -> f32 {
     match card {
         Card::Notifications => {
             let rows = match ctx.notifs.access {
@@ -206,7 +223,7 @@ fn card_height(card: Card, ctx: &Ctx) -> f32 {
             34.0 + rows as f32 * 44.0 + 6.0
         }
         Card::Weather => 112.0,
-        Card::Calendar => 256.0,
+        Card::Calendar => 256.0 + if cal_rows > 0 { 12.0 + cal_rows as f32 * CAL_ROW } else { 0.0 },
         Card::Phone => {
             let rows = phone_items(ctx).count().clamp(1, PHONE_MAX);
             34.0 + rows as f32 * NOTIF_ROW + 40.0
@@ -247,6 +264,8 @@ impl Widgets {
             opacity: 0.55,
             radius: 8.0,
             dirty: false,
+            cal_month: 0,
+            cal_day: None,
         }
     }
 
@@ -282,6 +301,9 @@ impl Widgets {
         self.open = true;
         self.hovered = None;
         if !self.visible {
+            // Opened afresh: back to today on the calendar.
+            self.cal_month = 0;
+            self.cal_day = None;
             self.visible = true;
             self.reveal.snap(0.0);
             unsafe {
@@ -343,6 +365,28 @@ impl Widgets {
     }
 
     pub fn on_click(&mut self, x: i32, y: i32) -> Option<Action> {
+        // The calendar card works by itself.
+        match self.hit(x, y)? {
+            Target::CalMonth(d) => {
+                self.cal_month += d;
+                self.cal_day = None;
+                self.dirty = true;
+                return None;
+            }
+            Target::CalToday => {
+                self.cal_month = 0;
+                self.cal_day = None;
+                self.dirty = true;
+                return None;
+            }
+            Target::CalDay(d) => {
+                // A second click on the picked day goes back to today.
+                self.cal_day = if self.cal_day == Some(d) { None } else { Some(d) };
+                self.dirty = true;
+                return None;
+            }
+            _ => {}
+        }
         Some(match self.hit(x, y)? {
             Target::Prev => Action::Previous,
             Target::Play => Action::PlayPause,
@@ -353,6 +397,8 @@ impl Widgets {
             Target::NotifRemove(id) => Action::RemoveNotification(id),
             Target::NotifSettings => Action::NotificationSettings,
             Target::OpenPhoneLink => Action::OpenPhoneLink,
+            Target::System => Action::TaskManager,
+            Target::CalMonth(_) | Target::CalToday | Target::CalDay(_) => return None,
         })
     }
 
@@ -378,7 +424,8 @@ impl Widgets {
         for &card in &self.cards {
             // The shorter column takes the next card.
             let c = (0..cols).min_by(|&a, &b| col_y[a].total_cmp(&col_y[b])).unwrap_or(0);
-            let h = card_height(card, ctx);
+            let rows = if card == Card::Calendar { self.cal_rows(ctx) } else { 0 };
+            let h = card_height(card, ctx, rows);
             out.push((card, PAD + c as f32 * (CARD_W + GAP), col_y[c], h));
             col_y[c] += h + GAP;
         }
@@ -446,9 +493,16 @@ impl Widgets {
                 match card {
                     Card::Notifications => self.notifications_card(&p, f, ctx, cx, cy),
                     Card::Media => self.media_card(&p, f, ctx, cx, cy),
-                    Card::System => system_card(&p, f, ctx, cx, cy),
+                    Card::System => {
+                        // The whole card opens Task Manager.
+                        if self.hovered == Some(Target::System) {
+                            p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.04));
+                        }
+                        system_card(&p, f, ctx, cx, cy);
+                        self.hits.push((Target::System, cx, cy, CARD_W, ch));
+                    }
                     Card::Weather => weather_card(&p, f, ctx, cx, cy),
-                    Card::Calendar => calendar_card(&p, f, cx, cy),
+                    Card::Calendar => self.calendar_card(&p, f, ctx, cx, cy),
                     Card::Phone => self.phone_card(&p, f, ctx, cx, cy, ch),
                 }
             }
@@ -730,27 +784,149 @@ fn weather_card(p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
     p.text(&wx.place, &f.small, x + 14.0, y + 8.0, CARD_W - 28.0, 16.0, Align::Right, Color::white(0.55));
 }
 
-fn calendar_card(p: &Painter, f: &Fonts, x: f32, y: f32) {
-    let now = unsafe { GetLocalTime() };
-    let title = format!("{} {}", MONTHS[(now.wMonth.clamp(1, 12) - 1) as usize], now.wYear);
-    p.text(&title, &f.label, x + 14.0, y + 6.0, CARD_W - 28.0, 26.0, Align::Left, Color::white(0.9));
-    // Weeks start on Monday.
-    let today = (now.wDayOfWeek as i32 + 6) % 7;
-    let first = (today - (now.wDay as i32 - 1)).rem_euclid(7);
-    let (cell, top) = ((CARD_W - 28.0) / 7.0, y + 36.0);
-    for (i, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-        p.text(d, &f.small, x + 14.0 + i as f32 * cell, top, cell, 20.0, Align::Center, Color::white(0.45));
+/// The (year, month) `offset` months from the one `now` is in.
+fn month_from(now: &windows::Win32::Foundation::SYSTEMTIME, offset: i32) -> (i32, u32) {
+    let n = now.wYear as i32 * 12 + now.wMonth.clamp(1, 12) as i32 - 1 + offset;
+    (n.div_euclid(12), (n.rem_euclid(12) + 1) as u32)
+}
+
+/// The days (since 1970) `e` takes up.
+fn event_days(e: &Event) -> std::ops::RangeInclusive<i64> {
+    let last = if e.end > e.start { (e.end - 1).div_euclid(DAY) } else { e.start.div_euclid(DAY) };
+    e.start.div_euclid(DAY)..=last
+}
+
+/// What's on `day`, in order.
+fn events_on(events: &[Event], day: i64) -> Vec<&Event> {
+    let mut on: Vec<&Event> = events.iter().filter(|e| event_days(e).contains(&day)).collect();
+    on.sort_by_key(|e| (!e.all_day, e.start));
+    on
+}
+
+impl Widgets {
+    /// The day the calendar card lists events for: the one picked, else today.
+    fn cal_selected(&self) -> i64 {
+        self.cal_day.unwrap_or_else(|| crate::calendar::now().div_euclid(DAY))
     }
-    for day in 1..=days_in_month(now.wYear, now.wMonth) {
-        let slot = first + day as i32 - 1;
-        let (col, row) = ((slot % 7) as f32, (slot / 7) as f32);
-        let (cx, cy) = (x + 14.0 + col * cell + cell / 2.0, top + 30.0 + row * 31.0);
-        let is_today = day == now.wDay;
-        if is_today {
-            p.circle(cx, cy, 13.0, theme::accent());
+
+    /// Rows of events under the calendar card's month: the picked day's
+    /// (a "nothing on" row if it has none), or today's while it has some.
+    fn cal_rows(&self, ctx: &Ctx) -> usize {
+        let n = events_on(ctx.events, self.cal_selected()).len().min(CAL_EVENTS);
+        if self.cal_day.is_some() {
+            n.max(1)
+        } else {
+            n
         }
-        let c = if is_today { Color::white(1.0) } else { Color::white(0.85) };
-        p.text(&day.to_string(), &f.body, cx - cell / 2.0, cy - 12.0, cell, 24.0, Align::Center, c);
+    }
+
+    /// The month (arrows to step through months, the title back to this one),
+    /// a dot on days with events, and the picked day's events under it.
+    fn calendar_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
+        let now = unsafe { GetLocalTime() };
+        let (year, month) = month_from(&now, self.cal_month);
+        let title = format!("{} {}", MONTHS[(month - 1) as usize], year);
+        let tw = 200.0;
+        if self.hovered == Some(Target::CalToday) && self.cal_month != 0 {
+            p.rrect(x + 8.0, y + 6.0, tw - 40.0, 26.0, 6.0, Color::white(0.08));
+        }
+        p.text(&title, &f.label, x + 14.0, y + 6.0, tw, 26.0, Align::Left, Color::white(0.9));
+        self.hits.push((Target::CalToday, x + 8.0, y + 6.0, tw - 40.0, 26.0));
+        if self.cal_month != 0 {
+            let back = "Today";
+            let (bx, bw) = (x + CARD_W - 14.0 - 56.0 - 64.0, 56.0);
+            let a = if self.hovered == Some(Target::CalToday) { 0.16 } else { 0.09 };
+            p.rrect(bx, y + 8.0, bw, 22.0, 6.0, Color::white(a));
+            p.text(back, &f.small, bx, y + 8.0, bw, 22.0, Align::Center, Color::white(0.85));
+            self.hits.push((Target::CalToday, bx, y + 8.0, bw, 22.0));
+        }
+        // Month arrows.
+        for (d, cx) in [(-1, x + CARD_W - 52.0), (1, x + CARD_W - 24.0)] {
+            let t = Target::CalMonth(d);
+            let cy = y + 19.0;
+            if self.hovered == Some(t) {
+                p.circle(cx, cy, 12.0, Color::white(0.10));
+            }
+            let s = d as f32 * 3.0;
+            let c = Color::white(0.8);
+            p.line(cx - s, cy - 5.0, cx + s, cy, c, 1.5);
+            p.line(cx + s, cy, cx - s, cy + 5.0, c, 1.5);
+            self.hits.push((t, cx - 13.0, cy - 13.0, 26.0, 26.0));
+        }
+
+        // Weeks start on Monday.
+        let first_day = ics::days_from_civil(year, month, 1);
+        let first = ics::weekday(first_day) as i32;
+        let today = crate::calendar::now().div_euclid(DAY);
+        let picked = self.cal_day;
+        let busy: Vec<i64> = ctx.events.iter().flat_map(event_days).collect();
+        let (cell, top) = ((CARD_W - 28.0) / 7.0, y + 36.0);
+        for (i, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
+            p.text(d, &f.small, x + 14.0 + i as f32 * cell, top, cell, 20.0, Align::Center, Color::white(0.45));
+        }
+        for day in 1..=days_in_month(year as u16, month as u16) {
+            let slot = first + day as i32 - 1;
+            let (col, row) = ((slot % 7) as f32, (slot / 7) as f32);
+            let (cx, cy) = (x + 14.0 + col * cell + cell / 2.0, top + 30.0 + row * 31.0);
+            let date = first_day + day as i64 - 1;
+            let t = Target::CalDay(date);
+            let is_today = date == today;
+            if is_today {
+                p.circle(cx, cy, 13.0, theme::accent());
+            } else if picked == Some(date) {
+                p.circle(cx, cy, 13.0, Color::white(0.14));
+            } else if self.hovered == Some(t) {
+                p.circle(cx, cy, 13.0, Color::white(0.08));
+            }
+            if is_today && picked.is_some_and(|d| d != today) {
+                // Today stays marked while another day is picked.
+                p.stroke_circle(cx, cy, 13.0, Color::white(0.5), 1.0);
+            }
+            let weekend = col >= 5.0;
+            let c = match (is_today, weekend) {
+                (true, _) => Color::white(1.0),
+                (false, true) => Color::white(0.55),
+                _ => Color::white(0.85),
+            };
+            p.text(&day.to_string(), &f.body, cx - cell / 2.0, cy - 12.0, cell, 24.0, Align::Center, c);
+            if busy.contains(&date) {
+                let dot = if is_today { Color::white(1.0) } else { theme::accent() };
+                p.circle(cx, cy + 9.0, 1.7, dot);
+            }
+            self.hits.push((t, cx - cell / 2.0, cy - 14.0, cell, 28.0));
+        }
+
+        // The picked day's events (or today's).
+        let rows = self.cal_rows(ctx);
+        if rows == 0 {
+            return;
+        }
+        let sel = self.cal_selected();
+        let ly = y + 256.0;
+        p.rrect(x + 14.0, ly - 4.0, CARD_W - 28.0, 1.0, 0.0, Color::white(0.08));
+        let on = events_on(ctx.events, sel);
+        if on.is_empty() {
+            let label = if sel == today { "Nothing on today".to_string() } else { "Nothing on".to_string() };
+            p.text(&label, &f.small, x + 14.0, ly + 2.0, CARD_W - 28.0, CAL_ROW, Align::Left, Color::white(0.5));
+            return;
+        }
+        let now_t = crate::calendar::now();
+        for (i, e) in on.iter().take(CAL_EVENTS).enumerate() {
+            let ry = ly + 2.0 + i as f32 * CAL_ROW;
+            let live = e.start <= now_t && e.end > now_t;
+            let when = if e.all_day {
+                "All day".to_string()
+            } else if e.start.div_euclid(DAY) < sel {
+                "Continues".to_string()
+            } else {
+                crate::ui::time_at(e.start)
+            };
+            let c = if live { theme::accent() } else { Color::white(0.6) };
+            p.text(&when, &f.small, x + 14.0, ry, 76.0, CAL_ROW, Align::Left, c);
+            let what =
+                if e.location.is_empty() { e.title.clone() } else { format!("{} \u{b7} {}", e.title, e.location) };
+            p.text(&what, &f.small, x + 92.0, ry, CARD_W - 106.0, CAL_ROW, Align::Left, Color::white(0.92));
+        }
     }
 }
 
@@ -763,6 +939,15 @@ mod tests {
         assert!(parse_cards("media, system,Weather,bogus,media") == [Card::Media, Card::System, Card::Weather]);
         assert!(parse_cards("").is_empty());
         assert!(parse_cards("calendar,notifications") == [Card::Calendar, Card::Notifications]);
+    }
+
+    #[test]
+    fn months_step_across_years() {
+        let now = windows::Win32::Foundation::SYSTEMTIME { wYear: 2026, wMonth: 1, wDay: 15, ..Default::default() };
+        assert_eq!(month_from(&now, 0), (2026, 1));
+        assert_eq!(month_from(&now, -1), (2025, 12));
+        assert_eq!(month_from(&now, 12), (2027, 1));
+        assert_eq!(month_from(&now, -13), (2024, 12));
     }
 
     #[test]
