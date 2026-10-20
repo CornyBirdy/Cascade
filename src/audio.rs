@@ -15,6 +15,7 @@ use windows::core::{implement, w, Interface, Result, BOOL, GUID, HRESULT, PCWSTR
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, LPARAM, PROPERTYKEY};
 use windows::Win32::Media::Audio::Endpoints::*;
 use windows::Win32::Media::Audio::*;
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -272,24 +273,14 @@ unsafe fn app_client(pid: u32) -> Result<(IAudioClient, Format, Event)> {
             },
         },
     };
-    let raw = windows::core::imp::PROPVARIANT {
-        Anonymous: windows::core::imp::PROPVARIANT_0 {
-            Anonymous: windows::core::imp::PROPVARIANT_0_0 {
-                vt: VT_BLOB.0,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: windows::core::imp::PROPVARIANT_0_0_0 {
-                    blob: windows::core::imp::BLOB {
-                        cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: &mut params as *mut _ as *mut u8,
-                    },
-                },
-            },
-        },
-    };
-    // The blob points at `params` on this stack: never let it be freed.
-    let prop = std::mem::ManuallyDrop::new(windows::core::PROPVARIANT::from_raw(raw));
+    // A VT_BLOB holding `params`. It points at `params` on this stack, so it
+    // is never cleared. Laid out as Windows has it: the type, three reserved
+    // words, then the blob's size and pointer.
+    let mut prop = std::mem::ManuallyDrop::new(std::mem::zeroed::<PROPVARIANT>());
+    let raw = &mut *prop as *mut PROPVARIANT as *mut u8;
+    *(raw as *mut u16) = VT_BLOB.0;
+    *(raw.add(8) as *mut u32) = std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32;
+    *(raw.add(16) as *mut *mut u8) = &mut params as *mut _ as *mut u8;
     let done = Event(CreateEventW(None, false, false, PCWSTR::null())?);
     let handler: IActivateAudioInterfaceCompletionHandler = Activated(done.0 .0 as isize).into();
     let op = ActivateAudioInterfaceAsync(
