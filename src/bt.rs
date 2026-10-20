@@ -198,7 +198,9 @@ unsafe fn audio_endpoints() -> Vec<((String, String), String)> {
     let Ok(e) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else {
         return out;
     };
-    let Ok(all) = e.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED) else { return out };
+    let Ok(all) = e.EnumAudioEndpoints(eAll, DEVICE_STATE(DEVICE_STATE_ACTIVE.0 | DEVICE_STATE_UNPLUGGED.0)) else {
+        return out;
+    };
     for i in 0..all.GetCount().unwrap_or(0) {
         let Ok(d) = all.Item(i) else { continue };
         let Some(filter) = filter_of(&d) else { continue };
