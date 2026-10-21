@@ -492,6 +492,7 @@ fn rows(section: usize) -> Vec<Row> {
             heading("h_more", "Pop-ups, size and hover"),
             row("volume_osd", "Volume pop-up", "Show volume changes in the notch.", Toggle),
             row("brightness_osd", "Brightness pop-up", "Show brightness changes in the notch.", Toggle),
+            row("charge_osd", "Charger pop-up", "Show plugging the charger in or out, and the battery level.", Toggle),
             row(
                 "hide_windows_flyout",
                 "Hide the Windows flyout",
@@ -867,6 +868,8 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (2, "notch") => true,
         (2, _) if !on("notch") => false,
         (2, "lip_width" | "lip_height") => lip,
+        // Only a PC with a battery has a charger to plug in.
+        (2, "charge_osd") => on("battery"),
         (2, "idle_width") => !lip,
         // The line only shows on a slim strip, and only with Live activity.
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
@@ -950,6 +953,10 @@ fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, b
         }
         // Without the notch growing for music, the Media tab is all that's left.
         "visualizer" if lip || side || !on("live_activity") => ("Moving bars on the open notch's Media tab.", false),
+        "autostart" if on("autostart_late") => (
+            "Windows' startup list runs Cascade late. Turn this off and on again to start it as you sign in instead (Windows asks for permission once).",
+            true,
+        ),
         "shortcut_win_n" if !on("dock") => (taskbar_off, true),
         "shortcut_win_a" if !on("notch") => {
             ("The notch's Controls instead of Windows' quick settings. The notch is off, so they come down on their own.", false)

@@ -25,10 +25,25 @@
 //! still down (and checked again until it's up). Nothing is swallowed either
 //! while a program with admin rights is in front and Cascade has none:
 //! Windows quietly drops the keys Cascade sends it then, replacement and all.
+//! And if Windows still ends up thinking a Win key is held when the last Win
+//! key event was its release, the next key typed lets go of it first, so
+//! plain typing never turns into Win+ shortcuts.
+//!
+//! The hook runs on a thread of its own that does nothing else. Windows
+//! waits for a keyboard hook before every key reaches any app, and drops a
+//! hook that keeps it waiting too long; on the UI thread a busy moment
+//! (drawing, loading icons, a slow system call) would hold up typing, let a
+//! key slip past half-handled, or lose the hook altogether.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -88,7 +103,8 @@ fn handled_here() -> bool {
         if up {
             MAIN_SEEN.store(true, Ordering::Relaxed);
         } else if MAIN_SEEN.load(Ordering::Relaxed) {
-            unsafe { PostQuitMessage(0) };
+            // (This is the hook's thread: the helper's own loop is told.)
+            crate::helper::stop();
         }
         up
     } else {
@@ -101,7 +117,8 @@ pub fn set_helper_mode(hwnd: HWND) {
     HELPER_WINDOW.store(hwnd.0 as isize, Ordering::Relaxed);
 }
 
-static HOOK: AtomicIsize = AtomicIsize::new(0);
+/// The hook's thread (its id, to tell it to stop) while it's installed.
+static THREAD: Mutex<Option<(u32, JoinHandle<()>)>> = Mutex::new(None);
 static WIN_ON: AtomicBool = AtomicBool::new(false);
 /// The Win+letter shortcuts Cascade takes: bit n is the letter 'A' + n (and
 /// `TAB_BIT` is Win+Tab).
@@ -110,6 +127,9 @@ static SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 static HELD_SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 static TAB_ON: AtomicBool = AtomicBool::new(false);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
+/// The last Win key event to come by (anyone's, real or sent) was a press.
+/// Windows should think a Win key is held exactly while this is true.
+static WIN_LAST_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
@@ -147,7 +167,7 @@ fn key(vk: u16, up: bool) -> INPUT {
 pub fn fix_stuck() {
     let mut inputs = Vec::new();
     for (vk, tracked) in
-        [(VK_LWIN.0, &WIN_DOWN), (VK_RWIN.0, &WIN_DOWN), (VK_LMENU.0, &ALT_DOWN), (VK_RMENU.0, &ALT_DOWN)]
+        [(VK_LWIN.0, &WIN_LAST_DOWN), (VK_RWIN.0, &WIN_LAST_DOWN), (VK_LMENU.0, &ALT_DOWN), (VK_RMENU.0, &ALT_DOWN)]
     {
         // Really held right now? Then it isn't stuck.
         if !tracked.load(Ordering::Relaxed) && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0 {
@@ -157,7 +177,6 @@ pub fn fix_stuck() {
     if !inputs.is_empty() {
         unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
         // Check again that it took.
-        // The hook and these checks all run on the one thread.
         let left = CHECKS.load(Ordering::Relaxed);
         CHECKS.store(left.saturating_sub(1), Ordering::Relaxed);
         if left > 1 {
@@ -210,6 +229,59 @@ fn mouse_used(now: u32) -> bool {
     button || (held > 200 && dx * dx + dy * dy > 12 * 12)
 }
 
+fn held(keys: &[VIRTUAL_KEY]) -> bool {
+    keys.iter().any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0)
+}
+
+/// A release this hook never saw (it went to an admin app, or the sign-in
+/// screen took the keyboard) leaves a key looking held here, and then plain
+/// typing would look like Win+X or Alt+Tab. On any other key, a modifier
+/// Windows itself doesn't think is held is let go of here too.
+fn resync() {
+    for (flag, keys) in [
+        (&WIN_DOWN, [VK_LWIN, VK_RWIN]),
+        (&ALT_DOWN, [VK_LMENU, VK_RMENU]),
+        (&CTRL_DOWN, [VK_LCONTROL, VK_RCONTROL]),
+        (&SHIFT_DOWN, [VK_LSHIFT, VK_RSHIFT]),
+    ] {
+        if flag.load(Ordering::Relaxed) && !held(&keys) {
+            flag.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Windows thinks a Win key is held, though the last Win key event to come
+/// by was its release (one of Cascade's, or some other program's, got lost
+/// or overtaken on the way): the key `k` would make a Win+ shortcut out of
+/// plain typing. Lets go of Win first and sends `k` (a key press) on after
+/// it, as one batch. True if it did (and `k` itself is to be kept from
+/// Windows).
+unsafe fn unstick_win(k: &KBDLLHOOKSTRUCT) -> bool {
+    let stuck: Vec<u16> = [VK_LWIN, VK_RWIN].iter().filter(|&&w| held(&[w])).map(|w| w.0).collect();
+    if stuck.is_empty() || !handled_here() || crate::helper::foreground_above_us() {
+        return false;
+    }
+    let mut inputs: Vec<INPUT> = stuck.iter().map(|&w| key(w, true)).collect();
+    let flags = if k.flags.0 & LLKHF_EXTENDED.0 != 0 { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
+    inputs.push(INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(k.vkCode as u16),
+                wScan: k.scanCode as u16,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len();
+    if sent {
+        crate::config::log("keys: a Win key Windows thought was still held was let go");
+    }
+    sent
+}
+
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
@@ -220,6 +292,9 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let vk = k.vkCode as u16;
         let is_win = vk == VK_LWIN.0 || vk == VK_RWIN.0;
         let is_alt = vk == VK_LMENU.0 || vk == VK_RMENU.0;
+        if is_win {
+            track(&WIN_LAST_DOWN, down, up);
+        }
         if injected {
             // Window-drag tools press a key of their own while Win is held,
             // to keep Windows' Start menu shut: that makes it a combination.
@@ -233,6 +308,11 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 track(&CTRL_DOWN, down, up);
             } else if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 {
                 track(&SHIFT_DOWN, down, up);
+            } else if down && !is_win {
+                resync();
+                if !WIN_LAST_DOWN.load(Ordering::Relaxed) && held(&[VK_LWIN, VK_RWIN]) && unstick_win(k) {
+                    return LRESULT(1);
+                }
             }
 
             // Alt+Tab.
@@ -368,27 +448,58 @@ pub fn shortcuts(cfg: &crate::config::Config) -> u32 {
 }
 
 /// Turns the Win-key launcher, the Alt+Tab switcher and the Win+key
-/// `shortcuts` (see `shortcuts`) on or off, installing or removing the hook
-/// as needed. Must be called on the UI thread (the hook runs on the thread
-/// that installed it, through its message loop).
+/// `shortcuts` (see `shortcuts`) on or off, starting or stopping the hook's
+/// thread as needed.
 pub fn configure(win: bool, tab: bool, shortcuts: u32) {
     WIN_ON.store(win, Ordering::Relaxed);
     TAB_ON.store(tab, Ordering::Relaxed);
     SHORTCUTS.store(shortcuts, Ordering::Relaxed);
     let wanted = win || tab || shortcuts != 0;
-    let current = HOOK.load(Ordering::Relaxed);
-    unsafe {
-        if wanted && current == 0 {
-            if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
-                HOOK.store(h.0 as isize, Ordering::Relaxed);
+    let mut thread = THREAD.lock().unwrap_or_else(|e| e.into_inner());
+    if wanted && thread.is_none() {
+        *thread = start();
+    } else if !wanted {
+        if let Some((id, handle)) = thread.take() {
+            unsafe {
+                let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
-        } else if !wanted && current != 0 {
-            let _ = UnhookWindowsHookEx(HHOOK(current as *mut _));
-            HOOK.store(0, Ordering::Relaxed);
+            let _ = handle.join();
             WIN_DOWN.store(false, Ordering::Relaxed);
             ALT_DOWN.store(false, Ordering::Relaxed);
             TAB_ACTIVE.store(false, Ordering::Relaxed);
             HELD_SHORTCUTS.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Starts the hook's thread: it installs the hook, then only waits for keys
+/// (and the word to stop). None if the hook couldn't be installed.
+fn start() -> Option<(u32, JoinHandle<()>)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || unsafe {
+        // Keys are waiting on it: it goes first.
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        // For the shell's fullscreen check (Alt+Tab leaves games alone).
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut m = MSG::default();
+        // Makes its message queue, so it can be told to stop.
+        let _ = PeekMessageW(&mut m, None, 0, 0, PM_NOREMOVE);
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0).ok();
+        let id = GetCurrentThreadId();
+        let _ = tx.send(hook.is_some().then_some(id));
+        let Some(hook) = hook else { return };
+        // The hook is called from in here, as keys come.
+        while GetMessageW(&mut m, None, 0, 0).0 > 0 {
+            DispatchMessageW(&m);
+        }
+        let _ = UnhookWindowsHookEx(hook);
+    });
+    match rx.recv() {
+        Ok(Some(id)) => Some((id, handle)),
+        _ => {
+            let _ = handle.join();
+            crate::config::log("keys: the keyboard hook could not be installed");
+            None
         }
     }
 }

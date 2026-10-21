@@ -188,6 +188,44 @@ impl Chip {
     }
 }
 
+impl Chip {
+    /// Its name in `taskbar_left` / `taskbar_right`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Chip::Weather => "weather",
+            Chip::Music => "music",
+            Chip::Cpu => "cpu",
+            Chip::Ram => "ram",
+            Chip::Gpu => "gpu",
+            Chip::Net => "net",
+            Chip::Widgets => "widgets",
+            Chip::Desktops => "desktops",
+        }
+    }
+
+    /// What pointing at it is.
+    fn hot(self) -> Hot {
+        match self {
+            Chip::Weather => Hot::Weather,
+            Chip::Widgets => Hot::Widgets,
+            c => Hot::Chip(c),
+        }
+    }
+}
+
+impl Hot {
+    /// The widget this is (or is part of), if it's one.
+    fn chip(self) -> Option<Chip> {
+        match self {
+            Hot::Weather => Some(Chip::Weather),
+            Hot::Widgets => Some(Chip::Widgets),
+            Hot::MusicToggle => Some(Chip::Music),
+            Hot::Chip(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
 /// "weather, cpu" -> the widgets, in that order (unknown names and repeats ignored).
 fn parse_chips(list: &str) -> Vec<Chip> {
     let mut out = Vec::new();
@@ -350,7 +388,12 @@ pub struct Dock {
     hover_x: Option<f32>,
     pub hovered: Option<Hot>,
     pressed: Option<(Hot, i32)>,
+    /// The app being dragged to a new place.
     dragging: Option<usize>,
+    /// The widget being dragged to a new place (on its side or the other).
+    drag_chip: Option<Chip>,
+    /// The widgets were moved here, for the config to keep.
+    chips_changed: bool,
     tracking: bool,
     /// A pop-up from the taskbar (Start menu, tray flyout) is open, so
     /// auto-hide keeps it in view.
@@ -624,6 +667,8 @@ impl Dock {
             hovered: None,
             pressed: None,
             dragging: None,
+            drag_chip: None,
+            chips_changed: false,
             tracking: false,
             held: false,
             foreground: HWND::default(),
@@ -959,6 +1004,15 @@ impl Dock {
     }
 
     fn hide_window(&mut self) {
+        // Gone from under the pointer: no leave will come to clear the hover.
+        if self.pressed.is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
+        if self.hovered.is_some() || self.pressed.is_some() || self.tracking {
+            self.on_pointer_gone();
+        }
         for b in &mut self.backdrops {
             b.hide();
         }
@@ -1262,40 +1316,57 @@ impl Dock {
 
     // -------------------------------------------------------------- input --
 
+    /// Asks Windows for a `WM_MOUSELEAVE` once the pointer leaves (at once,
+    /// if it already has).
+    fn track(&mut self) {
+        if self.tracking {
+            return;
+        }
+        unsafe {
+            let mut t = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            self.tracking = TrackMouseEvent(&mut t).is_ok();
+        }
+    }
+
     /// Returns true when the hovered thing changed.
     pub fn on_move(&mut self, x: i32, y: i32) -> bool {
-        unsafe {
-            if !self.tracking {
-                let mut t = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: self.hwnd,
-                    dwHoverTime: 0,
-                };
-                self.tracking = TrackMouseEvent(&mut t).is_ok();
-            }
-        }
+        self.track();
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         self.hover_x = Some(lx);
-        if let Some((Hot::App(i), start)) = self.pressed {
-            if self.dragging.is_none() && (x - start).abs() > (6.0 * self.k) as i32 && self.apps[i].pinned {
-                self.dragging = Some(i);
-            }
-        }
-        if let Some(from) = self.dragging {
-            let to = self.geo.apps.iter().position(|s| s.contains(lx));
-            if let Some(to) = to {
-                if to != from && self.apps[to].pinned {
-                    let app = self.apps.remove(from);
-                    self.apps.insert(to, app);
-                    self.dragging = Some(to);
-                    self.pressed = Some((Hot::App(to), self.pressed.map_or(x, |p| p.1)));
+        // Pulled sideways far enough, a press becomes a drag: an app (pinned
+        // or running) among the apps, or a widget along the bar.
+        if let Some((h, start)) = self.pressed {
+            if self.dragging.is_none() && self.drag_chip.is_none() && (x - start).abs() > (6.0 * self.k) as i32 {
+                match h {
+                    Hot::App(i) if i < self.apps.len() => self.dragging = Some(i),
+                    h => self.drag_chip = h.chip(),
                 }
             }
         }
-        let hovered = match self.dragging {
-            Some(i) => Some(Hot::App(i)),
-            None => self.hit(lx, ly),
+        if let Some(from) = self.dragging {
+            let to = self.geo.apps.iter().position(|s| s.w > 4.0 && s.contains(lx));
+            if let Some(to) = to.filter(|&to| to != from && to < self.apps.len()) {
+                let app = self.apps.remove(from);
+                self.apps.insert(to, app);
+                self.dragging = Some(to);
+                self.pressed = Some((Hot::App(to), self.pressed.map_or(x, |p| p.1)));
+                self.dirty = true;
+            }
+        }
+        if let Some(c) = self.drag_chip {
+            if self.move_chip(c, lx) {
+                self.dirty = true;
+            }
+        }
+        let hovered = match (self.dragging, self.drag_chip) {
+            (Some(i), _) => Some(Hot::App(i)),
+            (_, Some(c)) => Some(c.hot()),
+            _ => self.hit(lx, ly),
         };
         let changed = hovered != self.hovered;
         self.hovered = hovered;
@@ -1305,6 +1376,45 @@ impl Dock {
         changed
     }
 
+    /// Moves widget `c`, being dragged, to where the pointer is (`lx`): onto
+    /// the side of the apps it's on, before the first widget there whose
+    /// middle is past it. True if that's a new place.
+    fn move_chip(&mut self, c: Chip, lx: f32) -> bool {
+        let g = &self.geo;
+        // The middle of Start, search and the apps divides the two sides.
+        let lo = if self.start_left {
+            g.search.map(|s| s.x).or_else(|| g.apps.first().map(|s| s.x)).unwrap_or(g.start.x)
+        } else {
+            g.start.x
+        };
+        let hi = g.apps.last().map(|s| s.x + s.w).or_else(|| g.search.map(|s| s.x + s.w)).unwrap_or(lo);
+        let left_side = lx < (lo + hi) / 2.0;
+        let shown = if left_side { &g.left } else { &g.right };
+        let before = shown.iter().find(|(x, s)| *x != c && s.centre() > lx).map(|(x, _)| *x);
+        let mut left: Vec<Chip> = self.left_cfg.iter().copied().filter(|&x| x != c).collect();
+        let mut right: Vec<Chip> = self.right_cfg.iter().copied().filter(|&x| x != c).collect();
+        let list = if left_side { &mut left } else { &mut right };
+        let at = before.and_then(|b| list.iter().position(|&x| x == b)).unwrap_or(list.len());
+        list.insert(at, c);
+        if left == self.left_cfg && right == self.right_cfg {
+            return false;
+        }
+        self.left_cfg = left;
+        self.right_cfg = right;
+        self.chips_changed = true;
+        true
+    }
+
+    /// The widgets' new places after one was dragged, as `taskbar_left` and
+    /// `taskbar_right` (once, once the drag is over).
+    pub fn take_chips(&mut self) -> Option<(String, String)> {
+        if self.drag_chip.is_some() || !std::mem::take(&mut self.chips_changed) {
+            return None;
+        }
+        let names = |l: &[Chip]| l.iter().map(|c| c.name()).collect::<Vec<_>>().join(",");
+        Some((names(&self.left_cfg), names(&self.right_cfg)))
+    }
+
     pub fn on_leave(&mut self) {
         self.tracking = false;
         if self.pressed.is_none() {
@@ -1312,6 +1422,28 @@ impl Dock {
             self.hovered = None;
         }
         self.dirty = true;
+    }
+
+    /// The press ended without a release reaching the taskbar (another
+    /// window took the mouse, or the button went up somewhere Windows didn't
+    /// tell it): ends any drag where it got to, and forgets the hover.
+    pub fn on_pointer_gone(&mut self) {
+        self.pressed = None;
+        self.drag_chip = None;
+        if self.dragging.take().is_some() {
+            self.save_pinned();
+        }
+        self.tracking = false;
+        self.hover_x = None;
+        self.hovered = None;
+        self.dirty = true;
+    }
+
+    /// Something else took the mouse while a button was down on the taskbar.
+    pub fn on_capture_lost(&mut self) {
+        if self.pressed.is_some() {
+            self.on_pointer_gone();
+        }
     }
 
     /// Mouse pressed at (x, y). What's under it is looked up again here, not
@@ -1337,13 +1469,22 @@ impl Dock {
     /// Mouse released at (x, y). Returns what was clicked: what it was
     /// pressed on, if it's still under the pointer.
     pub fn on_up(&mut self, x: i32, y: i32) -> Option<Hot> {
+        let pressed = self.pressed.take();
+        let dragged = self.dragging.take().is_some();
+        let moved_chip = self.drag_chip.take().is_some();
         unsafe {
             let _ = ReleaseCapture();
         }
-        let pressed = self.pressed.take();
+        // While the mouse was captured, leaving went unsaid: ask again, so a
+        // pointer that's no longer here drops the hover (and its tooltip).
+        self.tracking = false;
+        self.track();
         self.dirty = true;
-        if self.dragging.take().is_some() {
+        if dragged {
             self.save_pinned();
+            return None;
+        }
+        if moved_chip {
             return None;
         }
         let under = self.hit(x as f32 / self.k, y as f32 / self.k);
@@ -1482,7 +1623,14 @@ impl Dock {
         let before = self.apps.len();
         self.apps.retain(|a| a.presence.target > 0.5 || a.presence.value > 0.01);
         if self.apps.len() != before {
+            // The apps' places changed under any press or drag.
             self.hovered = None;
+            if matches!(self.pressed, Some((Hot::App(_), _))) {
+                self.pressed = None;
+            }
+            if self.dragging.take().is_some() {
+                self.save_pinned();
+            }
         }
         moving
     }
@@ -1606,8 +1754,11 @@ impl Dock {
             let b = self.button();
             let by = g.y0 + (bh - b) / 2.0;
             let pressed = self.pressed.map(|p| p.0);
+            let dragged = self.dragging.map(Hot::App).or(self.drag_chip.map(Chip::hot));
             let hover_bg = |h: Hot| -> Option<Color> {
-                if pressed == Some(h) {
+                if dragged == Some(h) {
+                    Some(Color::white(0.14))
+                } else if pressed == Some(h) {
                     Some(Color::white(0.05))
                 } else if self.hovered == Some(h) {
                     Some(Color::white(0.08))
@@ -1887,6 +2038,9 @@ impl Dock {
                         white
                     };
                     p.rrect(bx + 1.5, ty + 1.5, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
+                    if charging {
+                        crate::ui::bolt(&p, bx + 7.5, ty + 4.5, 11.0, 1.0);
+                    }
                 }
             }
             if g.clock.w > 0.0 {

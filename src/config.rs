@@ -57,6 +57,8 @@ widget_visualizer = true
 # Show volume / brightness changes in the notch.
 volume_osd = true
 brightness_osd = true
+# Show plugging the charger in or out in the notch (laptops).
+charge_osd = true
 # Hide the built-in Windows 11 volume/brightness flyout while the notch runs.
 hide_windows_flyout = true
 # Scroll over the closed notch to change volume.
@@ -289,6 +291,7 @@ pub struct Config {
     pub widget_visualizer: bool,
     pub volume_osd: bool,
     pub brightness_osd: bool,
+    pub charge_osd: bool,
     pub hide_windows_flyout: bool,
     pub scroll_volume: bool,
     pub controls_mixer: bool,
@@ -399,6 +402,7 @@ impl Default for Config {
             widget_visualizer: true,
             volume_osd: true,
             brightness_osd: true,
+            charge_osd: true,
             hide_windows_flyout: true,
             scroll_volume: true,
             controls_mixer: true,
@@ -632,6 +636,7 @@ impl Config {
                 "widget_visualizer" => set_b(&mut c.widget_visualizer),
                 "volume_osd" => set_b(&mut c.volume_osd),
                 "brightness_osd" => set_b(&mut c.brightness_osd),
+                "charge_osd" => set_b(&mut c.charge_osd),
                 "hide_windows_flyout" => set_b(&mut c.hide_windows_flyout),
                 "scroll_volume" => set_b(&mut c.scroll_volume),
                 "controls_mixer" => set_b(&mut c.controls_mixer),
@@ -781,6 +786,7 @@ impl Config {
             "widget_visualizer" => b(self.widget_visualizer),
             "volume_osd" => b(self.volume_osd),
             "brightness_osd" => b(self.brightness_osd),
+            "charge_osd" => b(self.charge_osd),
             "hide_windows_flyout" => b(self.hide_windows_flyout),
             "scroll_volume" => b(self.scroll_volume),
             "controls_mixer" => b(self.controls_mixer),
