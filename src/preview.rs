@@ -229,6 +229,11 @@ impl Preview {
         self.clear_thumbs();
         self.app = None;
         self.hovered = None;
+        self.hover_close = false;
+        // Hidden under the pointer, it may never hear it leave: track it
+        // afresh next time, or leaving it then would go unnoticed and it
+        // would stay up.
+        self.tracking = false;
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }

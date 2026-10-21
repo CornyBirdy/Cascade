@@ -693,17 +693,30 @@ impl Painter<'_> {
         }
     }
 
-    pub fn polygon(&self, pts: &[(f32, f32)], c: Color) {
+    fn polygon_path(&self, pts: &[(f32, f32)]) -> Option<ID2D1PathGeometry> {
         if pts.len() < 3 {
-            return;
+            return None;
         }
-        if let Some(g) = self.path(|s| unsafe {
+        self.path(|s| unsafe {
             s.BeginFigure(pt(pts[0].0, pts[0].1), D2D1_FIGURE_BEGIN_FILLED);
             for p in &pts[1..] {
                 s.AddLine(pt(p.0, p.1));
             }
             s.EndFigure(D2D1_FIGURE_END_CLOSED);
-        }) {
+        })
+    }
+
+    pub fn polygon(&self, pts: &[(f32, f32)], c: Color) {
+        if let Some(g) = self.polygon_path(pts) {
+            self.fill_geometry(&g, c);
+        }
+    }
+
+    /// `polygon` with an edge `width` wide in `edge` round it, drawn under
+    /// the fill, so it stands out over anything.
+    pub fn polygon_edged(&self, pts: &[(f32, f32)], c: Color, edge: Color, width: f32) {
+        if let Some(g) = self.polygon_path(pts) {
+            self.stroke_geometry(&g, edge, width);
             self.fill_geometry(&g, c);
         }
     }

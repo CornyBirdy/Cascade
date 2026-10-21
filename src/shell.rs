@@ -231,6 +231,46 @@ pub fn set_autostart(on: bool) {
     }
 }
 
+/// Starts with Windows from the registry Run key, which Windows runs late
+/// (often well after the desktop is up): Start with Windows was turned on
+/// before the sign-in task existed, or its permission prompt was declined.
+pub fn autostart_late() -> bool {
+    run_key_set() && !crate::helper::start_task_exists()
+}
+
+/// When Cascade starts late with Windows, says so once (`msg::AUTOSTART`), a
+/// little after signing in. Moving to the sign-in task takes a permission
+/// prompt, and one asked for in the background only flashes on Windows'
+/// taskbar (hidden behind Cascade's), so it's left for a click: *Start with
+/// Windows sooner* in the right-click menu, or Settings.
+pub fn hint_late_autostart() {
+    let told = crate::config::dir().join("late-start-told");
+    if !autostart_late() || told.exists() {
+        return;
+    }
+    let _ = std::fs::write(&told, "");
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        msg::post(msg::AUTOSTART, 0, 0);
+    });
+}
+
+/// How Cascade starts with Windows, for the log.
+pub fn autostart_kind() -> &'static str {
+    if crate::helper::start_task_exists() {
+        "sign-in task"
+    } else if run_key_set() {
+        "Windows' startup list, which runs late"
+    } else {
+        "off"
+    }
+}
+
+/// Seconds since Windows started.
+pub fn uptime_secs() -> u64 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() / 1000 }
+}
+
 fn set_run_key(on: bool) {
     unsafe {
         if on {
@@ -542,6 +582,8 @@ pub enum MenuCmd {
     DockAutohide,
     HideTaskbar,
     Autostart,
+    /// Move Start with Windows from the late startup list to the sign-in task.
+    AutostartSooner,
     Flyout,
     OpenConfig,
     Reload,
@@ -559,6 +601,8 @@ pub struct MenuState {
     pub hide_taskbar: bool,
     pub hide_taskbar_allowed: bool,
     pub autostart: bool,
+    /// Starting with Windows the late way (see `autostart_late`).
+    pub autostart_late: bool,
     pub flyout_hidden: bool,
 }
 
@@ -585,7 +629,7 @@ fn track(hwnd: HWND, menu: HMENU) -> usize {
 }
 
 pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 13] = [
+    const IDS: [MenuCmd; 14] = [
         MenuCmd::None,
         MenuCmd::Notch,
         MenuCmd::Dock,
@@ -599,6 +643,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         MenuCmd::Update,
         MenuCmd::Settings,
         MenuCmd::Launcher,
+        MenuCmd::AutostartSooner,
     ];
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
@@ -616,6 +661,9 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, flags, 4, w!("Replace the Windows taskbar"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
+        if state.autostart_late {
+            let _ = AppendMenuW(menu, MF_STRING, 13, w!("Start with Windows sooner\u{2026}"));
+        }
         let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 7, w!("Open config file"));

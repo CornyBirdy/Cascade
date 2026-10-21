@@ -23,7 +23,8 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_MENU,
+    GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON,
+    VK_MENU, VK_RBUTTON,
 };
 use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -100,12 +101,18 @@ const TIMER_PASTE: usize = 20;
 const TIMER_CAL: usize = 21;
 /// Started at sign-in before Explorer: looks for its taskbar until it's up.
 const TIMER_SHELL: usize = 22;
+/// While something on a taskbar is hovered: checks the pointer is really
+/// still there (see `check_hover`).
+const TIMER_HOVER: usize = 23;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The Windows accent colour changed (Tinted Glass follows it).
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_POWERBROADCAST: u32 = 0x0218;
+/// In a `WM_POWERBROADCAST`: the charger was plugged in or out, or the
+/// battery's level changed.
+const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
 const WM_DEVICECHANGE: u32 = 0x0219;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
@@ -145,6 +152,8 @@ enum PeekKind {
     Message,
     /// A USB device came or went (`App::device`); clicking opens its app.
     Device,
+    /// The charger was plugged in or out (`App::power`).
+    Power,
 }
 
 /// The surfaces `perf_log` times.
@@ -462,6 +471,13 @@ struct App {
     cal_said: Vec<(i64, u8)>,
     update_available: Option<u32>,
     updating: bool,
+    /// The battery's level and whether it's plugged in, as last read (None
+    /// without a battery), so plugging in or out can be told apart from the
+    /// level moving.
+    power: Option<(u8, bool)>,
+    /// Hover checks in a row that found the pointer off the taskbar and its
+    /// previews (see `check_hover`).
+    hover_misses: u8,
 }
 
 fn create_window(class: PCWSTR, instance: HINSTANCE, ex: WINDOW_EX_STYLE) -> Result<HWND> {
@@ -680,6 +696,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.open_settings());
             return LRESULT(0);
         }
+        msg::AUTOSTART => {
+            with_app(|a| a.on_late_autostart());
+            return LRESULT(0);
+        }
         msg::APPS => {
             let list = Box::from_raw(lp.0 as *mut Vec<AppEntry>);
             with_app(move |a| a.launcher.set_apps(*list));
@@ -830,10 +850,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
 
 /// What the settings window shows for `key`.
 fn setting_value(cfg: &Config, key: &str) -> String {
-    if key == "autostart" {
-        shell::autostart_enabled().to_string()
-    } else {
-        cfg.get(key)
+    match key {
+        "autostart" => shell::autostart_enabled().to_string(),
+        "autostart_late" => shell::autostart_late().to_string(),
+        // Not a setting: whether there's a battery (see `settings::shown`).
+        "battery" => battery().is_some().to_string(),
+        _ => cfg.get(key),
     }
 }
 
@@ -1125,13 +1147,20 @@ impl App {
             lens_on: false,
             update_available: None,
             updating: false,
+            power: battery(),
+            hover_misses: 0,
             cfg,
         })
     }
 
     fn start(&mut self) {
         let ready = shell::shell_ready();
-        config::log(&format!("started (Explorer's taskbar up: {ready})"));
+        config::log(&format!(
+            "started {} s after Windows (Explorer's taskbar up: {ready}; starts with Windows: {})",
+            shell::uptime_secs(),
+            shell::autostart_kind()
+        ));
+        shell::hint_late_autostart();
         if !ready {
             // Signed in a moment ago: Explorer is still on its way. Its
             // TaskbarCreated says when it's up; this is in case that's missed.
@@ -1380,6 +1409,7 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_SHELL);
         }
+        config::log(&format!("Explorer's taskbar is up, {} s after Windows started", shell::uptime_secs()));
         if let Some(t) = &self.tray {
             t.add();
         }
@@ -1459,7 +1489,9 @@ impl App {
             View::Idle => (iw, ih, ih * 0.36),
             View::Live => (iw + 104.0, ih, ih * 0.42),
             View::Peek if self.peek == Some(PeekKind::Timer) => (iw + 170.0, ih + 12.0, (ih + 12.0) * 0.4),
-            View::Peek if self.peek == Some(PeekKind::Message) => (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4),
+            View::Peek if matches!(self.peek, Some(PeekKind::Message | PeekKind::Power)) => {
+                (iw + 190.0, ih + 12.0, (ih + 12.0) * 0.4)
+            }
             View::Peek if self.peek == Some(PeekKind::Device) => (iw + 250.0, ih + 12.0, (ih + 12.0) * 0.4),
             View::Peek => (iw + 110.0, ih + 12.0, (ih + 12.0) * 0.4),
             // Every tab is as wide, so the tab bar under them holds still.
@@ -1586,7 +1618,7 @@ impl App {
         let value = match kind {
             PeekKind::Volume => self.vol.0,
             PeekKind::Brightness => self.brightness as f32 / 100.0,
-            PeekKind::Timer | PeekKind::Message | PeekKind::Device => 0.0,
+            PeekKind::Timer | PeekKind::Message | PeekKind::Device | PeekKind::Power => 0.0,
         };
         let again = self.peek == Some(kind) && self.view == View::Peek;
         if self.peek != Some(kind) {
@@ -1596,7 +1628,7 @@ impl App {
         self.peek = Some(kind);
         unsafe {
             let ms = match kind {
-                PeekKind::Timer | PeekKind::Message => 4000,
+                PeekKind::Timer | PeekKind::Message | PeekKind::Power => 4000,
                 PeekKind::Device => 6000,
                 _ => PEEK_MS,
             };
@@ -1789,6 +1821,9 @@ impl App {
             // Windows' brightness setting changes as soon as the keys are
             // pressed, well before the WMI event comes in.
             WM_POWERBROADCAST => {
+                if wp.0 == PBT_APMPOWERSTATUSCHANGE {
+                    self.on_power();
+                }
                 if let Some(level) = unsafe { brightness::power_setting_level(wp, lp) } {
                     let changed = level != self.brightness;
                     self.brightness = level;
@@ -1863,6 +1898,21 @@ impl App {
             _ => return None,
         }
         Some(LRESULT(0))
+    }
+
+    /// Windows says the power changed: the charger went in or out, or the
+    /// battery's level moved. The battery icons follow it straight away, and
+    /// plugging in or out shows in the notch (`charge_osd`).
+    fn on_power(&mut self) {
+        let now = battery();
+        let before = std::mem::replace(&mut self.power, now);
+        self.dirty = true;
+        self.dock.dirty = true;
+        if let (Some((_, was)), Some((_, plugged))) = (before, now) {
+            if was != plugged && self.cfg.charge_osd {
+                self.show_peek(PeekKind::Power);
+            }
+        }
     }
 
     /// Shows a status line in the notch, or a message box if the notch is off.
@@ -2029,6 +2079,12 @@ impl App {
 
     fn device_removed(&self) -> bool {
         self.device.as_ref().is_some_and(|d| d.removed)
+    }
+
+    /// Cascade started late with Windows (see `shell::hint_late_autostart`).
+    fn on_late_autostart(&mut self) {
+        let text = "Cascade can start sooner \u{2014} right-click the taskbar";
+        self.notify(text.into(), theme::accent(), false);
     }
 
     fn on_update(&mut self, outcome: usize, build: u32) {
@@ -2690,6 +2746,7 @@ impl App {
             dock_autohide: self.cfg.dock_autohide,
             hide_taskbar: self.cfg.hide_taskbar,
             autostart: shell::autostart_enabled(),
+            autostart_late: shell::autostart_late(),
             flyout_hidden: self.cfg.hide_windows_flyout,
         }
     }
@@ -2720,6 +2777,9 @@ impl App {
                 self.apply_dock();
             }
             MenuCmd::Autostart => shell::set_autostart(!shell::autostart_enabled()),
+            // Sets up the sign-in task (it asks for permission once), which
+            // then takes over from the startup list.
+            MenuCmd::AutostartSooner => shell::set_autostart(true),
             MenuCmd::Flyout => {
                 flip(&mut self.cfg.hide_windows_flyout, "hide_windows_flyout");
                 self.apply_flyout();
@@ -3107,6 +3167,8 @@ impl App {
                     if self.dock_mut(di).on_move(x, y) {
                         self.schedule_preview(di);
                     }
+                    self.hover_misses = 0;
+                    SetTimer(Some(dock), TIMER_HOVER, 250, None);
                 }
                 WM_MOUSELEAVE => {
                     self.dock_mut(di).on_leave();
@@ -3126,6 +3188,12 @@ impl App {
                         self.preview.hide();
                         self.on_dock_click(di, hot);
                     }
+                    self.save_chips(di);
+                }
+                // Another window took the mouse mid-press: no release will come.
+                WM_CAPTURECHANGED => {
+                    self.dock_mut(di).on_capture_lost();
+                    self.save_chips(di);
                 }
                 // Scrolling over the desktops widget goes to the next or previous desktop.
                 WM_MOUSEWHEEL => {
@@ -3162,6 +3230,7 @@ impl App {
                         }
                         TIMER_PREVIEW_SHOW => self.show_preview(),
                         TIMER_PREVIEW_HIDE => self.preview.hide(),
+                        TIMER_HOVER => self.check_hover(di),
                         TIMER_CLOCK => {
                             self.dock.dirty = true;
                             for d in &mut self.screens {
@@ -3993,6 +4062,62 @@ impl App {
         Some(LRESULT(0))
     }
 
+    /// A safety net under the taskbar's hover. Windows doesn't always say
+    /// the pointer left (a menu or another window took the mouse, or the
+    /// taskbar hid or moved from under it), and then an app's name and its
+    /// previews would stay up. While something is hovered this looks at what
+    /// is really under the pointer every quarter second; off the taskbar and
+    /// the previews twice in a row, with no button held, it lets go of them.
+    fn check_hover(&mut self, di: usize) {
+        let dock = self.dock_ref(di).hwnd;
+        let previews = self.preview.visible() && self.preview_dock == di;
+        if self.dock_ref(di).hovered.is_none() && !previews {
+            self.hover_misses = 0;
+            return;
+        }
+        let under = unsafe {
+            let mut p = POINT::default();
+            let _ = GetCursorPos(&mut p);
+            GetAncestor(WindowFromPoint(p), GA_ROOT)
+        };
+        let held =
+            [VK_LBUTTON, VK_RBUTTON].iter().any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0);
+        if under == dock || under == self.preview.hwnd || held {
+            self.hover_misses = 0;
+        } else {
+            self.hover_misses += 1;
+            if self.hover_misses >= 2 {
+                self.hover_misses = 0;
+                unsafe {
+                    if GetCapture() == dock {
+                        let _ = ReleaseCapture();
+                    }
+                    let _ = KillTimer(Some(dock), TIMER_PREVIEW_SHOW);
+                }
+                self.dock_mut(di).on_pointer_gone();
+                self.save_chips(di);
+                if previews {
+                    self.preview.hide();
+                }
+                return;
+            }
+        }
+        unsafe {
+            SetTimer(Some(dock), TIMER_HOVER, 250, None);
+        }
+    }
+
+    /// A widget was dragged to a new place on taskbar `di`: the config keeps it.
+    fn save_chips(&mut self, di: usize) {
+        let Some((left, right)) = self.dock_mut(di).take_chips() else { return };
+        self.apply_change(Change::Many(vec![("taskbar_left", left), ("taskbar_right", right)]));
+        // Settings' widget lanes show the new places.
+        if let Some(s) = &mut self.settings {
+            let cfg = &self.cfg;
+            s.sync_edits(&|k: &str| setting_value(cfg, k));
+        }
+    }
+
     /// Opens (after a short hover) or retargets the preview for the hovered app.
     fn schedule_preview(&mut self, di: usize) {
         let d = self.dock_ref(di);
@@ -4055,6 +4180,8 @@ impl App {
                     let _ = KillTimer(Some(dock), TIMER_DOCK_HIDE);
                     let (x, y) = lparam_xy(lp);
                     self.preview.on_move(x, y);
+                    self.hover_misses = 0;
+                    SetTimer(Some(dock), TIMER_HOVER, 250, None);
                 }
                 WM_MOUSELEAVE => {
                     self.preview.on_leave();
@@ -4474,6 +4601,7 @@ impl App {
                         self.draw_timer_peek(&p, alpha)
                     }
                     View::Peek if self.peek == Some(PeekKind::Device) => self.draw_device_peek(&p, alpha),
+                    View::Peek if self.peek == Some(PeekKind::Power) => self.draw_power_peek(&p, alpha),
                     View::Peek => {
                         self.draw_level_row(&p, self.origin + 16.0, th / 2.0, tw - 32.0, self.peek, alpha);
                     }
@@ -4716,6 +4844,37 @@ impl App {
         );
     }
 
+    /// The charger plugged in or out: the battery (with its bolt while it's
+    /// plugged in) and how full it is.
+    fn draw_power_peek(&self, p: &Painter, alpha: f32) {
+        let Some((pct, plugged)) = self.power else { return };
+        let (tw, th, _) = self.size_of(View::Peek);
+        let (bx, cy) = (self.origin + 16.0, th / 2.0);
+        let (w, h) = (22.0, 12.0);
+        let line = Color::white(0.6 * alpha);
+        p.stroke_rrect(bx, cy - h / 2.0, w, h, 3.0, line, 1.2);
+        p.rrect(bx + w + 1.0, cy - 2.5, 2.0, 5.0, 1.0, line);
+        let c = if plugged {
+            GREEN.alpha(alpha)
+        } else if pct <= 20 {
+            Color(1.0, 0.4, 0.35, alpha)
+        } else {
+            Color::white(0.9 * alpha)
+        };
+        p.rrect(bx + 2.0, cy - h / 2.0 + 2.0, (w - 4.0) * pct as f32 / 100.0, h - 4.0, 1.5, c);
+        if plugged {
+            bolt(p, bx + w / 2.0, cy, 15.0, alpha);
+        }
+        let text = match (plugged, pct) {
+            (true, n) if n >= 100 => "Plugged in \u{b7} fully charged".to_string(),
+            (true, _) => format!("Charging \u{b7} {pct}%"),
+            (false, _) => format!("On battery \u{b7} {pct}%"),
+        };
+        let x = bx + w + 12.0;
+        let tw = tw - (x - self.origin) - 14.0;
+        p.text(&text, &self.gfx.fonts.label, x, 0.0, tw, th, Align::Left, Color::white(0.95 * alpha));
+    }
+
     /// A USB device plugged in: a plug, its name (and serial port), and what
     /// clicking opens; or that it was unplugged.
     fn draw_device_peek(&self, p: &Painter, alpha: f32) {
@@ -4945,6 +5104,9 @@ impl App {
                 Color::white(0.9 * alpha)
             };
             p.rrect(bx + 2.0, by + 2.0, 21.0 * pct as f32 / 100.0, 9.0, 2.0, c);
+            if charging {
+                bolt(p, bx + 12.5, by + 6.5, 15.0, alpha);
+            }
             p.text(
                 &format!("{pct}%"),
                 &fonts.body,
@@ -5628,6 +5790,16 @@ pub(crate) fn speaker(p: &Painter, cx: f32, cy: f32, s: f32, level: f32, muted: 
             p.arc(ax, cy, s * 0.42, -0.8, 0.8, c, stroke);
         }
     }
+}
+
+/// A lightning bolt `h` tall centred on (cx, cy), on a battery that's
+/// plugged in. Edged in dark glass, so it reads over the battery's fill and
+/// over an empty one alike.
+pub(crate) fn bolt(p: &Painter, cx: f32, cy: f32, h: f32, alpha: f32) {
+    const SHAPE: [(f32, f32); 6] =
+        [(0.14, -0.5), (-0.3, 0.08), (-0.03, 0.08), (-0.14, 0.5), (0.3, -0.08), (0.03, -0.08)];
+    let pts: Vec<(f32, f32)> = SHAPE.iter().map(|&(x, y)| (cx + x * h, cy + y * h)).collect();
+    p.polygon_edged(&pts, Color::white(0.97 * alpha), Color(0.0, 0.0, 0.0, 0.55 * alpha), h * 0.18);
 }
 
 fn sun(p: &Painter, cx: f32, cy: f32, s: f32, c: Color) {

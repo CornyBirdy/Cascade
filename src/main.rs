@@ -95,6 +95,8 @@ pub mod msg {
     pub const WIFI: u32 = WM_APP + 29;
     /// Paired Bluetooth devices (a boxed `bt::Report`).
     pub const BLUETOOTH: u32 = WM_APP + 30;
+    /// Cascade started late with Windows (see `shell::hint_late_autostart`).
+    pub const AUTOSTART: u32 = WM_APP + 31;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
