@@ -25,9 +25,6 @@
 //! still down (and checked again until it's up). Nothing is swallowed either
 //! while a program with admin rights is in front and Cascade has none:
 //! Windows quietly drops the keys Cascade sends it then, replacement and all.
-//! And if Windows still ends up thinking a Win key is held when the last Win
-//! key event was its release, the next key typed lets go of it first, so
-//! plain typing never turns into Win+ shortcuts.
 //!
 //! The hook runs on a thread of its own that does nothing else. Windows
 //! waits for a keyboard hook before every key reaches any app, and drops a
@@ -127,8 +124,8 @@ static SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 static HELD_SHORTCUTS: AtomicU32 = AtomicU32::new(0);
 static TAB_ON: AtomicBool = AtomicBool::new(false);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
-/// The last Win key event to come by (anyone's, real or sent) was a press.
-/// Windows should think a Win key is held exactly while this is true.
+/// The last Win key event to come by (anyone's, real or sent) was a press:
+/// a Win key Windows thinks is held after that is stuck (see `fix_stuck`).
 static WIN_LAST_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
@@ -229,59 +226,6 @@ fn mouse_used(now: u32) -> bool {
     button || (held > 200 && dx * dx + dy * dy > 12 * 12)
 }
 
-fn held(keys: &[VIRTUAL_KEY]) -> bool {
-    keys.iter().any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0)
-}
-
-/// A release this hook never saw (it went to an admin app, or the sign-in
-/// screen took the keyboard) leaves a key looking held here, and then plain
-/// typing would look like Win+X or Alt+Tab. On any other key, a modifier
-/// Windows itself doesn't think is held is let go of here too.
-fn resync() {
-    for (flag, keys) in [
-        (&WIN_DOWN, [VK_LWIN, VK_RWIN]),
-        (&ALT_DOWN, [VK_LMENU, VK_RMENU]),
-        (&CTRL_DOWN, [VK_LCONTROL, VK_RCONTROL]),
-        (&SHIFT_DOWN, [VK_LSHIFT, VK_RSHIFT]),
-    ] {
-        if flag.load(Ordering::Relaxed) && !held(&keys) {
-            flag.store(false, Ordering::Relaxed);
-        }
-    }
-}
-
-/// Windows thinks a Win key is held, though the last Win key event to come
-/// by was its release (one of Cascade's, or some other program's, got lost
-/// or overtaken on the way): the key `k` would make a Win+ shortcut out of
-/// plain typing. Lets go of Win first and sends `k` (a key press) on after
-/// it, as one batch. True if it did (and `k` itself is to be kept from
-/// Windows).
-unsafe fn unstick_win(k: &KBDLLHOOKSTRUCT) -> bool {
-    let stuck: Vec<u16> = [VK_LWIN, VK_RWIN].iter().filter(|&&w| held(&[w])).map(|w| w.0).collect();
-    if stuck.is_empty() || !handled_here() || crate::helper::foreground_above_us() {
-        return false;
-    }
-    let mut inputs: Vec<INPUT> = stuck.iter().map(|&w| key(w, true)).collect();
-    let flags = if k.flags.0 & LLKHF_EXTENDED.0 != 0 { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
-    inputs.push(INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(k.vkCode as u16),
-                wScan: k.scanCode as u16,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    });
-    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len();
-    if sent {
-        crate::config::log("keys: a Win key Windows thought was still held was let go");
-    }
-    sent
-}
-
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
@@ -308,11 +252,6 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 track(&CTRL_DOWN, down, up);
             } else if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 {
                 track(&SHIFT_DOWN, down, up);
-            } else if down && !is_win {
-                resync();
-                if !WIN_LAST_DOWN.load(Ordering::Relaxed) && held(&[VK_LWIN, VK_RWIN]) && unstick_win(k) {
-                    return LRESULT(1);
-                }
             }
 
             // Alt+Tab.
