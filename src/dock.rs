@@ -103,6 +103,16 @@ fn desk_dots_w(n: usize) -> f32 {
 const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
 
+/// Apps and widgets sliding over to their new places as one is dragged:
+/// quick, and only just short of overshooting.
+const SLIDE_STIFFNESS: f32 = 700.0;
+const SLIDE_DAMPING: f32 = 50.0;
+/// How far the dragged app or widget lifts off the bar.
+const LIFT: f32 = 3.0;
+
+/// Where the apps (by id) and the widgets are drawn along the bar.
+type Places = (Vec<(String, f32)>, Vec<(Chip, f32)>);
+
 pub struct DockApp {
     /// An .exe path, or `shell:AppsFolder\<AppUserModelID>` for Store apps.
     pub id: String,
@@ -112,6 +122,9 @@ pub struct DockApp {
     presence: Spring,
     mag: Spring,
     bounce: Spring,
+    /// How far it's drawn from its place, easing to 0: it slides over when
+    /// the apps are reordered.
+    slide: Spring,
 }
 
 impl DockApp {
@@ -123,6 +136,7 @@ impl DockApp {
             presence: Spring::new(0.0, 380.0, 30.0),
             mag: Spring::new(0.0, 520.0, 34.0),
             bounce: Spring::new(0.0, 260.0, 9.0),
+            slide: Spring::new(0.0, SLIDE_STIFFNESS, SLIDE_DAMPING),
         }
     }
 }
@@ -394,6 +408,13 @@ pub struct Dock {
     drag_chip: Option<Chip>,
     /// The widgets were moved here, for the config to keep.
     chips_changed: bool,
+    /// Where on the dragged app or widget the pointer took hold of it.
+    grab: f32,
+    /// Each widget's slide (as `DockApp::slide`), by `Chip as usize`.
+    chip_slide: [Spring; 8],
+    /// Where the apps (by id) and widgets were drawn just before they were
+    /// moved, until the next layout turns that into their slides.
+    pending_slides: Option<Places>,
     tracking: bool,
     /// A pop-up from the taskbar (Start menu, tray flyout) is open, so
     /// auto-hide keeps it in view.
@@ -669,6 +690,9 @@ impl Dock {
             dragging: None,
             drag_chip: None,
             chips_changed: false,
+            grab: 0.0,
+            chip_slide: [Spring::new(0.0, SLIDE_STIFFNESS, SLIDE_DAMPING); 8],
+            pending_slides: None,
             tracking: false,
             held: false,
             foreground: HWND::default(),
@@ -1013,6 +1037,8 @@ impl Dock {
         if self.hovered.is_some() || self.pressed.is_some() || self.tracking {
             self.on_pointer_gone();
         }
+        // Nothing to slide while it's away.
+        self.pending_slides = None;
         for b in &mut self.backdrops {
             b.hide();
         }
@@ -1342,15 +1368,29 @@ impl Dock {
         // or running) among the apps, or a widget along the bar.
         if let Some((h, start)) = self.pressed {
             if self.dragging.is_none() && self.drag_chip.is_none() && (x - start).abs() > (6.0 * self.k) as i32 {
+                let at = start as f32 / self.k;
                 match h {
-                    Hot::App(i) if i < self.apps.len() => self.dragging = Some(i),
-                    h => self.drag_chip = h.chip(),
+                    Hot::App(i) if i < self.apps.len() => {
+                        self.dragging = Some(i);
+                        self.grab = at - self.geo.apps.get(i).map_or(at, |s| s.x);
+                    }
+                    h => {
+                        self.drag_chip = h.chip();
+                        let g = &self.geo;
+                        let span = g.left.iter().chain(&g.right).find(|(c, _)| Some(*c) == self.drag_chip);
+                        self.grab = at - span.map_or(at, |(_, s)| s.x);
+                    }
                 }
             }
+        }
+        if self.dragging.is_some() || self.drag_chip.is_some() {
+            // It follows the pointer.
+            self.dirty = true;
         }
         if let Some(from) = self.dragging {
             let to = self.geo.apps.iter().position(|s| s.w > 4.0 && s.contains(lx));
             if let Some(to) = to.filter(|&to| to != from && to < self.apps.len()) {
+                self.note_slides();
                 let app = self.apps.remove(from);
                 self.apps.insert(to, app);
                 self.dragging = Some(to);
@@ -1359,7 +1399,12 @@ impl Dock {
             }
         }
         if let Some(c) = self.drag_chip {
+            // Where everything is drawn before the move (see `note_slides`).
+            let before = (self.app_visuals(), self.chip_visuals());
             if self.move_chip(c, lx) {
+                if self.pending_slides.is_none() {
+                    self.pending_slides = Some(before);
+                }
                 self.dirty = true;
             }
         }
@@ -1405,6 +1450,93 @@ impl Dock {
         true
     }
 
+    /// Where the dragged app is drawn: under the pointer, kept among the apps.
+    fn dragged_app_x(&self) -> Option<f32> {
+        let x = self.hover_x? - self.grab;
+        let mut shown = self.geo.apps.iter().filter(|s| s.w > 4.0).map(|s| s.x);
+        let first = shown.next()?;
+        let (lo, hi) = shown.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        Some(x.clamp(lo, hi))
+    }
+
+    /// Where the dragged widget, `w` wide, is drawn: under the pointer.
+    fn dragged_chip_x(&self, w: f32) -> Option<f32> {
+        let ww = (self.monitor.right - self.monitor.left) as f32 / self.k;
+        Some((self.hover_x? - self.grab).clamp(0.0, (ww - w).max(0.0)))
+    }
+
+    /// Where each app is drawn right now, by id.
+    fn app_visuals(&self) -> Vec<(String, f32)> {
+        let dragged = self.dragged_app_x();
+        let at = |i: usize, a: &DockApp, s: &Span| match dragged {
+            Some(x) if self.dragging == Some(i) => x,
+            _ => s.x + a.slide.value,
+        };
+        self.apps.iter().zip(&self.geo.apps).enumerate().map(|(i, (a, s))| (a.id.clone(), at(i, a, s))).collect()
+    }
+
+    /// Where each widget is drawn right now.
+    fn chip_visuals(&self) -> Vec<(Chip, f32)> {
+        let g = &self.geo;
+        let at = |c: Chip, s: &Span| match self.dragged_chip_x(s.w) {
+            Some(x) if self.drag_chip == Some(c) => x,
+            _ => s.x + self.chip_slide[c as usize].value,
+        };
+        g.left.iter().chain(&g.right).map(|(c, s)| (*c, at(*c, s))).collect()
+    }
+
+    /// The apps and widgets are about to move: keeps where they're drawn now,
+    /// so they slide from there to their new places rather than jump. (If
+    /// they've moved already since the last frame, what's on screen is
+    /// still that earlier note.)
+    fn note_slides(&mut self) {
+        if self.pending_slides.is_none() {
+            self.pending_slides = Some((self.app_visuals(), self.chip_visuals()));
+        }
+    }
+
+    /// A drag ended: the app or widget settles from under the pointer into
+    /// its place.
+    fn drop_slides(&mut self) {
+        let app = self.dragging.and_then(|i| Some((self.apps.get(i)?.id.clone(), self.dragged_app_x()?)));
+        let chip = self.drag_chip.and_then(|c| {
+            let g = &self.geo;
+            let (_, s) = g.left.iter().chain(&g.right).find(|(k, _)| *k == c)?;
+            Some((c, self.dragged_chip_x(s.w)?))
+        });
+        self.note_slides();
+        if let Some((apps, chips)) = &mut self.pending_slides {
+            if let Some((id, x)) = app {
+                apps.retain(|(a, _)| *a != id);
+                apps.push((id, x));
+            }
+            if let Some((c, x)) = chip {
+                chips.retain(|(k, _)| *k != c);
+                chips.push((c, x));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Turns the places noted by `note_slides` into slides, now the apps and
+    /// widgets have their new places.
+    fn start_slides(&mut self) {
+        let Some((apps, chips)) = self.pending_slides.take() else { return };
+        for (a, s) in self.apps.iter_mut().zip(&self.geo.apps) {
+            if let Some((_, x)) = apps.iter().find(|(id, _)| *id == a.id) {
+                a.slide.snap(x - s.x);
+                a.slide.set(0.0);
+            }
+        }
+        for (c, s) in self.geo.left.iter().chain(&self.geo.right) {
+            if let Some((_, x)) = chips.iter().find(|(k, _)| k == c) {
+                let slide = &mut self.chip_slide[*c as usize];
+                slide.snap(x - s.x);
+                slide.set(0.0);
+            }
+        }
+    }
+
     /// The widgets' new places after one was dragged, as `taskbar_left` and
     /// `taskbar_right` (once, once the drag is over).
     pub fn take_chips(&mut self) -> Option<(String, String)> {
@@ -1428,6 +1560,9 @@ impl Dock {
     /// window took the mouse, or the button went up somewhere Windows didn't
     /// tell it): ends any drag where it got to, and forgets the hover.
     pub fn on_pointer_gone(&mut self) {
+        if self.dragging.is_some() || self.drag_chip.is_some() {
+            self.drop_slides();
+        }
         self.pressed = None;
         self.drag_chip = None;
         if self.dragging.take().is_some() {
@@ -1469,6 +1604,9 @@ impl Dock {
     /// Mouse released at (x, y). Returns what was clicked: what it was
     /// pressed on, if it's still under the pointer.
     pub fn on_up(&mut self, x: i32, y: i32) -> Option<Hot> {
+        if self.dragging.is_some() || self.drag_chip.is_some() {
+            self.drop_slides();
+        }
         let pressed = self.pressed.take();
         let dragged = self.dragging.take().is_some();
         let moved_chip = self.drag_chip.take().is_some();
@@ -1594,7 +1732,11 @@ impl Dock {
                 || self.bars_dirty
                 || !self.reveal.settled()
                 || !self.music_w.settled()
-                || self.apps.iter().any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled()))
+                || self.chip_slide.iter().any(|s| !s.settled())
+                || self
+                    .apps
+                    .iter()
+                    .any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled() || !a.slide.settled()))
     }
 
     /// Steps springs; returns true while the size or position is changing.
@@ -1618,6 +1760,10 @@ impl Dock {
             moving |= a.presence.step(dt);
             moving |= a.mag.step(dt);
             moving |= a.bounce.step(dt);
+            moving |= a.slide.step(dt);
+        }
+        for s in &mut self.chip_slide {
+            moving |= s.step(dt);
         }
         // Drop apps that finished sliding out.
         let before = self.apps.len();
@@ -1724,6 +1870,7 @@ impl Dock {
         });
         let desks = wd.desks.0;
         self.geo = self.layout(ww, wh, status, &inline, overflow, music_w, weather_w, wd.gpus.len(), desks);
+        self.start_slides();
         let g = &self.geo;
 
         // Blur behind each island, just under this window (placed once the
@@ -1788,12 +1935,23 @@ impl Dock {
 
             // Apps.
             let mut tip: Option<(f32, String)> = None;
-            for (i, a) in self.apps.iter().enumerate() {
-                let Some(s) = g.apps.get(i).copied() else { break };
+            // The dragged app last, so it's drawn over the others.
+            let order = (0..self.apps.len()).filter(|&i| self.dragging != Some(i)).chain(self.dragging);
+            let held_x = self.dragged_app_x();
+            for i in order {
+                let Some(a) = self.apps.get(i) else { continue };
+                let Some(s) = g.apps.get(i).copied() else { continue };
                 let presence = a.presence.value.clamp(0.0, 1.0);
                 if s.w < 2.0 {
                     continue;
                 }
+                // Under the pointer while it's dragged; the others slide over.
+                let lifted = self.dragging == Some(i);
+                let s = match held_x {
+                    Some(x) if lifted => Span { x, w: s.w },
+                    _ => Span { x: s.x + a.slide.value, w: s.w },
+                };
+                let lift = if lifted { LIFT } else { 0.0 };
                 let cx = s.centre();
                 let running = !a.windows.is_empty();
                 let active = a.windows.contains(&self.foreground);
@@ -1806,7 +1964,7 @@ impl Dock {
                     p.rrect(s.x, by, s.w, b, 5.0, c.alpha(presence));
                 }
                 let size = self.icon * (1.0 + self.magnify * a.mag.value) * presence;
-                let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0;
+                let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0 - lift;
                 match app_icons.get(i).cloned().flatten() {
                     // Always pixel for pixel, so it's sharp.
                     Some(bmp) => p.icon(&bmp, cx, iy + size / 2.0, presence),
@@ -1857,7 +2015,18 @@ impl Dock {
 
             // Widgets, left and right side.
             let mid_y = g.y0 + bh / 2.0;
-            for &(chip, s) in g.left.iter().chain(g.right.iter()) {
+            // The dragged one last, so it's drawn over the others.
+            let mut chips: Vec<(Chip, Span)> = g.left.iter().chain(g.right.iter()).copied().collect();
+            chips.sort_by_key(|(c, _)| self.drag_chip == Some(*c));
+            for (chip, s) in chips {
+                // Under the pointer while it's dragged; the others slide over.
+                let lifted = self.drag_chip == Some(chip);
+                let s = match self.dragged_chip_x(s.w) {
+                    Some(x) if lifted => Span { x, w: s.w },
+                    _ => Span { x: s.x + self.chip_slide[chip as usize].value, w: s.w },
+                };
+                let lift = if lifted { LIFT } else { 0.0 };
+                let (by, mid_y) = (by - lift, mid_y - lift);
                 let hot = match chip {
                     Chip::Weather => Hot::Weather,
                     Chip::Widgets => Hot::Widgets,
@@ -2117,7 +2286,11 @@ impl Dock {
     fn settled(&self) -> bool {
         self.reveal.settled()
             && self.music_w.settled()
-            && self.apps.iter().all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled())
+            && self.chip_slide.iter().all(|s| s.settled())
+            && self
+                .apps
+                .iter()
+                .all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled() && a.slide.settled())
     }
 
     /// Redraws only the music widget, for the visualizer's bars: its patch of
