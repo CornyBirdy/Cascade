@@ -104,6 +104,10 @@ const TIMER_SHELL: usize = 22;
 /// While something on a taskbar is hovered: checks the pointer is really
 /// still there (see `check_hover`).
 const TIMER_HOVER: usize = 23;
+/// After waking, unlocking or the screen coming on: puts everything back
+/// (twice, as the displays can take a few seconds to settle).
+const TIMER_WAKE: usize = 24;
+const TIMER_WAKE2: usize = 25;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -113,6 +117,12 @@ const WM_POWERBROADCAST: u32 = 0x0218;
 /// In a `WM_POWERBROADCAST`: the charger was plugged in or out, or the
 /// battery's level changed.
 const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+/// Sent for a session's lock, unlock and so on (see `WTSRegisterSessionNotification`).
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_UNLOCK: usize = 8;
+const WTS_CONSOLE_CONNECT: usize = 1;
 const WM_DEVICECHANGE: u32 = 0x0219;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
@@ -424,6 +434,8 @@ struct App {
     stats_on: Option<(u32, bool)>,
     widgets: Widgets,
     widgets_seen: bool,
+    /// When the widgets panel last closed.
+    widgets_closed_at: Option<Instant>,
     /// Window changes come from the shell's own notifications (few) rather
     /// than from every window event in the system (many).
     shell_msg: u32,
@@ -1014,6 +1026,13 @@ impl App {
         let media_tx = media::spawn();
         brightness::spawn_watcher();
         brightness::listen(hwnd);
+        brightness::listen_display(hwnd);
+        unsafe {
+            let _ = windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification(
+                hwnd,
+                windows::Win32::System::RemoteDesktop::NOTIFY_FOR_THIS_SESSION,
+            );
+        }
         devices::listen(hwnd);
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
@@ -1127,6 +1146,7 @@ impl App {
             stats_on: None,
             widgets: Widgets::new(widgets_hwnd, widgets_backdrop),
             widgets_seen: false,
+            widgets_closed_at: None,
             dock_held: false,
             win_closed_at: None,
             tray_announced: None,
@@ -1820,9 +1840,20 @@ impl App {
             }
             // Windows' brightness setting changes as soon as the keys are
             // pressed, well before the WMI event comes in.
+            WM_WTSSESSION_CHANGE => {
+                if wp.0 == WTS_SESSION_UNLOCK || wp.0 == WTS_CONSOLE_CONNECT {
+                    self.after_wake();
+                }
+            }
             WM_POWERBROADCAST => {
                 if wp.0 == PBT_APMPOWERSTATUSCHANGE {
                     self.on_power();
+                }
+                if wp.0 == PBT_APMRESUMEAUTOMATIC
+                    || wp.0 == PBT_APMRESUMESUSPEND
+                    || unsafe { brightness::display_came_on(wp, lp) }
+                {
+                    self.after_wake();
                 }
                 if let Some(level) = unsafe { brightness::power_setting_level(wp, lp) } {
                     let changed = level != self.brightness;
@@ -1912,6 +1943,47 @@ impl App {
             if was != plugged && self.cfg.charge_osd {
                 self.show_peek(PeekKind::Power);
             }
+        }
+    }
+
+    /// The PC woke, unlocked or its screen came on (a laptop lid opening):
+    /// Windows may have dropped the keyboard hook, left a stale "fullscreen app"
+    /// behind from the lock screen, or moved the screens around, any of which
+    /// leaves the notch gone. Look again now and once more when things settle.
+    fn after_wake(&mut self) {
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_WAKE, 1500, None);
+            SetTimer(Some(self.hwnd), TIMER_WAKE2, 6000, None);
+        }
+    }
+
+    fn refresh_after_wake(&mut self) {
+        keyhook::reinstall();
+        self.update_display();
+        let fullscreen = shell::fullscreen_now();
+        if fullscreen != self.fullscreen {
+            self.set_fullscreen(fullscreen);
+        }
+        self.apply_dock();
+        self.retarget();
+        if self.shown {
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+        self.layer.release();
+        self.dirty = true;
+        self.dock.dirty = true;
+        for d in &mut self.screens {
+            d.dirty = true;
         }
     }
 
@@ -2473,6 +2545,7 @@ impl App {
                 self.retarget();
             }
             TIMER_TICK => self.dirty = true,
+            TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
             TIMER_PASTE => shell::paste(),
             TIMER_CAL => {
                 self.announce_events();
@@ -2580,6 +2653,18 @@ impl App {
         {
             config::log("start: the Windows Start menu opened anyway; showing Cascade's");
             self.open_launcher();
+            return;
+        }
+        // Win+N pressed to close the widgets let Windows have it too, and its
+        // own notification centre opened: close that instead.
+        if event == EVENT_SYSTEM_FOREGROUND
+            && self.cfg.shortcut_win_n
+            && (self.widgets.open || self.widgets_closed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(800)))
+            && shell::is_shell_flyout(hwnd)
+        {
+            config::log("widgets: Windows' notification centre opened over the widgets; closing it");
+            self.widgets.hide();
+            shell::close_start_menu();
             return;
         }
         if !self.cfg.dock {
@@ -3056,6 +3141,12 @@ impl App {
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
             Change::Action("open_config") => shell::open_file(&config::path()),
             Change::Action("open_folder") => shell::open_file(&config::dir()),
+            Change::Action("defender_exclude") => {
+                std::thread::spawn(|| {
+                    let ok = helper::exclude_from_defender();
+                    config::log(&format!("defender: exclusion added: {ok}"));
+                });
+            }
             Change::Action("edit_devices") => devices::edit_list(),
             Change::Action(_) => {}
         }
@@ -4400,6 +4491,9 @@ impl App {
         // Stats are read faster while the panel is open.
         if self.widgets.open != self.widgets_seen {
             self.widgets_seen = self.widgets.open;
+            if !self.widgets.open {
+                self.widgets_closed_at = Some(Instant::now());
+            }
             self.arm_stats();
             self.sync_visualizer();
         }

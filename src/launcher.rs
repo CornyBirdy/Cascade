@@ -5,6 +5,8 @@
 //! The app list comes from the shell's AppsFolder, the same source the
 //! Windows Start menu uses, so Store apps are included.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
 use windows::core::{Result, PWSTR};
@@ -194,6 +196,53 @@ fn load_recent(max: usize) -> Vec<RecentFile> {
             RecentFile { name, path: p.to_string_lossy().into_owned(), when: t, ago: ago(t) }
         })
         .collect()
+}
+
+// ------------------------------------------------------- launch counts --
+
+/// How often each app was started from the menu, so a search lists the ones
+/// you use most first. Kept in `launches.txt` (one `count<TAB>target` a line).
+static LAUNCHES: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
+/// A count past this halves them all, so what you used lately outweighs what
+/// you used long ago.
+const LAUNCH_CAP: u32 = 200;
+
+fn launches_path() -> std::path::PathBuf {
+    crate::config::dir().join("launches.txt")
+}
+
+fn with_launches<R>(f: impl FnOnce(&mut HashMap<String, u32>) -> R) -> R {
+    let mut guard = LAUNCHES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(|| {
+        let text = std::fs::read_to_string(launches_path()).unwrap_or_default();
+        text.lines()
+            .filter_map(|l| {
+                let (n, target) = l.split_once('\t')?;
+                Some((target.to_string(), n.parse().ok()?))
+            })
+            .collect()
+    });
+    f(map)
+}
+
+fn launches_of(target: &str) -> u32 {
+    with_launches(|m| m.get(target).copied().unwrap_or(0))
+}
+
+fn record_launch(target: &str) {
+    let text = with_launches(|m| {
+        let n = m.entry(target.to_string()).or_insert(0);
+        *n += 1;
+        if *n > LAUNCH_CAP {
+            for v in m.values_mut() {
+                *v /= 2;
+            }
+            m.retain(|_, v| *v > 0);
+        }
+        m.iter().map(|(t, n)| format!("{n}\t{t}\n")).collect::<String>()
+    });
+    let _ = std::fs::create_dir_all(crate::config::dir());
+    let _ = std::fs::write(launches_path(), text);
 }
 
 /// Lower is better; None = no match.
@@ -580,10 +629,21 @@ impl Launcher {
     }
 
     fn filter(&mut self) {
-        let mut scored: Vec<(u32, usize)> =
-            self.apps.iter().enumerate().filter_map(|(i, a)| score(&a.name, &self.query).map(|s| (s, i))).collect();
-        scored.sort_by_key(|(s, i)| (*s, *i));
-        self.results = scored.into_iter().map(|(_, i)| i).collect();
+        let searching = self.searching();
+        // Names that start a word count as one kind of match; within a kind
+        // the apps you open most come first, then the closer matches.
+        let mut scored: Vec<(u32, std::cmp::Reverse<u32>, u32, usize)> = self
+            .apps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| {
+                let s = score(&a.name, &self.query)?;
+                let used = if searching { launches_of(&a.target) } else { 0 };
+                Some((s.saturating_sub(1), std::cmp::Reverse(used), s, i))
+            })
+            .collect();
+        scored.sort();
+        self.results = scored.into_iter().map(|(.., i)| i).collect();
         let (top, bottom) = if self.searching() { smart::answers(&self.query, &self.web) } else { Default::default() };
         self.answers_top = top.len();
         self.answers = top.into_iter().chain(bottom).collect();
@@ -684,6 +744,7 @@ impl Launcher {
         if target == SETTINGS_TARGET {
             Action::Settings
         } else {
+            record_launch(&target);
             Action::Launch(target)
         }
     }
