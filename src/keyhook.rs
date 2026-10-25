@@ -227,7 +227,8 @@ fn track(flag: &AtomicBool, down: bool, up: bool) {
 
 /// Whether the key is physically down right now.
 fn down_now(vk: VIRTUAL_KEY) -> bool {
-    unsafe { GetAsyncKeyState(vk.0 as i32) } as u16 & 0x8000 != 0
+    let state = unsafe { GetAsyncKeyState(vk.0 as i32) };
+    state as u16 & 0x8000 != 0
 }
 
 /// Asks the mask worker to tap the mask key a moment from now.
