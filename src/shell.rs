@@ -244,6 +244,10 @@ pub fn autostart_late() -> bool {
 /// taskbar (hidden behind Cascade's), so it's left for a click: *Start with
 /// Windows sooner* in the right-click menu, or Settings.
 pub fn hint_late_autostart() {
+    // Also for copies set up before this existed: takes effect from the next sign-in.
+    if autostart_late() {
+        remove_startup_delay();
+    }
     let told = crate::config::dir().join("late-start-told");
     if !autostart_late() || told.exists() {
         return;
@@ -271,9 +275,23 @@ pub fn uptime_secs() -> u64 {
     unsafe { windows::Win32::System::SystemInformation::GetTickCount64() / 1000 }
 }
 
+/// Windows waits about ten seconds after the desktop appears before it runs
+/// the startup list. Setting both of these to zero makes it run it at once.
+/// (A per-user setting; the sign-in task, when it exists, doesn't need it.)
+pub fn remove_startup_delay() {
+    let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize");
+    for name in [w!("StartupDelayInMSec"), w!("WaitForIdleState")] {
+        let zero = 0u32.to_le_bytes();
+        unsafe {
+            let _ = RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_DWORD.0, Some(zero.as_ptr() as *const _), 4);
+        }
+    }
+}
+
 fn set_run_key(on: bool) {
     unsafe {
         if on {
+            remove_startup_delay();
             let mut buf = [0u16; 1024];
             let n = GetModuleFileNameW(None, &mut buf) as usize;
             let cmd: Vec<u16> =
@@ -454,6 +472,19 @@ pub fn is_start_menu(hwnd: HWND) -> bool {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\startmenuexperiencehost.exe"))
+}
+
+/// Whether `hwnd` is one of Windows' own shell flyouts (notification centre,
+/// quick settings), which Explorer hosts in ShellExperienceHost.
+pub fn is_shell_flyout(hwnd: HWND) -> bool {
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+    if String::from_utf16_lossy(&class[..n]) != "Windows.UI.Core.CoreWindow" {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\shellexperiencehost.exe"))
 }
 
 /// Closes the real Windows Start menu if it is in front (Esc).

@@ -9,11 +9,15 @@
 //! that follows from opening its Start menu.
 //!
 //! The Windows Start menu only opens when Win is released with no other key
-//! pressed since it went down. So as soon as Win goes down, one unassigned
-//! "mask" key tap is injected: to Windows that looks like a key combination
-//! and its own Start menu stays shut. The real Win release is never touched,
-//! so other programs that watch the keyboard (window-drag tools, games) always
-//! see the true state of the key and it can't get stuck.
+//! pressed since it went down. So just after Win goes down (from a helper
+//! thread, once Windows has taken the press in), one unassigned "mask" key tap
+//! is injected: to Windows that looks like a key combination and its own
+//! Start menu stays shut. The real Win press and release are passed on
+//! untouched, so other programs that watch the keyboard (window-drag tools,
+//! games) always see the true state of the key and it can't get stuck.
+//!
+//! Only when the key is released before that tap has landed (a very quick
+//! tap) is the release held back and replaced by mask + release as one batch.
 //!
 //! Alt+Tab works the same way: Tab is swallowed while Alt is held, and when
 //! Alt is released it is replaced by mask + release, so the app in front
@@ -33,8 +37,10 @@
 //! key slip past half-handled, or lose the hook altogether.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -128,6 +134,18 @@ static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 /// a Win key Windows thinks is held after that is stuck (see `fix_stuck`).
 static WIN_LAST_DOWN: AtomicBool = AtomicBool::new(false);
 static COMBO: AtomicBool = AtomicBool::new(false);
+/// The mask key tap for the current Win press has gone by.
+static MASK_SEEN: AtomicBool = AtomicBool::new(false);
+/// Tick count of the latest swallowed Win+key shortcut press (repeats included).
+static SHORTCUT_AT: AtomicU32 = AtomicU32::new(0);
+/// Asks the mask worker for a tap while it's running.
+static MASK_TX: Mutex<Option<Sender<()>>> = Mutex::new(None);
+/// How long the worker waits after Win goes down before tapping the mask key,
+/// so Windows has taken the Win press in first.
+const MASK_DELAY: Duration = Duration::from_millis(8);
+/// A swallowed shortcut key held longer than this without repeating was
+/// released unseen: the next press is a new one.
+const REPEAT_GAP: u32 = 1500;
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
@@ -207,6 +225,21 @@ fn track(flag: &AtomicBool, down: bool, up: bool) {
     }
 }
 
+/// Whether the key is physically down right now.
+fn down_now(vk: VIRTUAL_KEY) -> bool {
+    let state = unsafe { GetAsyncKeyState(vk.0 as i32) };
+    state as u16 & 0x8000 != 0
+}
+
+/// Asks the mask worker to tap the mask key a moment from now.
+fn request_mask() {
+    if let Ok(tx) = MASK_TX.try_lock() {
+        if let Some(tx) = tx.as_ref() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 fn cursor() -> POINT {
     let mut p = POINT::default();
     let _ = unsafe { GetCursorPos(&mut p) };
@@ -242,8 +275,12 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if injected {
             // Window-drag tools press a key of their own while Win is held,
             // to keep Windows' Start menu shut: that makes it a combination.
-            if down && !is_win && vk != MASK_KEY && WIN_DOWN.load(Ordering::Relaxed) {
-                COMBO.store(true, Ordering::Relaxed);
+            if down && !is_win && WIN_DOWN.load(Ordering::Relaxed) {
+                if vk == MASK_KEY {
+                    MASK_SEEN.store(true, Ordering::Relaxed);
+                } else {
+                    COMBO.store(true, Ordering::Relaxed);
+                }
             }
         } else {
             if is_alt {
@@ -307,15 +344,17 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ => 0,
             };
             if bit != 0 {
-                let win_held = WIN_DOWN.load(Ordering::Relaxed)
-                    || [VK_LWIN, VK_RWIN].iter().any(|k| GetAsyncKeyState(k.0 as i32) as u16 & 0x8000 != 0);
-                let plain = !ALT_DOWN.load(Ordering::Relaxed)
-                    && !CTRL_DOWN.load(Ordering::Relaxed)
-                    && !SHIFT_DOWN.load(Ordering::Relaxed);
+                let win_held = WIN_DOWN.load(Ordering::Relaxed) || down_now(VK_LWIN) || down_now(VK_RWIN);
+                // The keys themselves, not what this hook last heard of them:
+                // a release it never saw (a lock screen, an elevated window
+                // in front) would otherwise leave Windows' own shortcut free.
+                let plain = !down_now(VK_MENU) && !down_now(VK_CONTROL) && !down_now(VK_SHIFT);
                 if down && win_held && plain && SHORTCUTS.load(Ordering::Relaxed) & bit != 0 && handled_here() {
                     COMBO.store(true, Ordering::Relaxed);
                     // Held down, the key repeats: act on the first press only.
-                    if HELD_SHORTCUTS.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                    let held = HELD_SHORTCUTS.fetch_or(bit, Ordering::Relaxed) & bit != 0;
+                    let gap = k.time.wrapping_sub(SHORTCUT_AT.swap(k.time, Ordering::Relaxed));
+                    if !held || gap > REPEAT_GAP {
                         // To Windows it's a combination now, so letting Win go
                         // won't open its Start menu.
                         mask_tap();
@@ -343,23 +382,29 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         WIN_AT[0].store(p.x, Ordering::Relaxed);
                         WIN_AT[1].store(p.y, Ordering::Relaxed);
                         WIN_SINCE.store(k.time, Ordering::Relaxed);
-                        // Break the lone Win now, while it's held; the real
+                        MASK_SEEN.store(false, Ordering::Relaxed);
+                        // Break the lone Win while it's held; the real
                         // release then passes through untouched.
-                        mask_tap();
+                        request_mask();
                     }
                 } else if is_win && up {
                     let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                     if was_down && !COMBO.load(Ordering::Relaxed) && !mouse_used(k.time) {
-                        // The mask tap at key-down can land before Windows has
-                        // registered the Win press, and then its Start menu
-                        // opens too. Send another one right before the release,
-                        // as one batch with it, and hold back the real release.
-                        // If Windows didn't accept the batch the real one passes.
-                        let handled = masked_release(vk);
-                        on_lone_win();
-                        if handled {
-                            request_check();
-                            return LRESULT(1);
+                        if MASK_SEEN.load(Ordering::Relaxed) {
+                            // Windows has seen a key come between the press and
+                            // this release: its Start menu stays shut.
+                            on_lone_win();
+                        } else {
+                            // Released before the mask tap went out. Send one
+                            // right before the release, as one batch with it,
+                            // and hold back the real release. If Windows
+                            // didn't accept the batch the real one passes.
+                            let handled = masked_release(vk);
+                            on_lone_win();
+                            if handled {
+                                request_check();
+                                return LRESULT(1);
+                            }
                         }
                     }
                 } else if down && WIN_DOWN.load(Ordering::Relaxed) {
@@ -398,22 +443,51 @@ pub fn configure(win: bool, tab: bool, shortcuts: u32) {
     if wanted && thread.is_none() {
         *thread = start();
     } else if !wanted {
-        if let Some((id, handle)) = thread.take() {
-            unsafe {
-                let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-            let _ = handle.join();
-            WIN_DOWN.store(false, Ordering::Relaxed);
-            ALT_DOWN.store(false, Ordering::Relaxed);
-            TAB_ACTIVE.store(false, Ordering::Relaxed);
-            HELD_SHORTCUTS.store(0, Ordering::Relaxed);
-        }
+        stop(&mut thread);
     }
+}
+
+/// Stops the hook's thread and forgets what it knew of the keys.
+fn stop(thread: &mut Option<(u32, JoinHandle<()>)>) {
+    let Some((id, handle)) = thread.take() else { return };
+    unsafe {
+        let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
+    }
+    let _ = handle.join();
+    // Lets the mask worker finish.
+    *MASK_TX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    for flag in [&WIN_DOWN, &WIN_LAST_DOWN, &COMBO, &ALT_DOWN, &CTRL_DOWN, &SHIFT_DOWN, &TAB_ACTIVE] {
+        flag.store(false, Ordering::Relaxed);
+    }
+    HELD_SHORTCUTS.store(0, Ordering::Relaxed);
+}
+
+/// Installs the hook afresh. Windows can quietly drop a keyboard hook (one
+/// that was held up too long, or across sleep and the lock screen) and then
+/// the keys simply stop reaching Cascade: after those, put it back.
+pub fn reinstall() {
+    let mut thread = THREAD.lock().unwrap_or_else(|e| e.into_inner());
+    if thread.is_none() {
+        return;
+    }
+    stop(&mut thread);
+    *thread = start();
 }
 
 /// Starts the hook's thread: it installs the hook, then only waits for keys
 /// (and the word to stop). None if the hook couldn't be installed.
 fn start() -> Option<(u32, JoinHandle<()>)> {
+    let (mask_tx, mask_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        while mask_rx.recv().is_ok() {
+            std::thread::sleep(MASK_DELAY);
+            // Still held, and still waiting for its mask.
+            if WIN_DOWN.load(Ordering::Relaxed) && !MASK_SEEN.load(Ordering::Relaxed) {
+                unsafe { mask_tap() };
+            }
+        }
+    });
+    *MASK_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(mask_tx);
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || unsafe {
         // Keys are waiting on it: it goes first.
@@ -437,6 +511,7 @@ fn start() -> Option<(u32, JoinHandle<()>)> {
         Ok(Some(id)) => Some((id, handle)),
         _ => {
             let _ = handle.join();
+            *MASK_TX.lock().unwrap_or_else(|e| e.into_inner()) = None;
             crate::config::log("keys: the keyboard hook could not be installed");
             None
         }

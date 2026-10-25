@@ -93,6 +93,31 @@ pub fn listen(hwnd: HWND) {
     }
 }
 
+/// GUID_CONSOLE_DISPLAY_STATE: 0 off, 1 on, 2 dimmed.
+const DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+
+/// Asks Windows to tell `hwnd` when the screen goes off and on (lid, sleep).
+pub fn listen_display(hwnd: HWND) {
+    use windows::Win32::System::Power::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let _ = RegisterPowerSettingNotification(HANDLE(hwnd.0), &DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+}
+
+/// Whether a `WM_POWERBROADCAST` says the screen just came on.
+///
+/// # Safety
+/// `wp` and `lp` must be those of a `WM_POWERBROADCAST` message.
+pub unsafe fn display_came_on(wp: WPARAM, lp: LPARAM) -> bool {
+    use windows::Win32::System::Power::POWERBROADCAST_SETTING;
+    if wp.0 as u32 != PBT_POWERSETTINGCHANGE || lp.0 == 0 {
+        return false;
+    }
+    let s = &*(lp.0 as *const POWERBROADCAST_SETTING);
+    s.PowerSetting == DISPLAY_STATE && s.DataLength >= 4 && std::ptr::read_unaligned(s.Data.as_ptr() as *const u32) != 0
+}
+
 /// The brightness in a `WM_POWERBROADCAST`, if that is what it is about.
 ///
 /// # Safety

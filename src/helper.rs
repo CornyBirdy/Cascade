@@ -149,6 +149,16 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             SetTimer(Some(hwnd), 1, 150, None);
             LRESULT(0)
         }
+        // Woke from sleep: Windows may have dropped the keyboard hook.
+        0x0218 if wp.0 == 0x12 || wp.0 == 0x7 => {
+            SetTimer(Some(hwnd), 2, 1500, None);
+            LRESULT(1)
+        }
+        WM_TIMER if wp.0 == 2 => {
+            let _ = KillTimer(Some(hwnd), 2);
+            keyhook::reinstall();
+            LRESULT(0)
+        }
         WM_TIMER => {
             let _ = KillTimer(Some(hwnd), 1);
             keyhook::fix_stuck();
@@ -247,8 +257,21 @@ fn task_xml(exe: &str, args: &str, desc: &str, elevated: bool) -> String {
 /// and waits for it. Returns false if it couldn't run, was declined or
 /// failed; what happened goes to the log.
 fn schtasks(args: &str, elevated: bool) -> bool {
+    if elevated {
+        run_elevated("schtasks.exe", args)
+    } else {
+        run_program("schtasks.exe", args, false)
+    }
+}
+
+fn run_elevated(file: &str, args: &str) -> bool {
+    run_program(file, args, true)
+}
+
+fn run_program(file: &str, args: &str, elevated: bool) -> bool {
+    let name = file;
     unsafe {
-        let file = HSTRING::from("schtasks.exe");
+        let file = HSTRING::from(file);
         let params = HSTRING::from(args);
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -260,7 +283,7 @@ fn schtasks(args: &str, elevated: bool) -> bool {
             ..Default::default()
         };
         if let Err(e) = ShellExecuteExW(&mut info) {
-            crate::config::log(&format!("helper: schtasks {args} could not run: {e}"));
+            crate::config::log(&format!("helper: {name} {args} could not run: {e}"));
             return false;
         }
         if info.hProcess.is_invalid() {
@@ -270,7 +293,7 @@ fn schtasks(args: &str, elevated: bool) -> bool {
         let mut code = 1u32;
         let _ = GetExitCodeProcess(info.hProcess, &mut code);
         let _ = CloseHandle(info.hProcess);
-        crate::config::log(&format!("helper: schtasks {args} -> exit code {code}"));
+        crate::config::log(&format!("helper: {name} {args} -> exit code {code}"));
         code == 0
     }
 }
@@ -350,6 +373,20 @@ pub fn install_start_task() -> bool {
 pub fn remove_start_task() {
     schtasks(&format!("/Delete /F /TN \"{START_TASK}\""), true);
     let _ = std::fs::remove_file(start_marker());
+}
+
+/// Adds the folder Cascade runs from to Windows Security's exclusions, so it
+/// stops deleting the exe (asks for permission once). True if it took.
+pub fn exclude_from_defender() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Some(dir) = exe.parent() else { return false };
+    let dir = dir.to_string_lossy().replace('\'', "''");
+    let args = format!(
+        "-NoProfile -WindowStyle Hidden -Command \"Add-MpPreference -ExclusionPath '{dir}'; \
+         Add-MpPreference -ExclusionPath '{}'\"",
+        crate::config::dir().to_string_lossy().replace('\'', "''")
+    );
+    run_elevated("powershell.exe", &args)
 }
 
 /// Stops the helper and removes its scheduled task (asks for permission).

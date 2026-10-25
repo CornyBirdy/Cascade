@@ -841,6 +841,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("resources", "Resource use", "", Note),
             row("open_config", "Config file", "Every setting, as plain text.", Button("Open")),
             row("open_folder", "Data folder", "Config, pinned apps and logs.", Button("Open")),
+            row(
+                "defender_exclude",
+                "Stop Windows Security deleting Cascade",
+                "Adds Cascade's folder to Windows Security's exclusions (Windows asks for permission once).",
+                Button("Add exclusion"),
+            ),
         ],
     }
 }
