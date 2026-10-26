@@ -133,6 +133,11 @@ static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 /// The last Win key event to come by (anyone's, real or sent) was a press:
 /// a Win key Windows thinks is held after that is stuck (see `fix_stuck`).
 static WIN_LAST_DOWN: AtomicBool = AtomicBool::new(false);
+/// Tick count of that last Win key event.
+static WIN_EVENT_AT: AtomicU32 = AtomicU32::new(0);
+/// How long after a Win release Windows may still be catching up, so a key
+/// that comes sooner doesn't count as proof the key is stuck.
+const SETTLE: u32 = 60;
 static COMBO: AtomicBool = AtomicBool::new(false);
 /// The mask key tap for the current Win press has gone by.
 static MASK_SEEN: AtomicBool = AtomicBool::new(false);
@@ -271,6 +276,20 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let is_alt = vk == VK_LMENU.0 || vk == VK_RMENU.0;
         if is_win {
             track(&WIN_LAST_DOWN, down, up);
+            WIN_EVENT_AT.store(k.time, Ordering::Relaxed);
+            // Whatever happened while it was held (a mask tap, a swallowed
+            // shortcut, a window taking the keyboard), look again shortly
+            // after it's let go that Windows let go too.
+            if up && !injected {
+                request_check();
+            }
+        } else if down && !injected && !WIN_LAST_DOWN.load(Ordering::Relaxed) {
+            // A key arrives though the Win key was let go a while ago: if
+            // Windows still holds it, every key is a shortcut. Let it go.
+            let settled = k.time.wrapping_sub(WIN_EVENT_AT.load(Ordering::Relaxed)) > SETTLE;
+            if settled && (down_now(VK_LWIN) || down_now(VK_RWIN)) {
+                request_check();
+            }
         }
         if injected {
             // Window-drag tools press a key of their own while Win is held,

@@ -4,7 +4,7 @@
 use windows::core::{w, Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
@@ -713,6 +713,7 @@ pub enum AppCmd {
     TogglePin,
     CloseAll,
     ForceClose,
+    RunAsAdmin,
 }
 
 /// Right-click menu for a dock icon.
@@ -723,6 +724,7 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 1, w!("New window"));
         let _ = AppendMenuW(menu, MF_STRING, 2, if pinned { w!("Unpin from taskbar") } else { w!("Pin to taskbar") });
+        let _ = AppendMenuW(menu, MF_STRING, 5, w!("Run as administrator"));
         if windows > 0 {
             let label = if windows == 1 { "Close window".to_string() } else { format!("Close {windows} windows") };
             let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from(label));
@@ -734,17 +736,30 @@ pub fn show_app_menu(hwnd: HWND, name: &str, pinned: bool, windows: usize) -> Ap
             2 => AppCmd::TogglePin,
             3 => AppCmd::CloseAll,
             4 => AppCmd::ForceClose,
+            5 => AppCmd::RunAsAdmin,
             _ => AppCmd::None,
         }
     }
 }
 
-/// Right-click menu for an app in the launcher. Returns true to toggle pin.
-pub fn show_pin_menu(hwnd: HWND, pinned: bool) -> bool {
+#[derive(Clone, Copy, PartialEq)]
+pub enum PinCmd {
+    None,
+    TogglePin,
+    RunAsAdmin,
+}
+
+/// Right-click menu for an app in the launcher.
+pub fn show_pin_menu(hwnd: HWND, pinned: bool) -> PinCmd {
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return false };
+        let Ok(menu) = CreatePopupMenu() else { return PinCmd::None };
         let _ = AppendMenuW(menu, MF_STRING, 1, if pinned { w!("Unpin from taskbar") } else { w!("Pin to taskbar") });
-        track(hwnd, menu) == 1
+        let _ = AppendMenuW(menu, MF_STRING, 2, w!("Run as administrator"));
+        match track(hwnd, menu) {
+            1 => PinCmd::TogglePin,
+            2 => PinCmd::RunAsAdmin,
+            _ => PinCmd::None,
+        }
     }
 }
 
@@ -825,6 +840,38 @@ pub fn open(target: &str) {
     unsafe {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }
+}
+
+/// Starts an app as administrator (Windows asks first): an .exe path, or a
+/// `shell:AppsFolder\<id>` entry, which is run through its own "runas" verb.
+/// Store apps have none, so those start as usual.
+pub fn open_as_admin(target: &str) {
+    if !target.starts_with("shell:") {
+        launch(target, "", true);
+        return;
+    }
+    unsafe {
+        let item: windows::core::Result<IShellItem> = SHCreateItemFromParsingName(&HSTRING::from(target), None);
+        if let Ok(pidl) = item.and_then(|item| SHGetIDListFromObject(&item)) {
+            let mut info = SHELLEXECUTEINFOW {
+                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                fMask: SEE_MASK_INVOKEIDLIST,
+                lpVerb: w!("runas"),
+                lpIDList: pidl as *mut _,
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            let result = ShellExecuteExW(&mut info);
+            CoTaskMemFree(Some(pidl as *const _));
+            match result {
+                Ok(()) => return,
+                // The admin prompt was turned down: that's the answer.
+                Err(e) if e.code().0 as u32 & 0xFFFF == 1223 => return,
+                Err(_) => {}
+            }
+        }
+    }
+    open(target);
 }
 
 /// Starts `file` with `args`, as admin if `admin` (Windows asks first).
