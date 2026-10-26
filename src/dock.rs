@@ -1664,6 +1664,14 @@ impl Dock {
         }
     }
 
+    pub fn launch_admin(&mut self, i: usize) {
+        if let Some(app) = self.apps.get_mut(i) {
+            shell::open_as_admin(&app.id);
+            app.bounce.kick(10.0);
+            self.dirty = true;
+        }
+    }
+
     pub fn toggle_pin(&mut self, i: usize) {
         if let Some(app) = self.apps.get_mut(i) {
             app.pinned = !app.pinned;

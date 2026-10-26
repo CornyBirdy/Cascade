@@ -111,7 +111,15 @@ Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right
 
 ## Running it
 
-Grab `cascade.exe` from the latest successful **build** run in the Actions tab (artifact `cascade`). Put it anywhere and double-click it. Right-click the notch, an empty part of the taskbar or the tray icon for:
+### Install
+
+Download **CascadeSetup.exe** from the [latest release](https://github.com/CornyBirdy/Cascade/releases/latest), run it and click **Yes**. It installs Cascade to `%LOCALAPPDATA%\Programs\Cascade` and starts it. Running Setup again updates Cascade.
+
+Cascade isn't code-signed and it listens to the keyboard for the Win key, so Windows Security can quarantine it. Setup asks Windows once for permission to exclude Cascade's folders from Windows Security's scans (the same thing as Settings → About → **Add exclusion**), and does it before writing any files. Your browser or SmartScreen may warn about the download itself, because it's unsigned: choose **Keep**, then **Run anyway**.
+
+### Using it
+
+Cascade is a single `cascade.exe`: put it anywhere and double-click it. Right-click the notch, an empty part of the taskbar or the tray icon for:
 
 - Settings… / Open Start menu
 - Show notch / Show taskbar / Auto-hide taskbar / Replace the Windows taskbar

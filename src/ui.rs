@@ -56,7 +56,7 @@ use crate::preview::{self, Preview};
 use crate::quickmenu::{self, QuickMenu};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
-use crate::shell::{self, AppCmd, MenuCmd, MenuState, Tray};
+use crate::shell::{self, AppCmd, MenuCmd, MenuState, PinCmd, Tray};
 use crate::spring::Spring;
 use crate::switcher::Switcher;
 use crate::sysmon::{self, Readings, StatsCmd};
@@ -659,11 +659,16 @@ fn right_click(hwnd: HWND) {
         }
         RightClick::LauncherApp { target, pinned } => {
             with_app(|a| a.launcher_menu = true);
-            let toggle = shell::show_pin_menu(hwnd, pinned);
+            let cmd = shell::show_pin_menu(hwnd, pinned);
             with_app(|a| {
                 a.launcher_menu = false;
-                if toggle {
-                    a.dock.set_pinned(&target, !pinned);
+                match cmd {
+                    PinCmd::TogglePin => a.dock.set_pinned(&target, !pinned),
+                    PinCmd::RunAsAdmin => {
+                        shell::open_as_admin(&target);
+                        a.launcher.hide();
+                    }
+                    PinCmd::None => {}
                 }
                 if a.launcher.open {
                     launcher::force_foreground(a.launcher.hwnd);
@@ -3228,6 +3233,7 @@ impl App {
         match cmd {
             AppCmd::NewWindow => d.launch_new(i),
             AppCmd::TogglePin => d.toggle_pin(i),
+            AppCmd::RunAsAdmin => d.launch_admin(i),
             AppCmd::CloseAll => {
                 d.close_all(i);
                 self.preview.hide();
