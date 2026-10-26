@@ -57,8 +57,20 @@ fn latest(token: &str) -> Result<Release, bool> {
     let tag = http::string_after(&body, "\"tag_name\":").ok_or(false)?;
     let build = tag.trim_start_matches("build-").parse().map_err(|_| false)?;
     let assets = &body[body.find("\"assets\":").ok_or(false)?..];
-    let asset_url = http::string_after(assets, "\"url\":").ok_or(false)?;
+    let asset_url = exe_asset_url(assets).ok_or(false)?;
     Ok(Release { build, asset_url })
+}
+
+/// The API url of the asset named `cascade.exe` (a release may carry other
+/// files too, like the installer), or the first asset's when none has that name.
+fn exe_asset_url(assets: &str) -> Option<String> {
+    let first = || http::string_after(assets, "\"url\":");
+    let Some(name_at) = assets.find("\"name\":\"cascade.exe\"") else { return first() };
+    // An asset lists its own url before its name.
+    match assets[..name_at].rfind("\"url\":") {
+        Some(url_at) => http::string_after(&assets[url_at..], "\"url\":"),
+        None => first(),
+    }
 }
 
 fn download(asset_url: &str, token: &str) -> Option<Vec<u8>> {
@@ -148,3 +160,18 @@ pub fn spawn_install(token: String) {
 }
 
 fn void(_: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_exe_among_assets() {
+        let assets = r#""assets":[{"url":"https://api/assets/1","id":1,"node_id":"a","name":"CascadeSetup.exe","uploader":{"url":"https://api/users/bot"}},{"url":"https://api/assets/2","id":2,"node_id":"b","name":"cascade.exe","uploader":{"url":"https://api/users/bot"}}]"#;
+        assert_eq!(exe_asset_url(assets), Some("https://api/assets/2".into()));
+        let only = r#""assets":[{"url":"https://api/assets/9","id":9,"name":"cascade.exe"}]"#;
+        assert_eq!(exe_asset_url(only), Some("https://api/assets/9".into()));
+        let other = r#""assets":[{"url":"https://api/assets/5","id":5,"name":"other.exe"}]"#;
+        assert_eq!(exe_asset_url(other), Some("https://api/assets/5".into()));
+    }
+}
