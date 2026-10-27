@@ -75,6 +75,22 @@ fn notify(m: u32, wparam: usize) {
     }
 }
 
+/// How the latest lone Win press went, for `cascade.log` (see `last_lone`):
+/// 1 the mask tap landed before the release, 2 it didn't and the release was
+/// replaced by mask + release, 3 the same but Windows refused that (the real
+/// release went through).
+static LONE: AtomicU32 = AtomicU32::new(0);
+
+/// How the latest lone Win press went (see `LONE`).
+pub fn last_lone() -> &'static str {
+    match LONE.load(Ordering::Relaxed) {
+        1 => "mask landed in time",
+        2 => "released early; release replaced with mask + release",
+        3 => "released early; Windows refused the replacement",
+        _ => "unknown",
+    }
+}
+
 fn on_lone_win() {
     notify(msg::OPEN_LAUNCHER, 0);
 }
@@ -412,6 +428,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         if MASK_SEEN.load(Ordering::Relaxed) {
                             // Windows has seen a key come between the press and
                             // this release: its Start menu stays shut.
+                            LONE.store(1, Ordering::Relaxed);
                             on_lone_win();
                         } else {
                             // Released before the mask tap went out. Send one
@@ -419,6 +436,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             // and hold back the real release. If Windows
                             // didn't accept the batch the real one passes.
                             let handled = masked_release(vk);
+                            LONE.store(if handled { 2 } else { 3 }, Ordering::Relaxed);
                             on_lone_win();
                             if handled {
                                 request_check();

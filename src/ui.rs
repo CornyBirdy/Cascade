@@ -3065,6 +3065,20 @@ impl App {
     }
 
     fn toggle_launcher(&mut self) {
+        // What a Win press looked like, for tracking down a Start menu that
+        // acts up: this goes in cascade.log.
+        let front = unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+            dock::process_path(pid)
+        };
+        let front = front.as_deref().and_then(|p| p.rsplit(['\\', '/']).next()).unwrap_or("nothing");
+        config::log(&format!(
+            "start: Win pressed, Cascade's menu was {}; {}; in front: {front}; elevated in front: {}",
+            if self.launcher.open { "open" } else { "closed" },
+            keyhook::last_lone(),
+            crate::helper::foreground_above_us(),
+        ));
         if self.launcher.open {
             self.win_closed_at = Some(Instant::now());
             self.launcher.hide();
