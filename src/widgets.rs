@@ -14,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
+use crate::clipboard::{self, Clips};
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::ics::{self, Event, DAY};
 use crate::media::MediaInfo;
@@ -32,6 +33,9 @@ const ORANGE: Color = Color(1.0, 0.65, 0.30, 1.0);
 const NOTIF_ROW: f32 = 52.0;
 /// Notifications listed at once (the newest).
 const NOTIF_MAX: usize = 5;
+/// Clipboard items listed at once (the newest), and a row's height.
+const CLIP_MAX: usize = 5;
+const CLIP_ROW: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Card {
@@ -40,6 +44,8 @@ enum Card {
     System,
     Weather,
     Calendar,
+    /// Windows' clipboard history: click an item to copy it again.
+    Clipboard,
     /// Your Android phone through Phone Link: what it's notified you of, and
     /// a way into Phone Link.
     Phone,
@@ -63,6 +69,7 @@ fn parse_cards(list: &str) -> Vec<Card> {
             "system" | "stats" => Card::System,
             "weather" => Card::Weather,
             "calendar" => Card::Calendar,
+            "clipboard" => Card::Clipboard,
             "phone" => Card::Phone,
             _ => continue,
         };
@@ -84,6 +91,9 @@ enum Target {
     NotifRemove(u32),
     NotifSettings,
     OpenPhoneLink,
+    /// A clipboard item (by its place in the list), and the card's Clear.
+    ClipItem(usize),
+    ClipClear,
     /// The System card (opens Task Manager).
     System,
     /// The calendar card's month arrows (-1, +1), its title (back to this
@@ -105,6 +115,9 @@ pub enum Action {
     NotificationSettings,
     OpenPhoneLink,
     TaskManager,
+    /// A clipboard item was clicked: copy it again (by its place in the list).
+    CopyClip(usize),
+    ClearClips,
 }
 
 /// What the cards show.
@@ -118,6 +131,8 @@ pub struct Ctx<'a> {
     pub notifs: &'a Snapshot,
     /// Your calendar's events (see `calendar`).
     pub events: &'a [Event],
+    /// The clipboard history (see `clipboard`).
+    pub clips: &'a Clips,
 }
 
 pub struct Widgets {
@@ -138,6 +153,8 @@ pub struct Widgets {
     /// How tall the panel was in one column, the last time its data had
     /// come in: what the next opening goes by until its own data arrives.
     known_h: f32,
+    /// The clipboard item that was just copied again.
+    copied: Option<String>,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -232,6 +249,13 @@ fn card_height(card: Card, ctx: &Ctx, cal_rows: usize) -> f32 {
             let rows = 3 + gpus + s.disk.is_some() as usize;
             34.0 + rows as f32 * 44.0 + 6.0
         }
+        Card::Clipboard => {
+            let rows = match ctx.clips.state {
+                clipboard::State::Ready => ctx.clips.items.len().clamp(1, CLIP_MAX),
+                _ => 1,
+            };
+            34.0 + rows as f32 * CLIP_ROW + 6.0
+        }
         Card::Weather => 112.0,
         Card::Calendar => 256.0 + if cal_rows > 0 { 12.0 + cal_rows as f32 * CAL_ROW } else { 0.0 },
         Card::Phone => {
@@ -270,6 +294,7 @@ impl Widgets {
             opened_at: Instant::now(),
             last_wide: false,
             known_h: 0.0,
+            copied: None,
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -315,6 +340,7 @@ impl Widgets {
         self.k = k;
         self.open = true;
         self.hovered = None;
+        self.copied = None;
         if !self.visible {
             // Opened afresh: back to today on the calendar.
             self.cal_month = 0;
@@ -413,9 +439,16 @@ impl Widgets {
             Target::NotifRemove(id) => Action::RemoveNotification(id),
             Target::NotifSettings => Action::NotificationSettings,
             Target::OpenPhoneLink => Action::OpenPhoneLink,
+            Target::ClipItem(i) => Action::CopyClip(i),
+            Target::ClipClear => Action::ClearClips,
             Target::System => Action::TaskManager,
             Target::CalMonth(_) | Target::CalToday | Target::CalDay(_) => return None,
         })
+    }
+
+    /// Something changed that the panel shows.
+    pub fn dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn wants_frame(&self) -> bool {
@@ -541,6 +574,7 @@ impl Widgets {
                     }
                     Card::Weather => weather_card(&p, f, ctx, cx, cy),
                     Card::Calendar => self.calendar_card(&p, f, ctx, cx, cy),
+                    Card::Clipboard => self.clipboard_card(&p, f, ctx, cx, cy),
                     Card::Phone => self.phone_card(&p, f, ctx, cx, cy, ch),
                 }
             }
@@ -610,6 +644,56 @@ impl Widgets {
                 }
             }
         }
+    }
+
+    /// The clipboard history: the newest few, click one to copy it again.
+    fn clipboard_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
+        use clipboard::State;
+        p.text("Clipboard", &f.label, x + 14.0, y + 6.0, 200.0, 26.0, Align::Left, Color::white(0.9));
+        let top = y + 34.0;
+        let note = |text: &str| p.text(text, &f.body, x, top, CARD_W, CLIP_ROW, Align::Center, Color::white(0.5));
+        match ctx.clips.state {
+            State::Loading => note("Loading\u{2026}"),
+            State::Off => note("Clipboard history is off in Windows"),
+            State::Unavailable => note("Clipboard history isn't available"),
+            State::Ready if ctx.clips.items.is_empty() => note("Nothing copied yet"),
+            State::Ready => {
+                let (cw, ch) = (50.0, 22.0);
+                let (bx, by) = (x + CARD_W - 10.0 - cw, y + 8.0);
+                if self.hovered == Some(Target::ClipClear) {
+                    p.rrect(bx, by, cw, ch, 6.0, Color::white(0.10));
+                }
+                p.text("Clear", &f.small, bx, by, cw, ch, Align::Center, Color::white(0.75));
+                self.hits.push((Target::ClipClear, bx, by, cw, ch));
+                for (i, item) in ctx.clips.items.iter().take(CLIP_MAX).enumerate() {
+                    let ry = top + i as f32 * CLIP_ROW;
+                    let target = Target::ClipItem(i);
+                    if self.hovered == Some(target) {
+                        p.rrect(x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0, 8.0, Color::white(0.08));
+                    } else if i > 0 {
+                        p.rrect(x + 14.0, ry, CARD_W - 28.0, 1.0, 0.0, Color::white(0.06));
+                    }
+                    let copied = self.copied.as_deref() == Some(item.id.as_str());
+                    let tw = CARD_W - 28.0 - if copied { 56.0 } else { 0.0 };
+                    p.text(&item.text, &f.small, x + 14.0, ry, tw, CLIP_ROW, Align::Left, Color::white(0.9));
+                    if copied {
+                        p.text("Copied", &f.small, x + CARD_W - 66.0, ry, 52.0, CLIP_ROW, Align::Right, GREEN);
+                    }
+                    self.hits.push((target, x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0));
+                }
+            }
+        }
+    }
+
+    /// Whether the Clipboard card is in the panel (it reads the history).
+    pub fn shows_clipboard(&self) -> bool {
+        self.cards.contains(&Card::Clipboard)
+    }
+
+    /// Item `id` was copied again: its row says so until the panel closes.
+    pub fn set_copied(&mut self, id: Option<String>) {
+        self.copied = id;
+        self.dirty = true;
     }
 
     /// Your phone through Phone Link: the notifications it mirrored here

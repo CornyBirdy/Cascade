@@ -426,6 +426,8 @@ struct App {
     /// The Win+V menu (made the first time it's opened), its reader, and the
     /// window it pastes into.
     clips: Option<ClipMenu>,
+    /// The clipboard history as the widgets panel's card shows it.
+    widget_clips: clipboard::Clips,
     clip_tx: Sender<ClipCmd>,
     clip_target: HWND,
     /// Last rect given to the hidden tray window.
@@ -796,6 +798,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         msg::CLIPS => {
             let c = Box::from_raw(lp.0 as *mut clipboard::Clips);
             with_app(move |a| {
+                // The panel's Clipboard card reads them too.
+                a.widget_clips = (*c).clone();
+                if a.widgets.open {
+                    a.widgets.dirty();
+                }
                 if let Some(m) = &mut a.clips {
                     m.set(*c);
                 }
@@ -1164,6 +1171,7 @@ impl App {
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
             deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
             clips: None,
+            widget_clips: clipboard::Clips::default(),
             clip_tx: clipboard::spawn(),
             clip_target: HWND::default(),
             tray_rect: RECT::default(),
@@ -3917,6 +3925,11 @@ impl App {
         let notifications = self.cfg.widgets_notifications;
         let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
         self.widgets.show(panel, notifications, columns, right, bottom, max_h, k);
+        // The Clipboard card: read the history once the panel is in front
+        // (Windows only hands it to the app in front).
+        if self.widgets.shows_clipboard() {
+            let _ = self.clip_tx.send(ClipCmd::Refresh);
+        }
         self.arm_stats();
         // The Phone card lists the phone's notifications, so it reads them too.
         if notifications || self.widgets.shows_phone() {
@@ -3996,6 +4009,18 @@ impl App {
                     Some(widgets::Action::OpenPhoneLink) => {
                         self.widgets.hide();
                         shell::open("shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App");
+                    }
+                    Some(widgets::Action::CopyClip(i)) => {
+                        // Back on the clipboard; nothing is pasted anywhere.
+                        if let Some(item) = self.widget_clips.items.get(i) {
+                            self.clip_target = HWND::default();
+                            self.widgets.set_copied(Some(item.id.clone()));
+                            let _ = self.clip_tx.send(ClipCmd::Paste(item.id.clone()));
+                        }
+                    }
+                    Some(widgets::Action::ClearClips) => {
+                        self.widget_clips.items.clear();
+                        let _ = self.clip_tx.send(ClipCmd::Clear);
                     }
                     Some(widgets::Action::TaskManager) => {
                         self.widgets.hide();
@@ -4623,6 +4648,7 @@ impl App {
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
                 events: &self.events,
+                clips: &self.widget_clips,
             };
             let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);
