@@ -1034,7 +1034,8 @@ impl App {
         (osd_hwnd, osd_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
-        let cfg = Config::load();
+        let mut cfg = Config::load();
+        cfg.save_battery(battery());
         theme::set(&cfg.theme);
         theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
         theme::set_edge(cfg.theme_edge);
@@ -1961,6 +1962,10 @@ impl App {
         if let (Some((_, was)), Some((_, plugged))) = (before, now) {
             if was != plugged && self.cfg.charge_osd {
                 self.show_peek(PeekKind::Power);
+            }
+            // Battery saver comes on when the charger goes out, and off when it goes in.
+            if was != plugged && self.cfg.battery_saver {
+                self.reload_config();
             }
         }
     }
@@ -2910,6 +2915,7 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        self.cfg.save_battery(self.power);
         theme::set(&self.cfg.theme);
         theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
         theme::set_edge(self.cfg.theme_edge);
