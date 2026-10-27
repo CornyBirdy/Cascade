@@ -108,6 +108,9 @@ const TIMER_HOVER: usize = 23;
 /// (twice, as the displays can take a few seconds to settle).
 const TIMER_WAKE: usize = 24;
 const TIMER_WAKE2: usize = 25;
+/// While the notch is hidden for a fullscreen app: checks one is still there
+/// (see `check_fullscreen`).
+const TIMER_FULLSCREEN: usize = 26;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -319,6 +322,8 @@ struct App {
     h: Spring,
     r: Spring,
     fade: Spring,
+    /// 0 to 1 as the Calendar tab's contents come in, one after another.
+    cal_in: Spring,
     /// The open notch's tab bar: where its highlight sits (the tab's index)
     /// and its fade, which unlike `fade` doesn't restart on a tab switch.
     tab: Spring,
@@ -357,6 +362,8 @@ struct App {
     dragging: Option<Hot>,
     peek: Option<PeekKind>,
     fullscreen: bool,
+    /// Looks in a row (`check_fullscreen`) that found no fullscreen app.
+    fullscreen_misses: u8,
     shown: bool,
     last_wheel: Instant,
 
@@ -643,13 +650,16 @@ fn right_click(hwnd: HWND) {
         RightClick::General => {
             let Some(state) = with_app(|a| a.menu_state()) else { return };
             let cmd = shell::show_menu(hwnd, state);
-            if cmd == MenuCmd::Quit {
+            if cmd == MenuCmd::Quit || (cmd == MenuCmd::Restart && shell::spawn_restart()) {
                 if let Some(main) = with_app(|a| a.hwnd) {
                     unsafe {
                         let _ = DestroyWindow(main);
                     }
                 }
             } else {
+                if cmd == MenuCmd::FullRestart && !shell::spawn_full_restart() {
+                    config::log("full restart: couldn't start the command that does it");
+                }
                 with_app(|a| a.on_menu(cmd));
             }
         }
@@ -766,8 +776,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::WINDOW_MOVED => {
             if wp.0 != 0 {
-                with_app(move |a| a.switcher.window_moved(HWND(lp.0 as *mut _)));
+                with_app(move |a| {
+                    a.switcher.window_moved(HWND(lp.0 as *mut _));
+                    desktops::spawn_apps();
+                });
             }
+            return LRESULT(0);
+        }
+        msg::DESK_APPS => {
+            let apps = Box::from_raw(lp.0 as *mut Vec<Vec<String>>);
+            with_app(move |a| a.switcher.set_desk_apps(*apps));
             return LRESULT(0);
         }
         msg::CALENDAR => {
@@ -1026,7 +1044,8 @@ impl App {
         (osd_hwnd, osd_backdrop): (HWND, Backdrop),
         instance: HINSTANCE,
     ) -> Result<Self> {
-        let cfg = Config::load();
+        let mut cfg = Config::load();
+        cfg.save_battery(battery());
         theme::set(&cfg.theme);
         theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
         theme::set_edge(cfg.theme_edge);
@@ -1073,6 +1092,7 @@ impl App {
             h: size,
             r: Spring::new(0.0, 420.0, 34.0),
             fade: Spring::new(0.0, 260.0, 30.0),
+            cal_in: Spring::new(1.0, 110.0, 21.0),
             tab: Spring::new(0.0, 520.0, 42.0),
             tabs_fade: Spring::new(0.0, 260.0, 30.0),
             // Stiff and close to critically damped, so the bar keeps up with
@@ -1098,6 +1118,7 @@ impl App {
             dragging: None,
             peek: None,
             fullscreen: shell::fullscreen_now(),
+            fullscreen_misses: 0,
             shown: false,
             last_wheel: Instant::now(),
             media: None,
@@ -1424,6 +1445,14 @@ impl App {
     /// A fullscreen app came to the front (true) or went.
     fn set_fullscreen(&mut self, on: bool) {
         self.fullscreen = on;
+        self.fullscreen_misses = 0;
+        unsafe {
+            if on {
+                SetTimer(Some(self.hwnd), TIMER_FULLSCREEN, 3000, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_FULLSCREEN);
+            }
+        }
         self.retarget();
         self.show_docks();
         self.sync_visualizer();
@@ -1433,6 +1462,23 @@ impl App {
         mouseedge::pause(self.fullscreen);
         mouseedge::raise();
         self.arm_stats();
+    }
+
+    /// Windows says when a fullscreen app closes, but a missed word (a game
+    /// that crashed, a lock screen, a screen that changed under it) would leave
+    /// the notch and taskbar hidden for good. So while they are hidden for one,
+    /// look now and then that a window still covers a screen; if none has for
+    /// two looks in a row, bring them back.
+    fn check_fullscreen(&mut self) {
+        if !self.fullscreen || shell::foreground_covers_screen() || shell::fullscreen_now() {
+            self.fullscreen_misses = 0;
+            return;
+        }
+        self.fullscreen_misses += 1;
+        if self.fullscreen_misses >= 2 {
+            config::log("fullscreen: no fullscreen app is in front any more; showing the notch again");
+            self.set_fullscreen(false);
+        }
     }
 
     /// Explorer made its taskbar: at sign-in, or after it restarted.
@@ -1571,6 +1617,9 @@ impl App {
             self.fade.set(1.0);
             self.tabs_fade.snap(0.0);
             self.tabs_fade.set(1.0);
+            if view == View::Expanded && self.mode == Mode::Calendar {
+                self.replay_calendar();
+            }
             unsafe {
                 if view == View::Expanded {
                     SetTimer(Some(self.hwnd), TIMER_TICK, 1000, None);
@@ -1638,8 +1687,18 @@ impl App {
             self.hovered = None;
             self.fade.snap(0.0);
             self.fade.set(1.0);
+            if mode == Mode::Calendar {
+                self.replay_calendar();
+            }
             self.retarget();
         }
+    }
+
+    /// Starts the Calendar tab's entrance again: its days, events and timer
+    /// come in one after another (see `draw_calendar`).
+    fn replay_calendar(&mut self) {
+        self.cal_in.snap(0.0);
+        self.cal_in.set(1.0);
     }
 
     fn show_peek(&mut self, kind: PeekKind) {
@@ -1953,6 +2012,10 @@ impl App {
         if let (Some((_, was)), Some((_, plugged))) = (before, now) {
             if was != plugged && self.cfg.charge_osd {
                 self.show_peek(PeekKind::Power);
+            }
+            // Battery saver comes on when the charger goes out, and off when it goes in.
+            if was != plugged && self.cfg.battery_saver {
+                self.reload_config();
             }
         }
     }
@@ -2557,6 +2620,7 @@ impl App {
             }
             TIMER_TICK => self.dirty = true,
             TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
+            TIMER_FULLSCREEN => self.check_fullscreen(),
             TIMER_PASTE => shell::paste(),
             TIMER_CAL => {
                 self.announce_events();
@@ -2891,7 +2955,7 @@ impl App {
             MenuCmd::Settings => self.open_settings(),
             MenuCmd::Launcher => self.toggle_launcher(),
             MenuCmd::Reload => self.reload_config(),
-            MenuCmd::None | MenuCmd::Quit => {}
+            MenuCmd::None | MenuCmd::Quit | MenuCmd::Restart | MenuCmd::FullRestart => {}
         }
         if let Some(s) = &self.settings {
             s.invalidate();
@@ -2902,6 +2966,7 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        self.cfg.save_battery(self.power);
         theme::set(&self.cfg.theme);
         theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
         theme::set_edge(self.cfg.theme_edge);
@@ -3750,6 +3815,7 @@ impl App {
         self.launcher.hide();
         self.desks = desktops::read();
         self.switcher.begin_view(k, monitor, self.desks.clone());
+        desktops::spawn_apps();
     }
 
     /// A window card was dropped on a desktop in Task View. Windows has to be
@@ -4370,6 +4436,7 @@ impl App {
                 || !self.h.settled()
                 || !self.r.settled()
                 || !self.fade.settled()
+                || !self.cal_in.settled()
                 || !self.tab.settled()
                 || !self.tabs_fade.settled()
                 || !self.level.settled()
@@ -4429,6 +4496,7 @@ impl App {
             fast |= self.h.step(dt);
             fast |= self.r.step(dt);
             self.fade.step(dt);
+            self.cal_in.step(dt);
             fast |= self.tab.step(dt);
             self.tabs_fade.step(dt);
             fast |= self.level.step(dt);
@@ -5658,6 +5726,9 @@ impl App {
     }
 
     fn draw_calendar(&self, p: &Painter, alpha: f32) {
+        // Everything comes in one after another as `cal_in` goes from 0 to 1:
+        // `stag` is how far along an item is, given when it starts.
+        let stag = |delay: f32| stagger(self.cal_in.value, delay);
         let ox = self.origin;
         let fonts = &self.gfx.fonts;
         let st = unsafe { GetLocalTime() };
@@ -5678,27 +5749,35 @@ impl App {
             .filter_map(|d| (d >= month_start).then_some((d - month_start + 1) as u32))
             .collect();
 
+        let head = ease_out(stag(0.0));
         p.text(
             &date_text(w!("MMMM yyyy")),
             &fonts.label,
-            gx + 4.0,
+            gx + 4.0 - (1.0 - head) * 8.0,
             10.0,
             7.0 * cell,
             20.0,
             Align::Left,
-            Color::white(0.95 * alpha),
+            Color::white(0.95 * alpha * head),
         );
         for (i, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-            p.text(d, &fonts.small, gx + i as f32 * cell, 32.0, cell, 16.0, Align::Center, Color::white(0.4 * alpha));
+            let a = ease_out(stag(0.05 + i as f32 * 0.03));
+            let c = Color::white(0.4 * alpha * a);
+            p.text(d, &fonts.small, gx + i as f32 * cell, 32.0 - (1.0 - a) * 4.0, cell, 16.0, Align::Center, c);
         }
         for day in 1..=days_in_month(year, month) {
             let idx = col0 as u32 + day - 1;
             let (col, row) = ((idx % 7) as f32, (idx / 7) as f32);
             let cx = gx + col * cell;
-            let cy = 50.0 + row * 24.0;
+            // Each day rises into place a moment after the one before it.
+            let rise = stag(0.15 + idx as f32 * 0.018);
+            let cy = 50.0 + row * 24.0 + (1.0 - ease_out(rise)) * 7.0;
+            let alpha = alpha * ease_out(rise);
             let is_today = day == today;
             if is_today {
-                p.circle(cx + cell / 2.0, cy + 11.0, 11.0, theme::accent().alpha(alpha));
+                // Today's circle pops in last, with a little overshoot.
+                let pop = pop_out(stag(0.5 + idx as f32 * 0.01));
+                p.circle(cx + cell / 2.0, cy + 11.0, 11.0 * pop, theme::accent().alpha(alpha));
             }
             let weekend = col >= 5.0;
             let a = if is_today {
@@ -5712,7 +5791,8 @@ impl App {
             p.text(&day.to_string(), font, cx, cy, cell, 22.0, Align::Center, Color::white(a * alpha));
             if busy.contains(&day) {
                 let c = if is_today { Color::white(alpha) } else { theme::accent().alpha(alpha) };
-                p.circle(cx + cell / 2.0, cy + 19.5, 1.6, c);
+                let dot = pop_out(stag(0.7 + idx as f32 * 0.01));
+                p.circle(cx + cell / 2.0, cy + 19.5, 1.6 * dot, c);
             }
         }
 
@@ -5721,27 +5801,33 @@ impl App {
         if !agenda.is_empty() {
             let tw = self.content_w;
             let now = calendar::now();
-            p.rrect(gx, 198.0, tw - 36.0, 1.0, 0.0, Color::white(0.08 * alpha));
+            p.rrect(gx, 198.0, (tw - 36.0) * ease_out(stag(0.6)), 1.0, 0.0, Color::white(0.08 * alpha));
             for (i, e) in agenda.iter().enumerate() {
+                // Each event slides in from the left.
+                let a = ease_out(stag(0.7 + i as f32 * 0.1));
+                let alpha = alpha * a;
+                let slide = (1.0 - a) * 12.0;
                 let y = 202.0 + i as f32 * 22.0;
                 let on = e.start <= now && e.end > now;
                 let c = if on { theme::accent() } else { Color::white(0.6) };
-                p.text(&when(e, now), &fonts.small, gx + 4.0, y, 112.0, 22.0, Align::Left, c.alpha(alpha));
+                p.text(&when(e, now), &fonts.small, gx + 4.0 - slide, y, 112.0, 22.0, Align::Left, c.alpha(alpha));
                 let what =
                     if e.location.is_empty() { e.title.clone() } else { format!("{} \u{b7} {}", e.title, e.location) };
                 let x = gx + 120.0;
-                p.text(&what, &fonts.small, x, y, ox + tw - 18.0 - x, 22.0, Align::Left, Color::white(0.92 * alpha));
+                let w = ox + tw - 18.0 - x;
+                p.text(&what, &fonts.small, x - slide, y, w, 22.0, Align::Left, Color::white(0.92 * alpha));
             }
         }
 
-        // Focus timer.
+        // Focus timer: the ring draws itself round to where the timer is.
+        let timer = ease_out(stag(0.2));
         let (rx, rw) = (ox + 226.0, 176.0);
         let c = if self.pomo.focus { theme::accent() } else { GREEN };
         let phase = if self.pomo.focus { "Focus" } else { "Break" };
-        p.text(phase, &fonts.label, rx, 10.0, rw, 20.0, Align::Center, c.alpha(alpha));
+        p.text(phase, &fonts.label, rx, 10.0, rw, 20.0, Align::Center, c.alpha(alpha * timer));
         let (cx, cy, r) = (ox + 314.0, 82.0, 40.0);
-        p.stroke_circle(cx, cy, r, Color::white(0.12 * alpha), 4.0);
-        let a = self.pomo.progress().clamp(0.0, 0.999) * std::f32::consts::TAU;
+        p.stroke_circle(cx, cy, r, Color::white(0.12 * alpha * timer), 4.0);
+        let a = self.pomo.progress().clamp(0.0, 0.999) * std::f32::consts::TAU * timer;
         if a > 0.01 {
             p.arc(cx, cy, r, -std::f32::consts::FRAC_PI_2, a - std::f32::consts::FRAC_PI_2, c.alpha(alpha), 4.0);
         }
@@ -5753,11 +5839,17 @@ impl App {
             80.0,
             26.0,
             Align::Center,
-            Color::white(0.95 * alpha),
+            Color::white(0.95 * alpha * timer),
         );
 
-        let white = Color::white(0.95 * alpha);
-        for (hot, bx) in [(Hot::PomoReset, ox + 274.0), (Hot::PomoToggle, ox + 314.0), (Hot::PomoSkip, ox + 354.0)] {
+        for (n, (hot, bx)) in [(Hot::PomoReset, ox + 274.0), (Hot::PomoToggle, ox + 314.0), (Hot::PomoSkip, ox + 354.0)]
+            .into_iter()
+            .enumerate()
+        {
+            // The buttons pop in one after another under the ring.
+            let pop = pop_out(stag(0.45 + n as f32 * 0.08));
+            let alpha = alpha * pop.min(1.0);
+            let white = Color::white(0.95 * alpha);
             let by = 150.0;
             let bg = if self.hovered == Some(hot) { 0.18 } else { 0.09 };
             p.circle(bx, by, 16.0, Color::white(bg * alpha));
@@ -5769,6 +5861,24 @@ impl App {
             }
         }
     }
+}
+
+/// How far along (0 to 1) something is that starts at `delay` while `v`, the
+/// whole entrance, goes from 0 to 1.
+fn stagger(v: f32, delay: f32) -> f32 {
+    ((v * 1.8 - delay) / 0.8).clamp(0.0, 1.0)
+}
+
+/// Slows to a stop: 0 to 1.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Grows from 0 to a little past 1 and settles on 1.
+fn pop_out(t: f32) -> f32 {
+    let (c1, c3) = (1.70158f32, 2.70158f32);
+    let u = t - 1.0;
+    1.0 + c3 * u.powi(3) + c1 * u * u
 }
 
 // --------------------------------------------------------------- tab bar --

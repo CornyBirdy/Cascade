@@ -42,6 +42,9 @@ notch_edge = top
 notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
+# On battery (laptops), go easy on it: no refraction, no visualizer bars, and
+# the PC's stats read less often. Back to normal once it's plugged in.
+battery_saver = false
 # While music or a focus timer plays, show it on the closed notch: the notch
 # style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
@@ -285,6 +288,7 @@ pub struct Config {
     pub notch_edge: String,
     pub notch_position: f32,
     pub hide_in_fullscreen: bool,
+    pub battery_saver: bool,
     pub live_activity: bool,
     pub visualizer: bool,
     pub lip_visualizer: bool,
@@ -396,6 +400,7 @@ impl Default for Config {
             notch_edge: "top".into(),
             notch_position: 0.5,
             hide_in_fullscreen: true,
+            battery_saver: false,
             live_activity: true,
             visualizer: true,
             lip_visualizer: true,
@@ -538,6 +543,19 @@ fn list_without(list: &str, name: &str) -> Vec<String> {
 }
 
 impl Config {
+    /// Battery saver (`battery_saver`): while the PC runs on its battery
+    /// (`power`: its level, and whether the charger is in), the costly extras
+    /// are off. Applied to the loaded settings only; the file is untouched.
+    pub fn save_battery(&mut self, power: Option<(u8, bool)>) {
+        if self.battery_saver && power.is_some_and(|(_, plugged)| !plugged) {
+            self.refraction = false;
+            self.visualizer = false;
+            self.lip_visualizer = false;
+            self.widget_visualizer = false;
+            self.stats_seconds = self.stats_seconds.max(5);
+        }
+    }
+
     /// Whether the taskbar widget `name` is on either side.
     pub fn placed(&self, name: &str) -> bool {
         list_has(&self.taskbar_left, name) || list_has(&self.taskbar_right, name)
@@ -630,6 +648,7 @@ impl Config {
                 "notch_edge" if matches!(v, "top" | "bottom" | "left" | "right") => c.notch_edge = v.into(),
                 "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
+                "battery_saver" => set_b(&mut c.battery_saver),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
                 "lip_visualizer" => set_b(&mut c.lip_visualizer),
@@ -780,6 +799,7 @@ impl Config {
             "notch_edge" => self.notch_edge.clone(),
             "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
+            "battery_saver" => b(self.battery_saver),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
             "lip_visualizer" => b(self.lip_visualizer),

@@ -217,7 +217,7 @@ pub fn glint_only(w: i32, h: i32, radius: f32, dst: &mut [u8]) {
             for x in x0..x1 {
                 let (d, _, ny) = edge(x as f32 + 0.5, y as f32 + 0.5, fw, fh, r);
                 let inside = -d;
-                if inside < -0.5 || inside >= GLINT_BAND {
+                if !(-0.5..GLINT_BAND).contains(&inside) {
                     continue;
                 }
                 let t = (1.0 - inside.max(0.0) / GLINT_BAND).clamp(0.0, 1.0);

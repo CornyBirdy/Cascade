@@ -16,14 +16,16 @@
 
 use std::ffi::c_void;
 
-use windows::core::{interface, w, IUnknown, IUnknown_Vtbl, Interface, Result, GUID, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND};
+use windows::core::{interface, w, IUnknown, IUnknown_Vtbl, Interface, Result, BOOL, GUID, HRESULT, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND, LPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::Common::IObjectArray;
+use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
 
 use crate::msg;
 
@@ -123,6 +125,68 @@ pub fn read() -> Desktops {
         })
         .collect();
     Desktops { names, current }
+}
+
+/// A desktop id as the 16 bytes Explorer keeps in the registry.
+fn guid_bytes(g: &GUID) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&g.data1.to_le_bytes());
+    b[4..6].copy_from_slice(&g.data2.to_le_bytes());
+    b[6..8].copy_from_slice(&g.data3.to_le_bytes());
+    b[8..16].copy_from_slice(&g.data4);
+    b
+}
+
+/// The apps with a window on each desktop (indexed as `Desktops` is), by name
+/// and without repeats. Asks Explorer which desktop each window is on, so
+/// call it off the UI thread, on one that has initialised COM.
+pub fn apps() -> Vec<Vec<String>> {
+    unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
+        let (windows, own) = &mut *(out.0 as *mut (Vec<HWND>, u32));
+        if crate::dock::is_app_window_any_desktop(h, *own) {
+            windows.push(h);
+        }
+        true.into()
+    }
+    let mut all = (Vec::<HWND>::new(), unsafe { GetCurrentProcessId() });
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
+    }
+    let windows = all.0;
+    let key = HSTRING::from(KEY);
+    let ids = binary(&key, w!("VirtualDesktopIDs")).unwrap_or_default();
+    let ids: Vec<[u8; 16]> = ids.as_chunks::<16>().0.to_vec();
+    let mut found: Vec<Vec<String>> = vec![Vec::new(); ids.len().max(1)];
+    let manager: Result<IVirtualDesktopManager> = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL) };
+    let Ok(manager) = manager else { return found };
+    for window in windows {
+        let Ok(id) = (unsafe { manager.GetWindowDesktopId(window) }) else { continue };
+        // With one desktop there's no list of ids: they're all on it.
+        let Some(desktop) = (if ids.is_empty() { Some(0) } else { ids.iter().position(|d| *d == guid_bytes(&id)) })
+        else {
+            continue;
+        };
+        let name = crate::dock::window_app_name(window);
+        if !found[desktop].contains(&name) {
+            found[desktop].push(name);
+        }
+    }
+    found
+}
+
+/// Reads `apps` on a thread of its own and posts `msg::DESK_APPS` with them.
+pub fn spawn_apps() {
+    std::thread::spawn(|| unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+        let inited = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let ptr = Box::into_raw(Box::new(apps()));
+        if !msg::post(msg::DESK_APPS, 0, ptr as isize) {
+            drop(Box::from_raw(ptr));
+        }
+        if inited {
+            CoUninitialize();
+        }
+    });
 }
 
 /// Starts the thread that posts `msg::DESKTOPS` whenever the desktops (or

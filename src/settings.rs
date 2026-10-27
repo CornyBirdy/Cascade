@@ -378,6 +378,12 @@ fn rows(section: usize) -> Vec<Row> {
         0 => vec![
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
+            row(
+                "battery_saver",
+                "Battery saver",
+                "On battery, turn off refraction and the visualizer bars and read stats less often.",
+                Toggle,
+            ),
             row("alt_tab", "Alt+Tab switcher", "Cascade's own, with live previews, instead of Windows'.", Toggle),
             row(
                 "alt_tab_style",
@@ -870,6 +876,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
         }
         (0, "alt_tab_style") => on("alt_tab"),
+        (0, "battery_saver") => on("battery"),
         // Notch.
         (2, "notch") => true,
         (2, _) if !on("notch") => false,
