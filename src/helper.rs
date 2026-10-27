@@ -50,15 +50,21 @@ fn is_elevated() -> bool {
 /// this one has none. Keys this process injects don't reach it then
 /// (Windows drops them without saying so).
 pub fn foreground_above_us() -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    !fg.is_invalid() && window_above_us(fg)
+}
+
+/// Whether window `h` belongs to a program with admin rights while this one
+/// has none (so this process can't move it, or send it keys).
+pub fn window_above_us(h: HWND) -> bool {
     use std::sync::OnceLock;
     static ME: OnceLock<bool> = OnceLock::new();
     if *ME.get_or_init(is_elevated) {
         return false;
     }
     unsafe {
-        let fg = GetForegroundWindow();
         let mut pid = 0u32;
-        if fg.is_invalid() || GetWindowThreadProcessId(fg, Some(&mut pid)) == 0 || pid == 0 {
+        if GetWindowThreadProcessId(h, Some(&mut pid)) == 0 || pid == 0 {
             return false;
         }
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {

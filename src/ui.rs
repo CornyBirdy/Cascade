@@ -426,6 +426,8 @@ struct App {
     /// The Win+V menu (made the first time it's opened), its reader, and the
     /// window it pastes into.
     clips: Option<ClipMenu>,
+    /// The clipboard history as the widgets panel's card shows it.
+    widget_clips: clipboard::Clips,
     clip_tx: Sender<ClipCmd>,
     clip_target: HWND,
     /// Last rect given to the hidden tray window.
@@ -778,14 +780,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             if wp.0 != 0 {
                 with_app(move |a| {
                     a.switcher.window_moved(HWND(lp.0 as *mut _));
-                    desktops::spawn_apps();
+                    desktops::spawn_windows(a.switcher.monitor());
                 });
             }
             return LRESULT(0);
         }
         msg::DESK_APPS => {
-            let apps = Box::from_raw(lp.0 as *mut Vec<Vec<String>>);
-            with_app(move |a| a.switcher.set_desk_apps(*apps));
+            let windows = Box::from_raw(lp.0 as *mut Vec<Vec<desktops::DeskWindow>>);
+            with_app(move |a| a.switcher.set_desk_windows(*windows));
             return LRESULT(0);
         }
         msg::CALENDAR => {
@@ -796,6 +798,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         msg::CLIPS => {
             let c = Box::from_raw(lp.0 as *mut clipboard::Clips);
             with_app(move |a| {
+                // The panel's Clipboard card reads them too.
+                a.widget_clips = (*c).clone();
+                if a.widgets.open {
+                    a.widgets.dirty();
+                }
                 if let Some(m) = &mut a.clips {
                     m.set(*c);
                 }
@@ -1164,6 +1171,7 @@ impl App {
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
             deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
             clips: None,
+            widget_clips: clipboard::Clips::default(),
             clip_tx: clipboard::spawn(),
             clip_target: HWND::default(),
             tray_rect: RECT::default(),
@@ -1224,6 +1232,7 @@ impl App {
         launcher::spawn_scan();
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
+        crate::superdrag::configure(self.cfg.super_drag);
         desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
@@ -2983,6 +2992,7 @@ impl App {
             }
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
+        crate::superdrag::configure(self.cfg.super_drag);
         self.perf = Perf::new(self.cfg.perf_log);
         self.apply_calendar();
         self.update_display();
@@ -3065,6 +3075,20 @@ impl App {
     }
 
     fn toggle_launcher(&mut self) {
+        // What a Win press looked like, for tracking down a Start menu that
+        // acts up: this goes in cascade.log.
+        let front = unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+            dock::process_path(pid)
+        };
+        let front = front.as_deref().and_then(|p| p.rsplit(['\\', '/']).next()).unwrap_or("nothing");
+        config::log(&format!(
+            "start: Win pressed, Cascade's menu was {}; {}; in front: {front}; elevated in front: {}",
+            if self.launcher.open { "open" } else { "closed" },
+            keyhook::last_lone(),
+            crate::helper::foreground_above_us(),
+        ));
         if self.launcher.open {
             self.win_closed_at = Some(Instant::now());
             self.launcher.hide();
@@ -3815,7 +3839,7 @@ impl App {
         self.launcher.hide();
         self.desks = desktops::read();
         self.switcher.begin_view(k, monitor, self.desks.clone());
-        desktops::spawn_apps();
+        desktops::spawn_windows(monitor);
     }
 
     /// A window card was dropped on a desktop in Task View. Windows has to be
@@ -3903,6 +3927,11 @@ impl App {
         let notifications = self.cfg.widgets_notifications;
         let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
         self.widgets.show(panel, notifications, columns, right, bottom, max_h, k);
+        // The Clipboard card: read the history once the panel is in front
+        // (Windows only hands it to the app in front).
+        if self.widgets.shows_clipboard() {
+            let _ = self.clip_tx.send(ClipCmd::Refresh);
+        }
         self.arm_stats();
         // The Phone card lists the phone's notifications, so it reads them too.
         if notifications || self.widgets.shows_phone() {
@@ -3927,9 +3956,33 @@ impl App {
                 self.widgets.on_move(x, y);
             }
             WM_MOUSELEAVE => self.widgets.on_leave(),
+            WM_LBUTTONDOWN => {
+                // A card may be picked up here and carried to a new place.
+                let (x, y) = lparam_xy(lp);
+                if self.widgets.on_down(x, y) {
+                    unsafe {
+                        let _ = SetCapture(self.widgets.hwnd);
+                    }
+                }
+            }
             WM_LBUTTONUP => {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
                 let (x, y) = lparam_xy(lp);
                 self.widgets.on_move(x, y);
+                let carried = self.widgets.carrying();
+                // Put down: the new order is kept.
+                if let Some(order) = self.widgets.on_up() {
+                    self.apply_change(Change::Many(vec![("widgets_panel", order)]));
+                    if let Some(s) = &mut self.settings {
+                        let cfg = &self.cfg;
+                        s.sync_edits(&|k: &str| setting_value(cfg, k));
+                    }
+                }
+                if carried {
+                    return Some(LRESULT(0));
+                }
                 match self.widgets.on_click(x, y) {
                     Some(widgets::Action::Previous) => {
                         let _ = self.media_tx.send(MediaCmd::Previous);
@@ -3953,7 +4006,16 @@ impl App {
                         self.widgets.hide();
                         match aumid.filter(|a| !a.is_empty()) {
                             Some(a) => {
-                                shell::open(&format!("shell:AppsFolder\\{a}"));
+                                // The Snipping Tool's own notification opens the new
+                                // screenshot in the editor; other apps just open.
+                                let snip = a.contains("ScreenSketch").then(shell::recent_screenshot).flatten();
+                                match snip {
+                                    Some(file) => shell::open(&format!(
+                                        "ms-screensketch:edit?source={}&isTemporary=false",
+                                        shell::uri_escape(&file.to_string_lossy())
+                                    )),
+                                    None => shell::open(&format!("shell:AppsFolder\\{a}")),
+                                }
                                 self.notifs.items.retain(|n| n.id != id);
                                 let _ = self.notif_tx.send(NotifCmd::Remove(id));
                             }
@@ -3973,6 +4035,18 @@ impl App {
                     Some(widgets::Action::OpenPhoneLink) => {
                         self.widgets.hide();
                         shell::open("shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App");
+                    }
+                    Some(widgets::Action::CopyClip(i)) => {
+                        // Back on the clipboard; nothing is pasted anywhere.
+                        if let Some(item) = self.widget_clips.items.get(i) {
+                            self.clip_target = HWND::default();
+                            self.widgets.set_copied(Some(item.id.clone()));
+                            let _ = self.clip_tx.send(ClipCmd::Paste(item.id.clone()));
+                        }
+                    }
+                    Some(widgets::Action::ClearClips) => {
+                        self.widget_clips.items.clear();
+                        let _ = self.clip_tx.send(ClipCmd::Clear);
                     }
                     Some(widgets::Action::TaskManager) => {
                         self.widgets.hide();
@@ -4600,6 +4674,7 @@ impl App {
                 weather: self.weather.as_ref(),
                 notifs: &self.notifs,
                 events: &self.events,
+                clips: &self.widget_clips,
             };
             let t = self.perf.start();
             let _ = self.widgets.render(&mut self.gfx, &ctx);

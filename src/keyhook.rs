@@ -75,6 +75,30 @@ fn notify(m: u32, wparam: usize) {
     }
 }
 
+/// How the latest lone Win press went, for `cascade.log` (see `last_lone`):
+/// 1 the mask tap landed before the release, 2 it didn't and the release was
+/// replaced by mask + release, 3 the same but Windows refused that (the real
+/// release went through), 4 and 5 the same as 2 and 3 for a long hold.
+static LONE: AtomicU32 = AtomicU32::new(0);
+/// How long (ms) that press was held.
+static LONE_HELD: AtomicU32 = AtomicU32::new(0);
+/// A Win press held longer than this (ms) gets its release replaced by mask +
+/// release even if the early mask went through.
+const LONG_HOLD: u32 = 350;
+
+/// How the latest lone Win press went (see `LONE`).
+pub fn last_lone() -> String {
+    let how = match LONE.load(Ordering::Relaxed) {
+        1 => "mask landed in time",
+        2 => "released early; release replaced with mask + release",
+        3 => "released early; Windows refused the replacement",
+        4 => "long hold; release replaced with mask + release",
+        5 => "long hold; Windows refused the replacement",
+        _ => "unknown",
+    };
+    format!("{how}, held {} ms", LONE_HELD.load(Ordering::Relaxed))
+}
+
 fn on_lone_win() {
     notify(msg::OPEN_LAUNCHER, 0);
 }
@@ -214,6 +238,12 @@ unsafe fn masked_release(vk: u16) -> bool {
     }
     let inputs = [key(MASK_KEY, false), key(MASK_KEY, true), key(vk, true)];
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
+}
+
+/// Taps the mask key now: to Windows the Win key held down is part of a
+/// combination, so letting go of it won't open its Start menu.
+pub fn mask_win() {
+    unsafe { mask_tap() };
 }
 
 /// Taps the mask key (down and up as one batch).
@@ -409,16 +439,32 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else if is_win && up {
                     let was_down = WIN_DOWN.swap(false, Ordering::Relaxed);
                     if was_down && !COMBO.load(Ordering::Relaxed) && !mouse_used(k.time) {
-                        if MASK_SEEN.load(Ordering::Relaxed) {
+                        let held = k.time.wrapping_sub(WIN_SINCE.load(Ordering::Relaxed));
+                        LONE_HELD.store(held, Ordering::Relaxed);
+                        if MASK_SEEN.load(Ordering::Relaxed) && held <= LONG_HOLD {
                             // Windows has seen a key come between the press and
                             // this release: its Start menu stays shut.
+                            LONE.store(1, Ordering::Relaxed);
                             on_lone_win();
                         } else {
-                            // Released before the mask tap went out. Send one
-                            // right before the release, as one batch with it,
-                            // and hold back the real release. If Windows
-                            // didn't accept the batch the real one passes.
+                            // Released before the mask tap went out, or after
+                            // a long hold (a program watching the Win key,
+                            // such as PowerToys' Shortcut Guide, may have
+                            // undone the early mask by then). Send one right
+                            // before the release, as one batch with it, and
+                            // hold back the real release. If Windows didn't
+                            // accept the batch the real one passes.
                             let handled = masked_release(vk);
+                            let long = held > LONG_HOLD;
+                            LONE.store(
+                                match (long, handled) {
+                                    (false, true) => 2,
+                                    (false, false) => 3,
+                                    (true, true) => 4,
+                                    (true, false) => 5,
+                                },
+                                Ordering::Relaxed,
+                            );
                             on_lone_win();
                             if handled {
                                 request_check();

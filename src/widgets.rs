@@ -14,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::audio::BANDS;
 use crate::backdrop::Backdrop;
+use crate::clipboard::{self, Clips};
 use crate::gfx::{Align, Color, Fonts, Gfx, Layer, Painter};
 use crate::ics::{self, Event, DAY};
 use crate::media::MediaInfo;
@@ -32,6 +33,9 @@ const ORANGE: Color = Color(1.0, 0.65, 0.30, 1.0);
 const NOTIF_ROW: f32 = 52.0;
 /// Notifications listed at once (the newest).
 const NOTIF_MAX: usize = 5;
+/// Clipboard items listed at once (the newest), and a row's height.
+const CLIP_MAX: usize = 5;
+const CLIP_ROW: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Card {
@@ -40,10 +44,39 @@ enum Card {
     System,
     Weather,
     Calendar,
+    /// Windows' clipboard history: click an item to copy it again.
+    Clipboard,
     /// Your Android phone through Phone Link: what it's notified you of, and
     /// a way into Phone Link.
     Phone,
 }
+
+/// The name a card has in the `widgets_panel` setting.
+fn card_name(card: Card) -> &'static str {
+    match card {
+        Card::Notifications => "notifications",
+        Card::Media => "media",
+        Card::System => "system",
+        Card::Weather => "weather",
+        Card::Calendar => "calendar",
+        Card::Clipboard => "clipboard",
+        Card::Phone => "phone",
+    }
+}
+
+/// A card picked up to move it about the panel.
+struct Drag {
+    card: Card,
+    /// Where the button went down, and where the pointer is now (px).
+    from: (i32, i32),
+    at: (i32, i32),
+    /// Where in the card it was picked up (layout units).
+    grab: (f32, f32),
+    /// Past the wobble of a click: the card is carried along.
+    live: bool,
+}
+/// How far (px) the pointer goes before a press on a card is a drag.
+const DRAG_FROM: i32 = 6;
 
 /// How many of the phone's notifications the Phone card lists.
 const PHONE_MAX: usize = 3;
@@ -63,6 +96,7 @@ fn parse_cards(list: &str) -> Vec<Card> {
             "system" | "stats" => Card::System,
             "weather" => Card::Weather,
             "calendar" => Card::Calendar,
+            "clipboard" => Card::Clipboard,
             "phone" => Card::Phone,
             _ => continue,
         };
@@ -84,6 +118,9 @@ enum Target {
     NotifRemove(u32),
     NotifSettings,
     OpenPhoneLink,
+    /// A clipboard item (by its place in the list), and the card's Clear.
+    ClipItem(usize),
+    ClipClear,
     /// The System card (opens Task Manager).
     System,
     /// The calendar card's month arrows (-1, +1), its title (back to this
@@ -105,6 +142,9 @@ pub enum Action {
     NotificationSettings,
     OpenPhoneLink,
     TaskManager,
+    /// A clipboard item was clicked: copy it again (by its place in the list).
+    CopyClip(usize),
+    ClearClips,
 }
 
 /// What the cards show.
@@ -118,6 +158,8 @@ pub struct Ctx<'a> {
     pub notifs: &'a Snapshot,
     /// Your calendar's events (see `calendar`).
     pub events: &'a [Event],
+    /// The clipboard history (see `clipboard`).
+    pub clips: &'a Clips,
 }
 
 pub struct Widgets {
@@ -135,6 +177,14 @@ pub struct Widgets {
     /// itself (one would have been too tall) once its data was in.
     opened_at: Instant,
     last_wide: bool,
+    /// How tall the panel was in one column, the last time its data had
+    /// come in: what the next opening goes by until its own data arrives.
+    known_h: f32,
+    /// The clipboard item that was just copied again.
+    copied: Option<String>,
+    /// Where each card was drawn last (card, x, y, height), for picking one up.
+    rects: Vec<(Card, f32, f32, f32)>,
+    drag: Option<Drag>,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -229,6 +279,13 @@ fn card_height(card: Card, ctx: &Ctx, cal_rows: usize) -> f32 {
             let rows = 3 + gpus + s.disk.is_some() as usize;
             34.0 + rows as f32 * 44.0 + 6.0
         }
+        Card::Clipboard => {
+            let rows = match ctx.clips.state {
+                clipboard::State::Ready => ctx.clips.items.len().clamp(1, CLIP_MAX),
+                _ => 1,
+            };
+            34.0 + rows as f32 * CLIP_ROW + 6.0
+        }
         Card::Weather => 112.0,
         Card::Calendar => 256.0 + if cal_rows > 0 { 12.0 + cal_rows as f32 * CAL_ROW } else { 0.0 },
         Card::Phone => {
@@ -248,6 +305,8 @@ struct Layout {
     cards: Vec<(Card, f32, f32, f32)>,
     w: f32,
     h: f32,
+    /// How tall it would be in one column.
+    one_h: f32,
 }
 
 impl Widgets {
@@ -264,6 +323,10 @@ impl Widgets {
             max_h: f32::MAX,
             opened_at: Instant::now(),
             last_wide: false,
+            known_h: 0.0,
+            copied: None,
+            rects: Vec::new(),
+            drag: None,
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -309,6 +372,8 @@ impl Widgets {
         self.k = k;
         self.open = true;
         self.hovered = None;
+        self.copied = None;
+        self.drag = None;
         if !self.visible {
             // Opened afresh: back to today on the calendar.
             self.cal_month = 0;
@@ -355,11 +420,83 @@ impl Widgets {
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
         }
+        if let Some(d) = &mut self.drag {
+            d.at = (x, y);
+            if !d.live && (x - d.from.0).abs().max((y - d.from.1).abs()) >= DRAG_FROM {
+                d.live = true;
+            }
+            if d.live {
+                // Over another card: the carried one takes its place there and
+                // the cards in between make room.
+                let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+                let carried = d.card;
+                let over = self
+                    .rects
+                    .iter()
+                    .find(|(c, cx, cy, ch)| {
+                        *c != carried
+                            && *c != Card::Notifications
+                            && lx >= *cx
+                            && lx < cx + CARD_W
+                            && ly >= *cy
+                            && ly < cy + ch
+                    })
+                    .map(|r| r.0);
+                if let (Some(over), Some(from)) = (over, self.cards.iter().position(|&c| c == carried)) {
+                    if let Some(to) = self.cards.iter().position(|&c| c == over) {
+                        let card = self.cards.remove(from);
+                        self.cards.insert(to, card);
+                    }
+                }
+                self.hovered = None;
+                self.dirty = true;
+                return;
+            }
+        }
         let h = self.hit(x, y);
         if h != self.hovered {
             self.hovered = h;
             self.dirty = true;
         }
+    }
+
+    /// The button went down. True when it picked up a card (it might turn
+    /// into a drag), so the mouse should be captured. A card is picked up
+    /// anywhere that isn't a button; the Notifications card stays on top.
+    pub fn on_down(&mut self, x: i32, y: i32) -> bool {
+        self.drag = None;
+        if !matches!(self.hit(x, y), None | Some(Target::System)) {
+            return false;
+        }
+        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+        let Some(&(card, cx, cy, _)) = self.rects.iter().find(|(c, cx, cy, ch)| {
+            *c != Card::Notifications && lx >= *cx && lx < cx + CARD_W && ly >= *cy && ly < cy + ch
+        }) else {
+            return false;
+        };
+        self.drag = Some(Drag { card, from: (x, y), at: (x, y), grab: (lx - cx, ly - cy), live: false });
+        true
+    }
+
+    /// The button came up. If a card was being carried, it's put down: the
+    /// panel's new order for the `widgets_panel` setting. Otherwise it was
+    /// only a click.
+    pub fn on_up(&mut self) -> Option<String> {
+        let d = self.drag.take()?;
+        self.dirty = true;
+        d.live.then(|| {
+            self.cards
+                .iter()
+                .filter(|&&c| c != Card::Notifications)
+                .map(|&c| card_name(c))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+    }
+
+    /// Whether a card is being carried.
+    pub fn carrying(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.live)
     }
 
     /// Forgets the hovered button (its item just went away).
@@ -407,9 +544,16 @@ impl Widgets {
             Target::NotifRemove(id) => Action::RemoveNotification(id),
             Target::NotifSettings => Action::NotificationSettings,
             Target::OpenPhoneLink => Action::OpenPhoneLink,
+            Target::ClipItem(i) => Action::CopyClip(i),
+            Target::ClipClear => Action::ClearClips,
             Target::System => Action::TaskManager,
             Target::CalMonth(_) | Target::CalToday | Target::CalDay(_) => return None,
         })
+    }
+
+    /// Something changed that the panel shows.
+    pub fn dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn wants_frame(&self) -> bool {
@@ -421,15 +565,21 @@ impl Widgets {
     }
 
     fn layout(&self, ctx: &Ctx) -> Layout {
-        let one = self.layout_in(ctx, self.columns.max(1));
+        let mut one = self.layout_in(ctx, self.columns.max(1));
+        one.one_h = one.h;
         if self.columns == 1 && self.cards.len() > 1 {
             // Its stats and notifications arrive a moment after it opens and
-            // make the cards taller. If that was enough to need two columns
-            // last time, it opens in two now, instead of opening narrow and
-            // snapping wide. It only goes back to one once that clearly fits.
-            let carry = self.last_wide && (self.settling() || one.h > self.max_h * 0.8);
-            if one.h > self.max_h || carry {
-                return self.layout_in(ctx, 2);
+            // make the cards taller (before then they're whatever was read
+            // last, which can be long ago). So until they're in, it goes by
+            // how tall it was the last time they were: opening narrow and
+            // snapping wide a moment later is what that avoids. It only goes
+            // back to one column once that clearly fits.
+            let need = if self.settling() { one.h.max(self.known_h) } else { one.h };
+            let carry = self.last_wide && need > self.max_h * 0.8;
+            if need > self.max_h || carry {
+                let mut two = self.layout_in(ctx, 2);
+                two.one_h = one.h;
+                return two;
             }
         }
         one
@@ -454,7 +604,7 @@ impl Widgets {
         let w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
         let tallest = col_y.iter().copied().fold(HEADER, f32::max);
         let h = if self.cards.is_empty() { HEADER + 50.0 } else { tallest - GAP + PAD };
-        Layout { cards: out, w, h }
+        Layout { cards: out, w, h, one_h: h }
     }
 
     pub fn render(&mut self, gfx: &mut Gfx, ctx: &Ctx) -> Result<()> {
@@ -472,9 +622,10 @@ impl Widgets {
             return Ok(());
         }
         let k = self.k;
-        let Layout { cards, w, h } = self.layout(ctx);
+        let Layout { cards, w, h, one_h } = self.layout(ctx);
         if self.open && !self.settling() {
             self.last_wide = self.columns == 1 && w > PAD * 2.0 + CARD_W + 1.0;
+            self.known_h = one_h;
         }
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 16.0 * k) as i32;
@@ -512,24 +663,27 @@ impl Widgets {
                 let hint = "No cards. Add some in Settings > Widgets.";
                 p.text(hint, &f.small, PAD + 4.0, HEADER, w - 2.0 * PAD, 40.0, Align::Left, Color::white(0.5));
             }
+            self.rects = cards.iter().map(|&(c, x, y, h)| (c, x, y, h)).collect();
+            let carried = self.drag.as_ref().filter(|d| d.live).map(|d| (d.card, d.at, d.grab));
+            let mut lifted = None;
             for (card, cx, cy, ch) in cards {
-                p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.05));
-                p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.07), 1.0);
-                match card {
-                    Card::Notifications => self.notifications_card(&p, f, ctx, cx, cy),
-                    Card::Media => self.media_card(&p, f, ctx, cx, cy),
-                    Card::System => {
-                        // The whole card opens Task Manager.
-                        if self.hovered == Some(Target::System) {
-                            p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.04));
-                        }
-                        system_card(&p, f, ctx, cx, cy);
-                        self.hits.push((Target::System, cx, cy, CARD_W, ch));
+                if let Some((c, at, grab)) = carried {
+                    if c == card {
+                        // Its place stays marked while it's carried.
+                        p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.18), 1.0);
+                        lifted = Some((card, at.0 as f32 / k - grab.0, at.1 as f32 / k - grab.1, ch));
+                        continue;
                     }
-                    Card::Weather => weather_card(&p, f, ctx, cx, cy),
-                    Card::Calendar => self.calendar_card(&p, f, ctx, cx, cy),
-                    Card::Phone => self.phone_card(&p, f, ctx, cx, cy, ch),
                 }
+                self.draw_card(&p, f, ctx, card, cx, cy, ch, 1.0);
+            }
+            // The card being carried follows the pointer, over the others.
+            if let Some((card, cx, cy, ch)) = lifted {
+                let keep = self.hits.len();
+                p.rrect(cx + 1.0, cy + 4.0, CARD_W, ch, 10.0, Color(0.0, 0.0, 0.0, 0.25));
+                self.draw_card(&p, f, ctx, card, cx, cy, ch, 0.97);
+                // Nothing in it can be clicked while it's carried.
+                self.hits.truncate(keep);
             }
         }
         let alpha = (self.reveal.value.clamp(0.0, 1.0) * 255.0) as u8;
@@ -540,6 +694,33 @@ impl Widgets {
             self.dirty = true;
         }
         shown
+    }
+
+    /// Draws `card` with its top-left corner at (`cx`, `cy`); `solid` is how
+    /// opaque its backing is (1 for a card in place).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, card: Card, cx: f32, cy: f32, ch: f32, solid: f32) {
+        if solid < 1.0 {
+            p.rrect(cx, cy, CARD_W, ch, 10.0, Color(0.17, 0.18, 0.21, solid));
+        }
+        p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.05));
+        p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.07), 1.0);
+        match card {
+            Card::Notifications => self.notifications_card(p, f, ctx, cx, cy),
+            Card::Media => self.media_card(p, f, ctx, cx, cy),
+            Card::System => {
+                // The whole card opens Task Manager.
+                if self.hovered == Some(Target::System) {
+                    p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.04));
+                }
+                system_card(p, f, ctx, cx, cy);
+                self.hits.push((Target::System, cx, cy, CARD_W, ch));
+            }
+            Card::Weather => weather_card(p, f, ctx, cx, cy),
+            Card::Calendar => self.calendar_card(p, f, ctx, cx, cy),
+            Card::Clipboard => self.clipboard_card(p, f, ctx, cx, cy),
+            Card::Phone => self.phone_card(p, f, ctx, cx, cy, ch),
+        }
     }
 
     fn notifications_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
@@ -597,6 +778,56 @@ impl Widgets {
                 }
             }
         }
+    }
+
+    /// The clipboard history: the newest few, click one to copy it again.
+    fn clipboard_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
+        use clipboard::State;
+        p.text("Clipboard", &f.label, x + 14.0, y + 6.0, 200.0, 26.0, Align::Left, Color::white(0.9));
+        let top = y + 34.0;
+        let note = |text: &str| p.text(text, &f.body, x, top, CARD_W, CLIP_ROW, Align::Center, Color::white(0.5));
+        match ctx.clips.state {
+            State::Loading => note("Loading\u{2026}"),
+            State::Off => note("Clipboard history is off in Windows"),
+            State::Unavailable => note("Clipboard history isn't available"),
+            State::Ready if ctx.clips.items.is_empty() => note("Nothing copied yet"),
+            State::Ready => {
+                let (cw, ch) = (50.0, 22.0);
+                let (bx, by) = (x + CARD_W - 10.0 - cw, y + 8.0);
+                if self.hovered == Some(Target::ClipClear) {
+                    p.rrect(bx, by, cw, ch, 6.0, Color::white(0.10));
+                }
+                p.text("Clear", &f.small, bx, by, cw, ch, Align::Center, Color::white(0.75));
+                self.hits.push((Target::ClipClear, bx, by, cw, ch));
+                for (i, item) in ctx.clips.items.iter().take(CLIP_MAX).enumerate() {
+                    let ry = top + i as f32 * CLIP_ROW;
+                    let target = Target::ClipItem(i);
+                    if self.hovered == Some(target) {
+                        p.rrect(x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0, 8.0, Color::white(0.08));
+                    } else if i > 0 {
+                        p.rrect(x + 14.0, ry, CARD_W - 28.0, 1.0, 0.0, Color::white(0.06));
+                    }
+                    let copied = self.copied.as_deref() == Some(item.id.as_str());
+                    let tw = CARD_W - 28.0 - if copied { 56.0 } else { 0.0 };
+                    p.text(&item.text, &f.small, x + 14.0, ry, tw, CLIP_ROW, Align::Left, Color::white(0.9));
+                    if copied {
+                        p.text("Copied", &f.small, x + CARD_W - 66.0, ry, 52.0, CLIP_ROW, Align::Right, GREEN);
+                    }
+                    self.hits.push((target, x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0));
+                }
+            }
+        }
+    }
+
+    /// Whether the Clipboard card is in the panel (it reads the history).
+    pub fn shows_clipboard(&self) -> bool {
+        self.cards.contains(&Card::Clipboard)
+    }
+
+    /// Item `id` was copied again: its row says so until the panel closes.
+    pub fn set_copied(&mut self, id: Option<String>) {
+        self.copied = id;
+        self.dirty = true;
     }
 
     /// Your phone through Phone Link: the notifications it mirrored here

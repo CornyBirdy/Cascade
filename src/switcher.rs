@@ -28,7 +28,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::Backdrop;
-use crate::desktops::Desktops;
+use crate::desktops::{DeskWindow, Desktops};
 use crate::dock::{self, Dock};
 use crate::gfx::{Align, Color, Gfx, Layer};
 use crate::spring::Spring;
@@ -81,9 +81,15 @@ struct Geom {
     max_rows: usize,
 }
 /// Task View's strip of desktops, under the cards.
-const STRIP_H: f32 = 64.0;
-const DESK_W: f32 = 132.0;
-const DESK_H: f32 = 40.0;
+const STRIP_H: f32 = 136.0;
+const DESK_W: f32 = 176.0;
+const DESK_H: f32 = 112.0;
+/// Room for a desktop's name under its picture.
+const DESK_LABEL: f32 = 22.0;
+/// The most windows drawn in a desktop's picture.
+const DESK_PIC_MAX: usize = 12;
+/// The icon in a window's place in a picture of a desktop.
+const MINI_ICON: f32 = 16.0;
 const DESK_GAP: f32 = 8.0;
 /// The "new desktop" button at the end of the strip.
 const PLUS_W: f32 = 44.0;
@@ -169,8 +175,9 @@ pub struct Switcher {
     desks: Desktops,
     /// The desktop or button under the pointer in the strip.
     desk_hover: Option<Spot>,
-    /// The apps with a window on each desktop (read as Task View opens).
-    desk_apps: Vec<Vec<String>>,
+    /// The windows on each desktop (read as Task View opens), for the
+    /// pictures of the desktops.
+    desk_windows: Vec<Vec<DeskWindow>>,
     drag: Option<Drag>,
     style: Style,
     /// Fading out after a pick (or Esc): still drawn until `open` reaches 0.
@@ -220,7 +227,7 @@ impl Switcher {
             view: false,
             desks: Desktops::default(),
             desk_hover: None,
-            desk_apps: Vec::new(),
+            desk_windows: Vec::new(),
             drag: None,
             style: Style::Cards,
             closing: false,
@@ -279,7 +286,7 @@ impl Switcher {
         self.list(k, monitor);
         self.desks = desks;
         self.desk_hover = None;
-        self.desk_apps.clear();
+        self.desk_windows.clear();
         let fg = unsafe { GetForegroundWindow() };
         self.selected = self.items.iter().position(|i| i.window == fg).unwrap_or(0);
         self.start();
@@ -293,11 +300,16 @@ impl Switcher {
     }
 
     /// What is open on each desktop, for the list that comes up over a desktop.
-    pub fn set_desk_apps(&mut self, apps: Vec<Vec<String>>) {
-        if self.view && apps != self.desk_apps {
-            self.desk_apps = apps;
+    pub fn set_desk_windows(&mut self, windows: Vec<Vec<DeskWindow>>) {
+        if self.view && windows != self.desk_windows {
+            self.desk_windows = windows;
             self.dirty = true;
         }
+    }
+
+    /// The screen Task View is on.
+    pub fn monitor(&self) -> RECT {
+        self.monitor
     }
 
     /// New desktops (or a switch) while Task View is open.
@@ -511,6 +523,16 @@ impl Switcher {
             x += DESK_W + DESK_GAP;
         }
         (desks, (x, y, PLUS_W))
+    }
+
+    /// Where a desktop's picture is inside its box (x, y, width, height), the
+    /// shape of the screen, centred above the name.
+    fn desk_picture(&self, bx: f32, by: f32, bw: f32) -> (f32, f32, f32, f32) {
+        let (aw, ah) = (bw - 12.0, DESK_H - DESK_LABEL - 10.0);
+        let m = self.monitor;
+        let shape = ((m.right - m.left).max(1) as f32 / (m.bottom - m.top).max(1) as f32).clamp(0.5, 3.0);
+        let (w, h) = if aw / ah > shape { (ah * shape, ah) } else { (aw, aw / shape) };
+        (bx + (bw - w) / 2.0, by + 6.0 + (ah - h) / 2.0, w, h)
     }
 
     fn spot(&self, x: i32, y: i32) -> Option<Spot> {
@@ -866,6 +888,22 @@ impl Switcher {
         let icons: Vec<Option<ID2D1Bitmap>> =
             self.items.iter().map(|it| it.id.as_ref().and_then(|id| dock.icon(id, gfx, icon_px))).collect();
 
+        // The small icons in the pictures of the desktops.
+        let mini_px = (MINI_ICON * k).round() as u32;
+        let desk_icons: Vec<Vec<Option<ID2D1Bitmap>>> = if self.view {
+            self.desk_windows
+                .iter()
+                .map(|ws| {
+                    ws.iter()
+                        .take(DESK_PIC_MAX)
+                        .map(|d| d.id.as_ref().and_then(|id| dock.icon(id, gfx, mini_px)))
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         if self.thumbs_dirty {
             for i in 0..self.items.len() {
                 self.place_thumb(i);
@@ -987,8 +1025,25 @@ impl Switcher {
                     } else if target {
                         p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent().alpha(0.9), 2.0);
                     }
+                    // The desktop itself: where its windows are.
+                    let (px, py, pw, ph) = self.desk_picture(bx, by, bw);
+                    p.rrect(px, py, pw, ph, 4.0, Color::white(0.07));
+                    let windows = self.desk_windows.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                    // The one in front is first: draw the others under it.
+                    for (n, d) in windows.iter().enumerate().take(DESK_PIC_MAX).rev() {
+                        let (wx, wy) = (px + d.at.0 * pw, py + d.at.1 * ph);
+                        let (ww, wh) = ((d.at.2 * pw).max(6.0), (d.at.3 * ph).max(6.0));
+                        p.rrect(wx, wy, ww, wh, 3.0, Color(0.22, 0.24, 0.29, 0.96));
+                        p.stroke_rrect(wx + 0.5, wy + 0.5, ww - 1.0, wh - 1.0, 3.0, Color::white(0.22), 1.0);
+                        if let (Some(Some(bmp)), true) =
+                            (desk_icons.get(i).and_then(|v| v.get(n)), ww >= MINI_ICON && wh >= MINI_ICON)
+                        {
+                            p.icon(bmp, wx + ww / 2.0, wy + wh / 2.0, 1.0);
+                        }
+                    }
                     let name = &self.desks.names[i];
-                    p.text(name, &f.label, bx + 8.0, by, bw - 16.0, DESK_H, Align::Center, Color::white(0.92));
+                    let label = by + DESK_H - DESK_LABEL;
+                    p.text(name, &f.label, bx + 8.0, label, bw - 16.0, DESK_LABEL, Align::Center, Color::white(0.92));
                 }
                 let (bx, by, bw) = plus;
                 let hot = self.desk_hover == Some(Spot::Plus);
@@ -1018,8 +1073,14 @@ impl Switcher {
                 }
             }
             // Over a desktop: the apps that are open on it.
-            if let (true, Some(Spot::Desk(i))) = (self.drag.is_none(), self.desk_hover) {
-                let apps = self.desk_apps.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            // (Also while a window card is being carried to it.)
+            if let Some(Spot::Desk(i)) = self.desk_hover {
+                let mut apps: Vec<&str> = Vec::new();
+                for d in self.desk_windows.get(i).map(Vec::as_slice).unwrap_or(&[]) {
+                    if !apps.contains(&d.name.as_str()) {
+                        apps.push(&d.name);
+                    }
+                }
                 if let (Some(&(bx, by, bw)), false) = (self.strip().0.get(i), apps.is_empty()) {
                     const ROW: f32 = 22.0;
                     const MAX: usize = 6;

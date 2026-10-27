@@ -876,6 +876,52 @@ pub fn open(target: &str) {
     }
 }
 
+/// The screenshot just taken, if there is one: the newest picture in the
+/// Snipping Tool's own temporary folder or in Pictures\\Screenshots, from the
+/// last ten minutes. A notification in the list can't be activated from
+/// outside (its "open this snip" belongs to Windows), so a click on the
+/// Snipping Tool's opens the picture itself in the Snipping Tool.
+pub fn recent_screenshot() -> Option<std::path::PathBuf> {
+    use std::time::{Duration, SystemTime};
+    let local = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    let profile = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    let mut dirs = Vec::new();
+    if let Some(l) = local {
+        let temp = l.join("Packages").join("Microsoft.ScreenSketch_8wekyb3d8bbwe").join("TempState");
+        dirs.push(temp.join("Snipped"));
+        dirs.push(temp);
+    }
+    if let Some(p) = profile {
+        dirs.push(p.join("Pictures").join("Screenshots"));
+    }
+    let newest = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg")
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .max_by_key(|(t, _)| *t)?;
+    let age = SystemTime::now().duration_since(newest.0).unwrap_or(Duration::MAX);
+    (age < Duration::from_secs(600)).then_some(newest.1)
+}
+
+/// `text` as a piece of a URI: everything but letters, digits and `-_.~` is %-escaped.
+pub fn uri_escape(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Starts an app as administrator (Windows asks first): an .exe path, or a
 /// `shell:AppsFolder\<id>` entry, which is run through its own "runas" verb.
 /// Store apps have none, so those start as usual.

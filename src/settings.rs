@@ -173,6 +173,7 @@ impl Board {
                 ("system", "System"),
                 ("weather", "Weather"),
                 ("calendar", "Calendar"),
+                ("clipboard", "Clipboard"),
                 ("phone", "Phone"),
             ],
         }
@@ -378,6 +379,12 @@ fn rows(section: usize) -> Vec<Row> {
         0 => vec![
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
+            row(
+                "super_drag",
+                "Super drag",
+                "Hold the Win key and drag a window by any part of it, not only its title bar.",
+                Toggle,
+            ),
             row(
                 "battery_saver",
                 "Battery saver",
@@ -2087,7 +2094,7 @@ mod tests {
             vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "widgets"]]
         );
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
-        assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather", "phone"]]);
+        assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather", "clipboard", "phone"]]);
     }
 
     fn keys(section: usize, set: &[(&str, &str)]) -> Vec<&'static str> {

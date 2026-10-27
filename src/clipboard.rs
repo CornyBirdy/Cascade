@@ -41,6 +41,7 @@ pub enum Kind {
     Other,
 }
 
+#[derive(Clone)]
 pub struct Clip {
     pub id: String,
     /// The text, on one line (or what it is, for anything else).
@@ -59,6 +60,7 @@ pub enum State {
     Unavailable,
 }
 
+#[derive(Clone)]
 pub struct Clips {
     pub state: State,
     /// Newest first.
@@ -220,6 +222,12 @@ pub struct ClipMenu {
     opacity: f32,
     radius: f32,
     pub dirty: bool,
+}
+
+impl Default for Clips {
+    fn default() -> Self {
+        Self { state: State::Loading, items: Vec::new() }
+    }
 }
 
 impl ClipMenu {

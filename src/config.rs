@@ -45,6 +45,8 @@ hide_in_fullscreen = true
 # On battery (laptops), go easy on it: no refraction, no visualizer bars, and
 # the PC's stats read less often. Back to normal once it's plugged in.
 battery_saver = false
+# Hold the Win key and drag a window by any part of it.
+super_drag = true
 # While music or a focus timer plays, show it on the closed notch: the notch
 # style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
@@ -289,6 +291,7 @@ pub struct Config {
     pub notch_position: f32,
     pub hide_in_fullscreen: bool,
     pub battery_saver: bool,
+    pub super_drag: bool,
     pub live_activity: bool,
     pub visualizer: bool,
     pub lip_visualizer: bool,
@@ -401,6 +404,7 @@ impl Default for Config {
             notch_position: 0.5,
             hide_in_fullscreen: true,
             battery_saver: false,
+            super_drag: true,
             live_activity: true,
             visualizer: true,
             lip_visualizer: true,
@@ -649,6 +653,7 @@ impl Config {
                 "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
+                "super_drag" => set_b(&mut c.super_drag),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
                 "lip_visualizer" => set_b(&mut c.lip_visualizer),
@@ -800,6 +805,7 @@ impl Config {
             "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "battery_saver" => b(self.battery_saver),
+            "super_drag" => b(self.super_drag),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
             "lip_visualizer" => b(self.lip_visualizer),
