@@ -657,6 +657,9 @@ fn right_click(hwnd: HWND) {
                     }
                 }
             } else {
+                if cmd == MenuCmd::FullRestart && !shell::spawn_full_restart() {
+                    config::log("full restart: couldn't start the command that does it");
+                }
                 with_app(|a| a.on_menu(cmd));
             }
         }
@@ -2952,7 +2955,7 @@ impl App {
             MenuCmd::Settings => self.open_settings(),
             MenuCmd::Launcher => self.toggle_launcher(),
             MenuCmd::Reload => self.reload_config(),
-            MenuCmd::None | MenuCmd::Quit | MenuCmd::Restart => {}
+            MenuCmd::None | MenuCmd::Quit | MenuCmd::Restart | MenuCmd::FullRestart => {}
         }
         if let Some(s) = &self.settings {
             s.invalidate();

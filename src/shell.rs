@@ -622,6 +622,7 @@ pub enum MenuCmd {
     Settings,
     Launcher,
     Restart,
+    FullRestart,
     Quit,
 }
 
@@ -652,6 +653,28 @@ pub fn spawn_restart() -> bool {
     std::env::current_exe().is_ok_and(|exe| std::process::Command::new(exe).arg("--updated").spawn().is_ok())
 }
 
+/// A full restart: puts the Windows taskbar back, stops the admin key helper,
+/// then has a command prompt of its own (it outlives Cascade) wait a moment,
+/// end every Cascade process that is left, hung or not, and start a new one.
+/// False if that couldn't be set going.
+pub fn spawn_full_restart() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Some(name) = exe.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
+    restore_taskbar();
+    crate::helper::stop();
+    let script = format!(
+        "ping -n 3 127.0.0.1 >nul & taskkill /F /IM \"{name}\" >nul 2>&1 & ping -n 2 127.0.0.1 >nul & start \"\" \"{}\" --updated",
+        exe.display()
+    );
+    std::process::Command::new("cmd.exe")
+        .raw_arg(format!("/C \"{script}\""))
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .is_ok()
+}
+
 /// Shows `menu` at the cursor and returns the chosen item id (0 = none).
 fn track(hwnd: HWND, menu: HMENU) -> usize {
     unsafe {
@@ -667,7 +690,7 @@ fn track(hwnd: HWND, menu: HMENU) -> usize {
 }
 
 pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 15] = [
+    const IDS: [MenuCmd; 16] = [
         MenuCmd::None,
         MenuCmd::Notch,
         MenuCmd::Dock,
@@ -683,6 +706,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         MenuCmd::Launcher,
         MenuCmd::AutostartSooner,
         MenuCmd::Restart,
+        MenuCmd::FullRestart,
     ];
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
@@ -710,6 +734,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 10, &HSTRING::from(state.update_label.as_str()));
         let _ = AppendMenuW(menu, MF_STRING, 14, w!("Restart Cascade"));
+        let _ = AppendMenuW(menu, MF_STRING, 15, w!("Full restart (force)"));
         let _ = AppendMenuW(menu, MF_STRING, 9, w!("Quit Cascade"));
         IDS.get(track(hwnd, menu)).copied().unwrap_or(MenuCmd::None)
     }

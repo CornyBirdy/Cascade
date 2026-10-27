@@ -128,6 +128,7 @@ Cascade is a single `cascade.exe`: put it anywhere and double-click it. Right-cl
 - Hide Windows volume flyout
 - Open / reload config (`%APPDATA%\Cascade\config.ini`; focus-timer lengths, weather location, sizes and more)
 - Restart Cascade (a fresh copy starts as this one exits, admin key helper included; handy if anything gets stuck)
+- Full restart (force): puts the Windows taskbar back, stops the admin key helper, ends every Cascade process that is left, hung or not, and starts a fresh one a couple of seconds later
 - Quit
 
 ## Updating
