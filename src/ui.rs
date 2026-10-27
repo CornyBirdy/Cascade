@@ -3954,9 +3954,33 @@ impl App {
                 self.widgets.on_move(x, y);
             }
             WM_MOUSELEAVE => self.widgets.on_leave(),
+            WM_LBUTTONDOWN => {
+                // A card may be picked up here and carried to a new place.
+                let (x, y) = lparam_xy(lp);
+                if self.widgets.on_down(x, y) {
+                    unsafe {
+                        let _ = SetCapture(self.widgets.hwnd);
+                    }
+                }
+            }
             WM_LBUTTONUP => {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
                 let (x, y) = lparam_xy(lp);
                 self.widgets.on_move(x, y);
+                let carried = self.widgets.carrying();
+                // Put down: the new order is kept.
+                if let Some(order) = self.widgets.on_up() {
+                    self.apply_change(Change::Many(vec![("widgets_panel", order)]));
+                    if let Some(s) = &mut self.settings {
+                        let cfg = &self.cfg;
+                        s.sync_edits(&|k: &str| setting_value(cfg, k));
+                    }
+                }
+                if carried {
+                    return Some(LRESULT(0));
+                }
                 match self.widgets.on_click(x, y) {
                     Some(widgets::Action::Previous) => {
                         let _ = self.media_tx.send(MediaCmd::Previous);
