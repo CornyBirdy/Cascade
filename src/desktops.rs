@@ -8,15 +8,22 @@
 //! says when it changes; nothing is polled. Switching and making desktops go
 //! through Windows' own shortcuts (Ctrl+Win+Left/Right, Ctrl+Win+D), so it's
 //! the same as doing it from the keyboard.
+//!
+//! Moving a window to another desktop has no such shortcut, and the public
+//! `IVirtualDesktopManager::MoveWindowToDesktop` only moves the caller's own
+//! windows. Task View's drag uses the shell's internal desktop manager, the
+//! way Explorer does (see `move_window`).
 
 use std::ffi::c_void;
 
-use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::core::{interface, w, IUnknown, IUnknown_Vtbl, Interface, Result, GUID, HRESULT, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND};
+use windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::Common::IObjectArray;
 
 use crate::msg;
 
@@ -204,6 +211,86 @@ pub fn switch(from: usize, to: usize) {
 /// Makes a new desktop and goes to it, as Ctrl+Win+D does.
 pub fn create() {
     ctrl_win(VK_D, false, 1);
+}
+
+// The shell's own desktop interfaces. They're undocumented, so only the parts
+// that stay put are declared: Windows 11's manager keeps its first seven
+// methods in the same order from its first release to 24H2 and 25H2 (which
+// add one after `SwitchDesktop`), and a Windows that doesn't have these
+// interface ids simply refuses to hand them out, so a move fails cleanly.
+// Layouts as in MScholtes/VirtualDesktop.
+
+const CLSID_IMMERSIVE_SHELL: GUID = GUID::from_u128(0xC2F03A33_21F5_47FA_B4BB_156362A2F239);
+const SERVICE_VIRTUAL_DESKTOP_MANAGER: GUID = GUID::from_u128(0xC5E0CDCA_7B6E_41B2_9FC4_D93975CC467B);
+
+// (Their methods keep the shell's own names.)
+#[allow(non_snake_case)]
+mod shell_api {
+    use super::*;
+
+    #[interface("1841C6D7-4F9D-42C0-AF41-8747538F10E5")]
+    pub unsafe trait IApplicationViewCollection: IUnknown {
+        unsafe fn GetViews(&self, views: *mut *mut c_void) -> HRESULT;
+        unsafe fn GetViewsByZOrder(&self, views: *mut *mut c_void) -> HRESULT;
+        unsafe fn GetViewsByAppUserModelId(&self, id: PCWSTR, views: *mut *mut c_void) -> HRESULT;
+        unsafe fn GetViewForHwnd(&self, window: HWND, view: *mut *mut c_void) -> HRESULT;
+    }
+
+    #[interface("3F07F4BE-B107-441A-AF0F-39D82529072C")]
+    pub unsafe trait IVirtualDesktop: IUnknown {
+        unsafe fn IsViewVisible(&self, view: *mut c_void, visible: *mut i32) -> HRESULT;
+        unsafe fn GetId(&self, id: *mut GUID) -> HRESULT;
+    }
+
+    #[interface("53F5CA0B-158F-4124-900C-057158060B27")]
+    pub unsafe trait IVirtualDesktopManagerInternal: IUnknown {
+        unsafe fn GetCount(&self, count: *mut i32) -> HRESULT;
+        unsafe fn MoveViewToDesktop(&self, view: *mut c_void, desktop: *mut c_void) -> HRESULT;
+        unsafe fn CanViewMoveDesktops(&self, view: *mut c_void, can: *mut i32) -> HRESULT;
+        unsafe fn GetCurrentDesktop(&self, desktop: *mut *mut c_void) -> HRESULT;
+        unsafe fn GetDesktops(&self, desktops: *mut *mut c_void) -> HRESULT;
+    }
+
+    pub unsafe fn try_move(window: HWND, to: usize) -> Result<()> {
+        let shell: IServiceProvider = CoCreateInstance(&CLSID_IMMERSIVE_SHELL, None, CLSCTX_ALL)?;
+        let manager: IVirtualDesktopManagerInternal = shell.QueryService(&SERVICE_VIRTUAL_DESKTOP_MANAGER)?;
+        let views: IApplicationViewCollection = shell.QueryService(&IApplicationViewCollection::IID)?;
+
+        let mut raw = std::ptr::null_mut();
+        views.GetViewForHwnd(window, &mut raw).ok()?;
+        if raw.is_null() {
+            return Err(E_INVALIDARG.into());
+        }
+        // Only its pointer is needed (it's handed back to the manager); this
+        // owns the reference until then.
+        let view = IUnknown::from_raw(raw);
+
+        raw = std::ptr::null_mut();
+        manager.GetDesktops(&mut raw).ok()?;
+        if raw.is_null() {
+            return Err(E_INVALIDARG.into());
+        }
+        let desktops = IObjectArray::from_raw(raw);
+        if to as u32 >= desktops.GetCount()? {
+            return Err(E_INVALIDARG.into());
+        }
+        let desktop: IVirtualDesktop = desktops.GetAt(to as u32)?;
+        manager.MoveViewToDesktop(view.as_raw(), desktop.as_raw()).ok()
+    }
+}
+
+/// Moves `window` to desktop number `to` (0 is the first, as in `Desktops`),
+/// wherever it is now. Talks to Explorer, so call it off the UI thread, on
+/// one that has initialised COM. False if Windows wouldn't (a build whose
+/// desktop interfaces differ, a window it won't move, a desktop that's gone).
+pub fn move_window(window: HWND, to: usize) -> bool {
+    match unsafe { shell_api::try_move(window, to) } {
+        Ok(()) => true,
+        Err(e) => {
+            crate::config::log(&format!("moving a window to desktop {} failed: {e}", to + 1));
+            false
+        }
+    }
 }
 
 #[cfg(test)]

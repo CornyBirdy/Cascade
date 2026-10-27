@@ -3,7 +3,7 @@
 //! the taskbar's right side and closes when you click away.
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::Result;
 use windows::Win32::Foundation::*;
@@ -131,6 +131,10 @@ pub struct Widgets {
     columns: usize,
     /// Tallest the panel may be (layout units) before it goes to two columns.
     max_h: f32,
+    /// When the panel last opened, and whether it had gone to two columns by
+    /// itself (one would have been too tall) once its data was in.
+    opened_at: Instant,
+    last_wide: bool,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -147,6 +151,9 @@ pub struct Widgets {
     cal_month: i32,
     cal_day: Option<i64>,
 }
+
+/// How long after opening the cards' data is still arriving.
+const SETTLE: Duration = Duration::from_millis(1500);
 
 /// The calendar card's events listed for a day at most.
 const CAL_EVENTS: usize = 4;
@@ -255,6 +262,8 @@ impl Widgets {
             cards: Vec::new(),
             columns: 1,
             max_h: f32::MAX,
+            opened_at: Instant::now(),
+            last_wide: false,
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -304,6 +313,7 @@ impl Widgets {
             // Opened afresh: back to today on the calendar.
             self.cal_month = 0;
             self.cal_day = None;
+            self.opened_at = Instant::now();
             self.visible = true;
             self.reveal.snap(0.0);
             unsafe {
@@ -412,10 +422,22 @@ impl Widgets {
 
     fn layout(&self, ctx: &Ctx) -> Layout {
         let one = self.layout_in(ctx, self.columns.max(1));
-        if one.h > self.max_h && self.columns == 1 && self.cards.len() > 1 {
-            return self.layout_in(ctx, 2);
+        if self.columns == 1 && self.cards.len() > 1 {
+            // Its stats and notifications arrive a moment after it opens and
+            // make the cards taller. If that was enough to need two columns
+            // last time, it opens in two now, instead of opening narrow and
+            // snapping wide. It only goes back to one once that clearly fits.
+            let carry = self.last_wide && (self.settling() || one.h > self.max_h * 0.8);
+            if one.h > self.max_h || carry {
+                return self.layout_in(ctx, 2);
+            }
         }
         one
+    }
+
+    /// Still within the first moments after opening, when data is on its way.
+    fn settling(&self) -> bool {
+        self.opened_at.elapsed() < SETTLE
     }
 
     fn layout_in(&self, ctx: &Ctx, cols: usize) -> Layout {
@@ -451,6 +473,9 @@ impl Widgets {
         }
         let k = self.k;
         let Layout { cards, w, h } = self.layout(ctx);
+        if self.open && !self.settling() {
+            self.last_wide = self.columns == 1 && w > PAD * 2.0 + CARD_W + 1.0;
+        }
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 16.0 * k) as i32;
         let (x, y) = (self.anchor.0 - pw, self.anchor.1 - ph);

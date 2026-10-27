@@ -9,7 +9,8 @@
 //!
 //! Win+Tab opens it as Task View: it stays open (pick a window with a click,
 //! the arrow keys and Enter, or Esc to leave), and under the windows a strip
-//! of your virtual desktops to switch to, or make a new one.
+//! of your virtual desktops to switch to, or make a new one. Drag a window's
+//! card onto a desktop in the strip to send that window there.
 //!
 //! Alt+Tab comes in four looks (`alt_tab_style`): cards with live previews,
 //! large previews (KDE's thumbnail grid), big app icons with the picked
@@ -91,6 +92,8 @@ const PLUS_W: f32 = 44.0;
 pub enum ViewAction {
     Focus(HWND),
     Desktop(usize),
+    /// A card dropped on a desktop in the strip: send that window there.
+    MoveWindow(HWND, usize),
     NewDesktop,
     Close,
 }
@@ -104,6 +107,20 @@ enum Spot {
     Desk(usize),
     Plus,
 }
+
+/// A window card picked up in Task View, on its way to a desktop in the strip.
+struct Drag {
+    item: usize,
+    /// Where the button went down, and where the pointer is now (px).
+    from: (i32, i32),
+    at: (i32, i32),
+    /// Past the wobble of a click: the card is carried along.
+    live: bool,
+    /// Esc was pressed: nothing is dropped when the button comes up.
+    dead: bool,
+}
+/// How far (px) the pointer goes before a press on a card is a drag.
+const DRAG_FROM: i32 = 6;
 
 struct Item {
     window: HWND,
@@ -152,9 +169,21 @@ pub struct Switcher {
     desks: Desktops,
     /// The desktop or button under the pointer in the strip.
     desk_hover: Option<Spot>,
+    drag: Option<Drag>,
     style: Style,
     /// Fading out after a pick (or Esc): still drawn until `open` reaches 0.
     closing: bool,
+}
+
+/// A window of `size` fitted into the box, keeping its shape, centred in it.
+fn fit_in(size: SIZE, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let aspect = size.cx.max(1) as f32 / size.cy.max(1) as f32;
+    let (mut fw, mut fh) = (w, w / aspect);
+    if fh > h {
+        fh = h;
+        fw = h * aspect;
+    }
+    (x + (w - fw) / 2.0, y + (h - fh) / 2.0, fw, fh)
 }
 
 unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
@@ -189,6 +218,7 @@ impl Switcher {
             view: false,
             desks: Desktops::default(),
             desk_hover: None,
+            drag: None,
             style: Style::Cards,
             closing: false,
         }
@@ -387,6 +417,7 @@ impl Switcher {
         self.active = false;
         self.hovered = None;
         self.desk_hover = None;
+        self.drag = None;
         self.closing = true;
         self.dirty = true;
     }
@@ -410,6 +441,7 @@ impl Switcher {
         self.active = false;
         self.shown = false;
         self.hovered = None;
+        self.drag = None;
         self.moving = false;
         self.was_moving = false;
         self.backdrop.hide();
@@ -559,7 +591,7 @@ impl Switcher {
         if it.thumb == 0 {
             return;
         }
-        let a = it.appear.value.clamp(0.0, 1.0) * self.open.value.clamp(0.0, 1.0);
+        let a = it.appear.value.clamp(0.0, 1.0) * self.open.value.clamp(0.0, 1.0) * self.carried(i);
         let oy = (1.0 - it.appear.value) * RISE;
         let (fx, fy, fw, fh) = it.fit;
         let k = self.k;
@@ -608,13 +640,7 @@ impl Switcher {
             }
             // Fit the window into the box, keeping its shape.
             let size = unsafe { DwmQueryThumbnailSourceSize(thumb) }.unwrap_or(SIZE { cx: 16, cy: 9 });
-            let aspect = size.cx.max(1) as f32 / size.cy.max(1) as f32;
-            let (mut fw, mut fh) = (tw, tw / aspect);
-            if fh > th {
-                fh = th;
-                fw = th * aspect;
-            }
-            self.items[i].fit = (tx + (tw - fw) / 2.0, ty + (th - fh) / 2.0, fw, fh);
+            self.items[i].fit = fit_in(size, tx, ty, tw, th);
             self.place_thumb(i);
         }
         self.dirty = true;
@@ -642,7 +668,23 @@ impl Switcher {
                 self.tracking = TrackMouseEvent(&mut t).is_ok();
             }
         }
-        let h = self.hit(x, y);
+        let mut lifted = None;
+        if let Some(d) = &mut self.drag {
+            d.at = (x, y);
+            if !d.live && (x - d.from.0).abs().max((y - d.from.1).abs()) >= DRAG_FROM {
+                d.live = true;
+                lifted = Some(d.item);
+            }
+            self.dirty |= d.live;
+        }
+        if let Some(i) = lifted {
+            // The card's own picture fades as the card is carried off.
+            self.selected = i;
+            self.place_thumb(i);
+        }
+        // Nothing lights up under a card that is being carried.
+        let carrying = self.drag.as_ref().is_some_and(|d| d.live);
+        let h = if carrying { None } else { self.hit(x, y) };
         if h != self.hovered {
             self.hovered = h;
             self.dirty = true;
@@ -652,6 +694,84 @@ impl Switcher {
             self.desk_hover = spot;
             self.dirty = true;
         }
+    }
+
+    /// The button went down in Task View. On a card (with a desktop to send
+    /// it to) that may become a drag: true if so, and the caller should keep
+    /// the mouse until it comes up.
+    pub fn on_down(&mut self, x: i32, y: i32) -> bool {
+        if !self.view || self.desks.names.len() < 2 {
+            return false;
+        }
+        let Some(item) = self.hit(x, y) else { return false };
+        self.drag = Some(Drag { item, from: (x, y), at: (x, y), live: false, dead: false });
+        true
+    }
+
+    /// The button came up in Task View: a card dropped on a desktop sends its
+    /// window there, a press that never became a drag is a click.
+    pub fn on_up_view(&mut self, x: i32, y: i32) -> Option<ViewAction> {
+        let Some(d) = self.drag.take() else { return self.on_click_view(x, y) };
+        if !d.live {
+            return if d.dead { None } else { self.on_click_view(x, y) };
+        }
+        self.place_thumb(d.item);
+        self.dirty = true;
+        if d.dead {
+            return None;
+        }
+        match self.spot(x, y) {
+            Some(Spot::Desk(i)) if i != self.desks.current => {
+                self.items.get(d.item).map(|it| ViewAction::MoveWindow(it.window, i))
+            }
+            _ => None,
+        }
+    }
+
+    /// The mouse was taken away mid-drag: the card is put back.
+    pub fn cancel_drag(&mut self) {
+        if let Some(d) = self.drag.take() {
+            if d.live {
+                self.place_thumb(d.item);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// How much of itself card `i` shows: dimmed while it's being carried.
+    fn carried(&self, i: usize) -> f32 {
+        match &self.drag {
+            Some(d) if d.live && !d.dead && d.item == i => 0.35,
+            _ => 1.0,
+        }
+    }
+
+    /// `window` has gone to another desktop: its card goes, and the rest
+    /// close up.
+    pub fn window_moved(&mut self, window: HWND) {
+        let Some(i) = self.items.iter().position(|it| it.window == window) else { return };
+        let gone = self.items.remove(i);
+        if gone.thumb != 0 {
+            unsafe {
+                let _ = DwmUnregisterThumbnail(gone.thumb);
+            }
+        }
+        if self.selected > i || self.selected >= self.items.len() {
+            self.selected = self.selected.saturating_sub(1).min(self.items.len().saturating_sub(1));
+        }
+        self.hovered = None;
+        let (cols, ..) = self.layout();
+        for j in 0..self.items.len() {
+            if self.items[j].thumb == 0 {
+                continue;
+            }
+            let (cx, cy) = self.card(j, cols);
+            let (tx, ty, tw, th) = self.thumb_box(cx, cy);
+            let size = unsafe { DwmQueryThumbnailSourceSize(self.items[j].thumb) }.unwrap_or(SIZE { cx: 16, cy: 9 });
+            self.items[j].fit = fit_in(size, tx, ty, tw, th);
+            self.place_thumb(j);
+        }
+        self.dirty = true;
     }
 
     /// A click in Task View.
@@ -670,6 +790,14 @@ impl Switcher {
         let (cols, ..) = self.layout();
         let key = VIRTUAL_KEY(vk);
         if key == VK_ESCAPE {
+            // Mid-drag, Esc only puts the card back.
+            if let Some(d) = self.drag.as_mut().filter(|d| !d.dead) {
+                d.dead = true;
+                let item = d.item;
+                self.place_thumb(item);
+                self.dirty = true;
+                return None;
+            }
             return Some(ViewAction::Close);
         }
         if n == 0 {
@@ -742,13 +870,14 @@ impl Switcher {
             let p = gfx.painter();
             let f = &gfx.fonts;
             let r = self.radius.max(6.0);
+            let carrying = self.drag.as_ref().is_some_and(|d| d.live && !d.dead);
             // Over the opaque backdrop (no blur) only a trace on top: it keeps
             // the pixels clickable.
             let solid = if !self.blur && backdrop { 0.02 } else { 0.97 };
             theme::panel(&p, 0.0, 0.0, w, h, self.radius, glass, self.opacity, solid, 1.0);
             for (i, it) in self.items.iter().enumerate() {
                 let (cx, cy0) = self.card(i, cols);
-                let a = it.appear.value.clamp(0.0, 1.0);
+                let a = it.appear.value.clamp(0.0, 1.0) * self.carried(i);
                 let cy = cy0 + (1.0 - it.appear.value) * RISE;
                 let sel = it.sel.value.clamp(0.0, 1.0);
                 let hov = it.hov.value.clamp(0.0, 1.0) * (1.0 - sel);
@@ -829,7 +958,11 @@ impl Switcher {
                 for (i, &(bx, by, bw)) in desks.iter().enumerate() {
                     let current = i == self.desks.current;
                     let hot = self.desk_hover == Some(Spot::Desk(i));
-                    let fill = if current {
+                    // A card being carried: the desktop it would land on lights up.
+                    let target = hot && !current && carrying;
+                    let fill = if target {
+                        0.20
+                    } else if current {
                         0.14
                     } else if hot {
                         0.10
@@ -839,6 +972,8 @@ impl Switcher {
                     p.rrect(bx, by, bw, DESK_H, r, Color::white(fill));
                     if current {
                         p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent(), 2.0);
+                    } else if target {
+                        p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent().alpha(0.9), 2.0);
                     }
                     let name = &self.desks.names[i];
                     p.text(name, &f.label, bx + 8.0, by, bw - 16.0, DESK_H, Align::Center, Color::white(0.92));
@@ -870,6 +1005,22 @@ impl Switcher {
                     p.rrect(x + g.w * 0.35, y + g.h - 5.0, g.w * 0.3, 3.0, 1.5, theme::accent().alpha(a));
                 }
             }
+            // The card being carried to a desktop follows the pointer.
+            if let Some(d) = self.drag.as_ref().filter(|d| d.live && !d.dead) {
+                if let Some(it) = self.items.get(d.item) {
+                    let (gw, gh) = (184.0, 52.0);
+                    let (gx, gy) = (d.at.0 as f32 / k - gw / 2.0, d.at.1 as f32 / k - gh / 2.0);
+                    p.rrect(gx + 1.0, gy + 3.0, gw, gh, r, Color(0.0, 0.0, 0.0, 0.25));
+                    p.rrect(gx, gy, gw, gh, r, Color(0.17, 0.18, 0.21, 0.97));
+                    p.stroke_rrect(gx + 0.5, gy + 0.5, gw - 1.0, gh - 1.0, r, theme::accent().alpha(0.8), 1.5);
+                    match &icons[d.item] {
+                        Some(bmp) => p.icon(bmp, gx + 26.0, gy + gh / 2.0, 1.0),
+                        None => p.rrect(gx + 18.0, gy + gh / 2.0 - 8.0, 16.0, 16.0, 4.0, Color::white(0.15)),
+                    }
+                    let title = if it.title.is_empty() { "Window" } else { &it.title };
+                    p.text(title, &f.label, gx + 46.0, gy, gw - 58.0, gh, Align::Left, Color::white(0.93));
+                }
+            }
         }
         let alpha = (open * 255.0).round() as u8;
         let shown = gfx.present(&self.layer, self.overlay, POINT { x, y }, pw, ph, alpha);
@@ -880,5 +1031,22 @@ impl Switcher {
             self.dirty = true;
         }
         shown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_fit_their_box_keeping_their_shape() {
+        // A wide window fills the width and sits in the middle of the height.
+        let (x, y, w, h) = fit_in(SIZE { cx: 1600, cy: 900 }, 10.0, 20.0, 160.0, 160.0);
+        assert_eq!((x, w, h), (10.0, 160.0, 90.0));
+        assert!((y - 55.0).abs() < 1e-3);
+        // A tall one fills the height and sits in the middle of the width.
+        let (x, y, w, h) = fit_in(SIZE { cx: 450, cy: 900 }, 0.0, 0.0, 160.0, 160.0);
+        assert_eq!((y, w, h), (0.0, 80.0, 160.0));
+        assert!((x - 40.0).abs() < 1e-3);
     }
 }

@@ -28,14 +28,27 @@
 //! are copied from the screen (all a ring reads), and a ring whose
 //! surroundings keep still is looked at less and less often, until they
 //! change or the panel moves.
+//!
+//! Panels move and change size every frame while they open, close and
+//! morph, and reading the screen and bending light for each of those frames
+//! is what a ring can't afford. While a panel is on the move its ring is
+//! only drawn as the glint along its edge (cheap, and right for any size),
+//! and the bent light comes back once the panel has kept still for a moment.
+//! Where each pixel of a ring reads from is worked out once per size (see
+//! `lensmath`), so redrawing it is only reading and blending. A refresh also
+//! stops after a few milliseconds and carries on with the next ring at the
+//! next one, so many rings never hold the UI up together.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::lensmath::{self, Geometry, Mesh};
 
 /// How a pane bends light (sizes at 100% scaling).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -122,15 +135,33 @@ struct Ring {
     /// ticks to wait before looking again (see `refresh`).
     still: u32,
     wait: u32,
+    /// Where each pixel reads its light from, for the size it was made for.
+    mesh: Option<Mesh>,
+    /// The pane moved or changed size at `moved_at`, and the ring has shown
+    /// only its glint since (`glint`): the bent light is drawn once it has
+    /// kept still for `MOVING`.
+    moved_at: Instant,
+    glint: bool,
+    /// What the ring's bitmap holds right now is the glint alone.
+    glint_shown: bool,
 }
 
 /// After this many unchanged looks a ring is looked at only every
-/// `SLOW_EVERY` refreshes (a few times a second instead of 20).
+/// `SLOW_EVERY` refreshes (a few times a second instead of 20), and after
+/// `IDLE_AFTER` more, every `IDLE_EVERY`.
 const STILL_AFTER: u32 = 10;
 const SLOW_EVERY: u32 = 6;
+const IDLE_AFTER: u32 = 40;
+const IDLE_EVERY: u32 = 12;
+/// How long a pane keeps still before its ring bends light again.
+const MOVING: Duration = Duration::from_millis(120);
+/// The most time a refresh spends before leaving the other rings to the next.
+const BUDGET: Duration = Duration::from_millis(6);
 
 thread_local! {
     static RINGS: RefCell<Vec<Ring>> = const { RefCell::new(Vec::new()) };
+    /// Where the next refresh starts, when the last one ran out of time.
+    static NEXT: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Shows (or moves) the ring of layered window `hwnd`, at `rect` (screen
@@ -141,7 +172,22 @@ pub fn show(hwnd: HWND, rect: RECT, radius: i32, lens: Lens) {
         let i = match rings.iter().position(|r| r.hwnd == hwnd) {
             Some(i) => i,
             None => {
-                rings.push(Ring { hwnd, rect, radius, lens, capture: None, out: None, seen: 0, still: 0, wait: 0 });
+                // Just shown: most likely on its way in, so the glint first.
+                rings.push(Ring {
+                    hwnd,
+                    rect: RECT::default(),
+                    radius,
+                    lens,
+                    capture: None,
+                    out: None,
+                    seen: 0,
+                    still: 0,
+                    wait: 0,
+                    mesh: None,
+                    moved_at: Instant::now(),
+                    glint: true,
+                    glint_shown: false,
+                });
                 rings.len() - 1
             }
         };
@@ -151,11 +197,16 @@ pub fn show(hwnd: HWND, rect: RECT, radius: i32, lens: Lens) {
         ring.radius = radius;
         ring.lens = lens;
         if moved {
-            // Back to looking every refresh while it's on the move.
+            // Back to looking every refresh once it's still, and only the
+            // glint until then.
             ring.still = 0;
             ring.wait = 0;
+            ring.moved_at = Instant::now();
+            ring.glint = true;
+            draw_glint(ring);
+        } else if !ring.glint {
+            paint(ring, false);
         }
-        paint(ring, moved);
     });
 }
 
@@ -169,13 +220,34 @@ pub fn hide(hwnd: HWND) {
     RINGS.with(|rings| rings.borrow_mut().retain(|r| r.hwnd != hwnd));
 }
 
-/// Redraws every ring on screen whose background changed. Rings that have
-/// kept still for a while are only looked at every few calls. False if
+/// Redraws every ring on screen whose background changed, and brings back
+/// the bent light of rings whose pane has stopped moving. Rings that have
+/// kept still for a while are only looked at every few calls, and it stops
+/// early (carrying on there next time) rather than take long. False if
 /// there's no ring on screen.
 pub fn refresh() -> bool {
     RINGS.with(|rings| {
         let mut rings = rings.borrow_mut();
-        for ring in rings.iter_mut() {
+        let n = rings.len();
+        let start = if n == 0 { 0 } else { NEXT.get() % n };
+        let began = Instant::now();
+        let mut next = start;
+        for k in 0..n {
+            let i = (start + k) % n;
+            if k > 0 && began.elapsed() > BUDGET {
+                next = i;
+                break;
+            }
+            let ring = &mut rings[i];
+            if ring.glint {
+                if ring.moved_at.elapsed() >= MOVING {
+                    ring.glint = false;
+                    paint(ring, true);
+                    ring.still = 0;
+                    ring.wait = 0;
+                }
+                continue;
+            }
             if ring.wait > 0 {
                 ring.wait -= 1;
                 continue;
@@ -184,46 +256,60 @@ pub fn refresh() -> bool {
                 ring.still = 0;
             } else {
                 ring.still = ring.still.saturating_add(1);
-                if ring.still >= STILL_AFTER {
-                    ring.wait = SLOW_EVERY - 1;
+                // Each ring waits a little differently, so they don't all
+                // look at the screen on the same tick.
+                let skew = (i % 3) as u32;
+                if ring.still >= STILL_AFTER + IDLE_AFTER {
+                    ring.wait = IDLE_EVERY - 1 + skew;
+                } else if ring.still >= STILL_AFTER {
+                    ring.wait = SLOW_EVERY - 1 + skew;
                 }
             }
         }
-        !rings.is_empty()
+        NEXT.set(next);
+        n > 0
     })
 }
 
-/// Signed distance from (x, y) to the edge of a w x h rounded rect with
-/// corners of radius r (negative inside), and the outward normal there.
-fn edge(x: f32, y: f32, w: f32, h: f32, r: f32) -> (f32, f32, f32) {
-    let (px, py) = (x - w / 2.0, y - h / 2.0);
-    let (qx, qy) = (px.abs() - (w / 2.0 - r), py.abs() - (h / 2.0 - r));
-    let (sx, sy) = (px.signum(), py.signum());
-    if qx > 0.0 && qy > 0.0 {
-        let len = qx.hypot(qy).max(1e-4);
-        (len - r, sx * qx / len, sy * qy / len)
-    } else if qx > qy {
-        (qx - r, sx, 0.0)
-    } else {
-        (qy - r, 0.0, sy)
+/// Draws the ring as only the glint along its edge: nothing is read from the
+/// screen and nothing is bent, so it's cheap enough for every frame of a pane
+/// on the move, whatever size it is.
+fn draw_glint(ring: &mut Ring) {
+    let (w, h) = (ring.rect.right - ring.rect.left, ring.rect.bottom - ring.rect.top);
+    if w < 4 || h < 4 {
+        return;
     }
+    if ring.out.as_ref().is_none_or(|o| o.w != w || o.h != h) {
+        ring.out = Dib::new(w, h);
+    }
+    let Some(out) = ring.out.as_mut() else { return };
+    lensmath::glint_only(w, h, ring.radius as f32, out.pixels());
+    ring.glint_shown = true;
+    present(ring);
 }
 
-/// One channel of the capture at (x, y), blended between its four nearest
-/// pixels; the point is kept inside `valid` (the part of the capture that
-/// is on a screen).
-fn sample(src: &[u8], stride: usize, valid: (f32, f32, f32, f32), x: f32, y: f32, channel: usize) -> f32 {
-    let x = x.clamp(valid.0, valid.2) - 0.5;
-    let y = y.clamp(valid.1, valid.3) - 0.5;
-    let (x0, y0) = (x.floor().max(0.0), y.floor().max(0.0));
-    let (fx, fy) = ((x - x0).clamp(0.0, 1.0), (y - y0).clamp(0.0, 1.0));
-    let (ix, iy) = (x0 as usize, y0 as usize);
-    let max_x = (valid.2 - 1.0).max(0.0) as usize;
-    let max_y = (valid.3 - 1.0).max(0.0) as usize;
-    let at = |x: usize, y: usize| src[y.min(max_y) * stride + x.min(max_x) * 4 + channel] as f32;
-    let top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * fx;
-    let bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * fx;
-    top + (bottom - top) * fy
+/// Puts the ring's bitmap on its window.
+fn present(ring: &Ring) {
+    let Some(out) = ring.out.as_ref() else { return };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    unsafe {
+        let _ = UpdateLayeredWindow(
+            ring.hwnd,
+            None,
+            Some(&POINT { x: ring.rect.left, y: ring.rect.top }),
+            Some(&SIZE { cx: out.w, cy: out.h }),
+            Some(out.dc),
+            Some(&POINT { x: 0, y: 0 }),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        );
+    }
 }
 
 /// Reads what's around the ring and redraws it if that changed (or
@@ -301,103 +387,24 @@ fn paint(ring: &mut Ring, force: bool) -> bool {
         ((vx + vw - cx) as f32).clamp(1.0, cw as f32) - 0.5,
         ((vy + vh - cy) as f32).clamp(1.0, ch as f32) - 0.5,
     );
+    let geometry =
+        Geometry { w, h, radius: ring.radius as f32, band, bend: ring.lens.bend, split, margin, cw, ch, valid };
+    if ring.mesh.as_ref().is_none_or(|m| m.geometry != geometry) {
+        ring.mesh = Some(lensmath::mesh(&geometry));
+    }
+    let Some(mesh) = ring.mesh.as_ref() else { return false };
 
-    if ring.out.as_ref().is_none_or(|o| o.w != w || o.h != h) {
+    let fresh = ring.out.as_ref().is_none_or(|o| o.w != w || o.h != h);
+    if fresh {
         ring.out = Dib::new(w, h);
     }
     let Some(out) = ring.out.as_mut() else { return false };
-    let dst = out.pixels();
-    let stride = cw as usize * 4;
-    let (fw, fh) = (w as f32, h as f32);
-    let r = (ring.radius as f32).min(fw.min(fh) / 2.0);
-    // Rows clear of the curved corners and the top and bottom bands only
-    // have a band at each end.
-    let reach = (band + r).ceil() as i32 + 1;
-    for y in 0..h {
-        let mid = y >= reach && y < h - reach;
-        let spans: [(i32, i32); 2] = if mid { [(0, reach.min(w)), ((w - reach).max(0), w)] } else { [(0, w), (w, w)] };
-        for (x0, x1) in spans {
-            for x in x0..x1 {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let (d, nx, ny) = edge(fx, fy, fw, fh, r);
-                let inside = -d;
-                let o = (y * w + x) as usize * 4;
-                if inside < -0.5 || inside >= band {
-                    dst[o..o + 4].copy_from_slice(&[0, 0, 0, 0]);
-                    continue;
-                }
-                // 1 at the edge, 0 where the glass is flat again.
-                let t = (1.0 - inside.max(0.0) / band).clamp(0.0, 1.0);
-                // How far outside the edge this pixel's light comes from:
-                // furthest at the edge, right at it where the glass is flat.
-                let out = bend * t * t;
-                // Out to the edge first, then a pixel clear of it.
-                let to_edge = inside.max(0.0) + 1.0;
-                // Each colour from a little further along the bend than the next.
-                let (sx, sy) = (fx + margin as f32, fy + margin as f32);
-                let at = |k: f32, channel: usize| {
-                    let d = to_edge + out * k;
-                    sample(src, stride, valid, sx + nx * d, sy + ny * d, channel)
-                };
-                let (red, green, blue) = (at(1.0 + split, 2), at(1.0, 1), at(1.0 - split, 0));
-                // Off the screen there's nothing to bend in (the panel is
-                // against its edge there): fade out over a couple of pixels.
-                let reach = to_edge + out * (1.0 + split);
-                let (rx, ry) = (sx + nx * reach, sy + ny * reach);
-                let off = (valid.0 - rx).max(rx - valid.2).max(valid.1 - ry).max(ry - valid.3);
-                let seen = (1.0 - off.max(0.0) / 2.0).clamp(0.0, 1.0);
-                // Light caught in the curve, most along its lit (upper) part:
-                // what shows where the edge is over a plain background.
-                let glint = 0.16 * t * t * t * (0.55 - 0.45 * ny);
-                let cover = (inside + 0.5).clamp(0.0, 1.0);
-                // Fade into the flat glass, where the ring shows what's behind as it is.
-                let fade = ((band - inside) / (band * 0.25)).clamp(0.0, 1.0);
-                let a = cover * fade * seen;
-                // Where the bent light faded, the glint is left on its own.
-                let lone = cover * glint * (1.0 - seen);
-                let alpha = a + lone * (1.0 - a);
-                let px = |c: f32| ((c + glint * 255.0).min(255.0) * a + 255.0 * lone * (1.0 - a)).round() as u8;
-                dst[o..o + 4].copy_from_slice(&[px(blue), px(green), px(red), (alpha * 255.0).round() as u8]);
-            }
-        }
+    if !fresh && ring.glint_shown {
+        // Clear of the glint it was showing while the pane moved.
+        out.pixels().fill(0);
     }
-
-    let blend = BLENDFUNCTION {
-        BlendOp: AC_SRC_OVER as u8,
-        BlendFlags: 0,
-        SourceConstantAlpha: 255,
-        AlphaFormat: AC_SRC_ALPHA as u8,
-    };
-    unsafe {
-        let _ = UpdateLayeredWindow(
-            ring.hwnd,
-            None,
-            Some(&POINT { x: ring.rect.left, y: ring.rect.top }),
-            Some(&SIZE { cx: w, cy: h }),
-            Some(out.dc),
-            Some(&POINT { x: 0, y: 0 }),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        );
-    }
+    lensmath::compose(mesh, src, out.pixels());
+    ring.glint_shown = false;
+    present(ring);
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edge_distance_and_normal() {
-        // The middle of the top edge of a 100 x 40 rect: on the edge, normal up.
-        let (d, nx, ny) = edge(50.0, 0.0, 100.0, 40.0, 8.0);
-        assert!(d.abs() < 1e-4 && nx == 0.0 && ny == -1.0);
-        // 5 px in from the left edge.
-        let (d, nx, _) = edge(5.0, 20.0, 100.0, 40.0, 8.0);
-        assert!((d + 5.0).abs() < 1e-4 && nx == -1.0);
-        // The very corner of the box is outside the rounded corner.
-        let (d, nx, ny) = edge(0.0, 0.0, 100.0, 40.0, 8.0);
-        assert!(d > 0.0 && nx < 0.0 && ny < 0.0);
-    }
 }

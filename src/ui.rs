@@ -764,6 +764,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.on_desktops());
             return LRESULT(0);
         }
+        msg::WINDOW_MOVED => {
+            if wp.0 != 0 {
+                with_app(move |a| a.switcher.window_moved(HWND(lp.0 as *mut _)));
+            }
+            return LRESULT(0);
+        }
         msg::CALENDAR => {
             let events = Box::from_raw(lp.0 as *mut Vec<ics::Event>);
             with_app(move |a| a.on_events(*events));
@@ -3694,10 +3700,27 @@ impl App {
                     self.run_view(a);
                 }
             }
+            // A press on a card may turn into a drag to a desktop: the mouse is
+            // kept until the button comes up, wherever the pointer goes.
+            WM_LBUTTONDOWN if self.switcher.view => {
+                let (x, y) = lparam_xy(lp);
+                if self.switcher.on_down(x, y) {
+                    unsafe {
+                        SetCapture(self.switcher.overlay);
+                    }
+                }
+            }
+            WM_CAPTURECHANGED if self.switcher.view => self.switcher.cancel_drag(),
             WM_LBUTTONUP if self.switcher.view => {
                 let (x, y) = lparam_xy(lp);
-                if let Some(a) = self.switcher.on_click_view(x, y) {
-                    self.run_view(a);
+                let action = self.switcher.on_up_view(x, y);
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                match action {
+                    Some(crate::switcher::ViewAction::MoveWindow(h, i)) => self.move_to_desktop(h, i),
+                    Some(a) => self.run_view(a),
+                    None => {}
                 }
             }
             WM_LBUTTONUP => {
@@ -3729,10 +3752,30 @@ impl App {
         self.switcher.begin_view(k, monitor, self.desks.clone());
     }
 
+    /// A window card was dropped on a desktop in Task View. Windows has to be
+    /// asked (and Explorer might take a moment), so it's asked off this
+    /// thread; `msg::WINDOW_MOVED` says how it went. Task View stays open.
+    fn move_to_desktop(&mut self, window: HWND, desktop: usize) {
+        let window = window.0 as isize;
+        std::thread::spawn(move || {
+            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+            let moved = unsafe {
+                let inited = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+                let moved = desktops::move_window(HWND(window as *mut _), desktop);
+                if inited {
+                    CoUninitialize();
+                }
+                moved
+            };
+            msg::post(msg::WINDOW_MOVED, moved as usize, window);
+        });
+    }
+
     fn run_view(&mut self, action: crate::switcher::ViewAction) {
         use crate::switcher::ViewAction;
         self.switcher.hide();
         match action {
+            ViewAction::MoveWindow(..) => {}
             ViewAction::Focus(h) => dock::focus_window(h),
             ViewAction::Desktop(i) => desktops::switch(self.desks.current, i),
             ViewAction::NewDesktop => desktops::create(),

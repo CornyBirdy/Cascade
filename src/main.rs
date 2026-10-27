@@ -24,6 +24,7 @@ mod ics;
 mod keyhook;
 mod launcher;
 mod lens;
+mod lensmath;
 mod media;
 mod mixer;
 mod mouseedge;
@@ -97,6 +98,8 @@ pub mod msg {
     pub const BLUETOOTH: u32 = WM_APP + 30;
     /// Cascade started late with Windows (see `shell::hint_late_autostart`).
     pub const AUTOSTART: u32 = WM_APP + 31;
+    /// A window was sent to another desktop (wParam 1) or couldn't be (0); lParam is the window.
+    pub const WINDOW_MOVED: u32 = WM_APP + 32;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
