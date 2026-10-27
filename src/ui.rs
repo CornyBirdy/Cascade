@@ -650,7 +650,7 @@ fn right_click(hwnd: HWND) {
         RightClick::General => {
             let Some(state) = with_app(|a| a.menu_state()) else { return };
             let cmd = shell::show_menu(hwnd, state);
-            if cmd == MenuCmd::Quit {
+            if cmd == MenuCmd::Quit || (cmd == MenuCmd::Restart && shell::spawn_restart()) {
                 if let Some(main) = with_app(|a| a.hwnd) {
                     unsafe {
                         let _ = DestroyWindow(main);
@@ -2952,7 +2952,7 @@ impl App {
             MenuCmd::Settings => self.open_settings(),
             MenuCmd::Launcher => self.toggle_launcher(),
             MenuCmd::Reload => self.reload_config(),
-            MenuCmd::None | MenuCmd::Quit => {}
+            MenuCmd::None | MenuCmd::Quit | MenuCmd::Restart => {}
         }
         if let Some(s) = &self.settings {
             s.invalidate();

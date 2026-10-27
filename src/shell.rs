@@ -621,6 +621,7 @@ pub enum MenuCmd {
     Update,
     Settings,
     Launcher,
+    Restart,
     Quit,
 }
 
@@ -645,6 +646,12 @@ fn check(on: bool) -> MENU_ITEM_FLAGS {
     }
 }
 
+/// Starts another copy of Cascade, which waits for this one to exit (as after
+/// an update) and brings the admin key helper up afresh. False if it couldn't.
+pub fn spawn_restart() -> bool {
+    std::env::current_exe().is_ok_and(|exe| std::process::Command::new(exe).arg("--updated").spawn().is_ok())
+}
+
 /// Shows `menu` at the cursor and returns the chosen item id (0 = none).
 fn track(hwnd: HWND, menu: HMENU) -> usize {
     unsafe {
@@ -660,7 +667,7 @@ fn track(hwnd: HWND, menu: HMENU) -> usize {
 }
 
 pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
-    const IDS: [MenuCmd; 14] = [
+    const IDS: [MenuCmd; 15] = [
         MenuCmd::None,
         MenuCmd::Notch,
         MenuCmd::Dock,
@@ -675,6 +682,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         MenuCmd::Settings,
         MenuCmd::Launcher,
         MenuCmd::AutostartSooner,
+        MenuCmd::Restart,
     ];
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return MenuCmd::None };
@@ -701,6 +709,7 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, MF_STRING, 8, w!("Reload config"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 10, &HSTRING::from(state.update_label.as_str()));
+        let _ = AppendMenuW(menu, MF_STRING, 14, w!("Restart Cascade"));
         let _ = AppendMenuW(menu, MF_STRING, 9, w!("Quit Cascade"));
         IDS.get(track(hwnd, menu)).copied().unwrap_or(MenuCmd::None)
     }

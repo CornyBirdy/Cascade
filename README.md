@@ -127,6 +127,7 @@ Cascade is a single `cascade.exe`: put it anywhere and double-click it. Right-cl
 - Start with Windows (a sign-in task, so it starts as you sign in; if it's up before Explorer it waits for Explorer's taskbar before hiding it). If it was turned on before the sign-in task existed (or its permission prompt was declined), Windows' own startup list runs Cascade late, often well after the desktop is up: the notch says so once, and **Start with Windows sooner…** in this menu moves it to the sign-in task (Windows asks for permission once; Settings → General says the same). `cascade.log` notes how long after Windows started Cascade came up, and how it was started.
 - Hide Windows volume flyout
 - Open / reload config (`%APPDATA%\Cascade\config.ini`; focus-timer lengths, weather location, sizes and more)
+- Restart Cascade (a fresh copy starts as this one exits, admin key helper included; handy if anything gets stuck)
 - Quit
 
 ## Updating
