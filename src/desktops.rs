@@ -17,7 +17,7 @@
 use std::ffi::c_void;
 
 use windows::core::{interface, w, IUnknown, IUnknown_Vtbl, Interface, Result, BOOL, GUID, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND, LPARAM};
+use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND, LPARAM, RECT};
 use windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
@@ -25,7 +25,9 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::Common::IObjectArray;
 use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
-use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowPlacement, GetWindowRect, IsIconic, WINDOWPLACEMENT,
+};
 
 use crate::msg;
 
@@ -137,10 +139,21 @@ fn guid_bytes(g: &GUID) -> [u8; 16] {
     b
 }
 
-/// The apps with a window on each desktop (indexed as `Desktops` is), by name
-/// and without repeats. Asks Explorer which desktop each window is on, so
-/// call it off the UI thread, on one that has initialised COM.
-pub fn apps() -> Vec<Vec<String>> {
+/// A window on a desktop, for Task View's pictures of the desktops.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeskWindow {
+    /// What to call its app.
+    pub name: String,
+    /// The id the dock uses for its app (to find the icon).
+    pub id: Option<String>,
+    /// Where it is on the screen, as fractions of it: x, y, width, height.
+    pub at: (f32, f32, f32, f32),
+}
+
+/// The windows on each desktop (indexed as `Desktops` is), the one in front
+/// first, placed on `monitor`. Asks Explorer which desktop each window is on,
+/// so call it off the UI thread, on one that has initialised COM.
+pub fn windows(monitor: RECT) -> Vec<Vec<DeskWindow>> {
     unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
         let (windows, own) = &mut *(out.0 as *mut (Vec<HWND>, u32));
         if crate::dock::is_app_window_any_desktop(h, *own) {
@@ -152,34 +165,59 @@ pub fn apps() -> Vec<Vec<String>> {
     unsafe {
         let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
     }
-    let windows = all.0;
     let key = HSTRING::from(KEY);
     let ids = binary(&key, w!("VirtualDesktopIDs")).unwrap_or_default();
     let ids: Vec<[u8; 16]> = ids.as_chunks::<16>().0.to_vec();
-    let mut found: Vec<Vec<String>> = vec![Vec::new(); ids.len().max(1)];
+    let mut found: Vec<Vec<DeskWindow>> = vec![Vec::new(); ids.len().max(1)];
     let manager: Result<IVirtualDesktopManager> = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL) };
     let Ok(manager) = manager else { return found };
-    for window in windows {
+    let (mw, mh) = ((monitor.right - monitor.left).max(1) as f32, (monitor.bottom - monitor.top).max(1) as f32);
+    for window in all.0 {
         let Ok(id) = (unsafe { manager.GetWindowDesktopId(window) }) else { continue };
         // With one desktop there's no list of ids: they're all on it.
         let Some(desktop) = (if ids.is_empty() { Some(0) } else { ids.iter().position(|d| *d == guid_bytes(&id)) })
         else {
             continue;
         };
-        let name = crate::dock::window_app_name(window);
-        if !found[desktop].contains(&name) {
-            found[desktop].push(name);
+        // A minimised window has no place on the screen: where it would be.
+        let mut r = RECT::default();
+        unsafe {
+            if IsIconic(window).as_bool() {
+                let mut wp =
+                    WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+                if GetWindowPlacement(window, &mut wp).is_ok() {
+                    r = wp.rcNormalPosition;
+                }
+            } else {
+                let _ = GetWindowRect(window, &mut r);
+            }
         }
+        let (x0, y0) = (
+            ((r.left - monitor.left) as f32 / mw).clamp(0.0, 1.0),
+            ((r.top - monitor.top) as f32 / mh).clamp(0.0, 1.0),
+        );
+        let (x1, y1) = (
+            ((r.right - monitor.left) as f32 / mw).clamp(0.0, 1.0),
+            ((r.bottom - monitor.top) as f32 / mh).clamp(0.0, 1.0),
+        );
+        if x1 - x0 < 0.02 || y1 - y0 < 0.02 {
+            continue; // not on this screen
+        }
+        found[desktop].push(DeskWindow {
+            name: crate::dock::window_app_name(window),
+            id: crate::dock::window_app_id(window),
+            at: (x0, y0, x1 - x0, y1 - y0),
+        });
     }
     found
 }
 
-/// Reads `apps` on a thread of its own and posts `msg::DESK_APPS` with them.
-pub fn spawn_apps() {
-    std::thread::spawn(|| unsafe {
+/// Reads `windows` on a thread of its own and posts `msg::DESK_APPS` with them.
+pub fn spawn_windows(monitor: RECT) {
+    std::thread::spawn(move || unsafe {
         use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
         let inited = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let ptr = Box::into_raw(Box::new(apps()));
+        let ptr = Box::into_raw(Box::new(windows(monitor)));
         if !msg::post(msg::DESK_APPS, 0, ptr as isize) {
             drop(Box::from_raw(ptr));
         }

@@ -100,7 +100,7 @@ pub mod msg {
     pub const AUTOSTART: u32 = WM_APP + 31;
     /// A window was sent to another desktop (wParam 1) or couldn't be (0); lParam is the window.
     pub const WINDOW_MOVED: u32 = WM_APP + 32;
-    /// The apps on each virtual desktop (a boxed `Vec<Vec<String>>`, see `desktops::apps`).
+    /// The windows on each virtual desktop (a boxed `Vec<Vec<desktops::DeskWindow>>`).
     pub const DESK_APPS: u32 = WM_APP + 33;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);

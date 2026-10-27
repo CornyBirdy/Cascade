@@ -778,14 +778,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             if wp.0 != 0 {
                 with_app(move |a| {
                     a.switcher.window_moved(HWND(lp.0 as *mut _));
-                    desktops::spawn_apps();
+                    desktops::spawn_windows(a.switcher.monitor());
                 });
             }
             return LRESULT(0);
         }
         msg::DESK_APPS => {
-            let apps = Box::from_raw(lp.0 as *mut Vec<Vec<String>>);
-            with_app(move |a| a.switcher.set_desk_apps(*apps));
+            let windows = Box::from_raw(lp.0 as *mut Vec<Vec<desktops::DeskWindow>>);
+            with_app(move |a| a.switcher.set_desk_windows(*windows));
             return LRESULT(0);
         }
         msg::CALENDAR => {
@@ -3829,7 +3829,7 @@ impl App {
         self.launcher.hide();
         self.desks = desktops::read();
         self.switcher.begin_view(k, monitor, self.desks.clone());
-        desktops::spawn_apps();
+        desktops::spawn_windows(monitor);
     }
 
     /// A window card was dropped on a desktop in Task View. Windows has to be
