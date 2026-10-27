@@ -135,6 +135,9 @@ pub struct Widgets {
     /// itself (one would have been too tall) once its data was in.
     opened_at: Instant,
     last_wide: bool,
+    /// How tall the panel was in one column, the last time its data had
+    /// come in: what the next opening goes by until its own data arrives.
+    known_h: f32,
     hovered: Option<Target>,
     tracking: bool,
     hits: Vec<(Target, f32, f32, f32, f32)>,
@@ -248,6 +251,8 @@ struct Layout {
     cards: Vec<(Card, f32, f32, f32)>,
     w: f32,
     h: f32,
+    /// How tall it would be in one column.
+    one_h: f32,
 }
 
 impl Widgets {
@@ -264,6 +269,7 @@ impl Widgets {
             max_h: f32::MAX,
             opened_at: Instant::now(),
             last_wide: false,
+            known_h: 0.0,
             hovered: None,
             tracking: false,
             hits: Vec::new(),
@@ -421,15 +427,21 @@ impl Widgets {
     }
 
     fn layout(&self, ctx: &Ctx) -> Layout {
-        let one = self.layout_in(ctx, self.columns.max(1));
+        let mut one = self.layout_in(ctx, self.columns.max(1));
+        one.one_h = one.h;
         if self.columns == 1 && self.cards.len() > 1 {
             // Its stats and notifications arrive a moment after it opens and
-            // make the cards taller. If that was enough to need two columns
-            // last time, it opens in two now, instead of opening narrow and
-            // snapping wide. It only goes back to one once that clearly fits.
-            let carry = self.last_wide && (self.settling() || one.h > self.max_h * 0.8);
-            if one.h > self.max_h || carry {
-                return self.layout_in(ctx, 2);
+            // make the cards taller (before then they're whatever was read
+            // last, which can be long ago). So until they're in, it goes by
+            // how tall it was the last time they were: opening narrow and
+            // snapping wide a moment later is what that avoids. It only goes
+            // back to one column once that clearly fits.
+            let need = if self.settling() { one.h.max(self.known_h) } else { one.h };
+            let carry = self.last_wide && need > self.max_h * 0.8;
+            if need > self.max_h || carry {
+                let mut two = self.layout_in(ctx, 2);
+                two.one_h = one.h;
+                return two;
             }
         }
         one
@@ -454,7 +466,7 @@ impl Widgets {
         let w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
         let tallest = col_y.iter().copied().fold(HEADER, f32::max);
         let h = if self.cards.is_empty() { HEADER + 50.0 } else { tallest - GAP + PAD };
-        Layout { cards: out, w, h }
+        Layout { cards: out, w, h, one_h: h }
     }
 
     pub fn render(&mut self, gfx: &mut Gfx, ctx: &Ctx) -> Result<()> {
@@ -472,9 +484,10 @@ impl Widgets {
             return Ok(());
         }
         let k = self.k;
-        let Layout { cards, w, h } = self.layout(ctx);
+        let Layout { cards, w, h, one_h } = self.layout(ctx);
         if self.open && !self.settling() {
             self.last_wide = self.columns == 1 && w > PAD * 2.0 + CARD_W + 1.0;
+            self.known_h = one_h;
         }
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
         let slide = ((1.0 - self.reveal.value.clamp(0.0, 1.0)) * 16.0 * k) as i32;

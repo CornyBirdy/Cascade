@@ -3967,7 +3967,16 @@ impl App {
                         self.widgets.hide();
                         match aumid.filter(|a| !a.is_empty()) {
                             Some(a) => {
-                                shell::open(&format!("shell:AppsFolder\\{a}"));
+                                // The Snipping Tool's own notification opens the new
+                                // screenshot in the editor; other apps just open.
+                                let snip = a.contains("ScreenSketch").then(shell::recent_screenshot).flatten();
+                                match snip {
+                                    Some(file) => shell::open(&format!(
+                                        "ms-screensketch:edit?source={}&isTemporary=false",
+                                        shell::uri_escape(&file.to_string_lossy())
+                                    )),
+                                    None => shell::open(&format!("shell:AppsFolder\\{a}")),
+                                }
                                 self.notifs.items.retain(|n| n.id != id);
                                 let _ = self.notif_tx.send(NotifCmd::Remove(id));
                             }
