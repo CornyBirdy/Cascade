@@ -456,13 +456,29 @@ unsafe extern "system" fn collect_windows(h: HWND, out: LPARAM) -> BOOL {
     true.into()
 }
 
-fn is_cloaked(h: HWND) -> bool {
+/// The reasons DWM has hidden window `h` (0 if it hasn't).
+fn cloaked_by(h: HWND) -> u32 {
     let mut cloaked = 0u32;
-    unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4).is_ok() && cloaked != 0 }
+    let ok = unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4).is_ok() };
+    if ok {
+        cloaked
+    } else {
+        0
+    }
 }
 
 /// Whether a window belongs on the taskbar, the same way Windows decides.
 pub fn is_app_window(h: HWND, own_pid: u32) -> bool {
+    app_window(h, own_pid, false)
+}
+
+/// Like `is_app_window`, but also true for the windows of the other virtual
+/// desktops (Windows hides those from the desktop you're on).
+pub fn is_app_window_any_desktop(h: HWND, own_pid: u32) -> bool {
+    app_window(h, own_pid, true)
+}
+
+fn app_window(h: HWND, own_pid: u32, any_desktop: bool) -> bool {
     unsafe {
         if !IsWindowVisible(h).as_bool() {
             return false;
@@ -474,7 +490,9 @@ pub fn is_app_window(h: HWND, own_pid: u32) -> bool {
         if ex & WS_EX_TOOLWINDOW.0 != 0 && ex & WS_EX_APPWINDOW.0 == 0 {
             return false;
         }
-        if GetWindowTextLengthW(h) == 0 || is_cloaked(h) {
+        // DWM_CLOAKED_SHELL (2) is how a window on another desktop is hidden.
+        let cloaked = cloaked_by(h) & if any_desktop { !2 } else { !0 };
+        if GetWindowTextLengthW(h) == 0 || cloaked != 0 {
             return false;
         }
         let mut class = [0u16; 64];
@@ -529,6 +547,16 @@ fn app_pid(h: HWND) -> Option<u32> {
         let _ = EnumChildWindows(Some(h), Some(child), LPARAM(&mut found as *mut _ as isize));
     }
     (found.1 != 0).then_some(found.1)
+}
+
+/// What to call the app that owns `h`: its description (as the file's
+/// properties give it), or else the exe's name.
+pub fn window_app_name(h: HWND) -> String {
+    let Some(path) = app_pid(h).and_then(process_path) else { return "App".into() };
+    crate::icons::exe_description(&path).unwrap_or_else(|| {
+        let file = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+        file.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
+    })
 }
 
 /// The id the dock uses for the app that owns `h`: the exe path, or

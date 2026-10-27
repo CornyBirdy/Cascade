@@ -169,6 +169,8 @@ pub struct Switcher {
     desks: Desktops,
     /// The desktop or button under the pointer in the strip.
     desk_hover: Option<Spot>,
+    /// The apps with a window on each desktop (read as Task View opens).
+    desk_apps: Vec<Vec<String>>,
     drag: Option<Drag>,
     style: Style,
     /// Fading out after a pick (or Esc): still drawn until `open` reaches 0.
@@ -218,6 +220,7 @@ impl Switcher {
             view: false,
             desks: Desktops::default(),
             desk_hover: None,
+            desk_apps: Vec::new(),
             drag: None,
             style: Style::Cards,
             closing: false,
@@ -276,6 +279,7 @@ impl Switcher {
         self.list(k, monitor);
         self.desks = desks;
         self.desk_hover = None;
+        self.desk_apps.clear();
         let fg = unsafe { GetForegroundWindow() };
         self.selected = self.items.iter().position(|i| i.window == fg).unwrap_or(0);
         self.start();
@@ -286,6 +290,14 @@ impl Switcher {
         }
         self.show_now();
         crate::launcher::force_foreground(self.overlay);
+    }
+
+    /// What is open on each desktop, for the list that comes up over a desktop.
+    pub fn set_desk_apps(&mut self, apps: Vec<Vec<String>>) {
+        if self.view && apps != self.desk_apps {
+            self.desk_apps = apps;
+            self.dirty = true;
+        }
     }
 
     /// New desktops (or a switch) while Task View is open.
@@ -1003,6 +1015,31 @@ impl Switcher {
                     p.rrect(x + 3.0, y + g.h * 0.25, 3.0, g.h * 0.5, 1.5, theme::accent().alpha(a));
                 } else {
                     p.rrect(x + g.w * 0.35, y + g.h - 5.0, g.w * 0.3, 3.0, 1.5, theme::accent().alpha(a));
+                }
+            }
+            // Over a desktop: the apps that are open on it.
+            if let (true, Some(Spot::Desk(i))) = (self.drag.is_none(), self.desk_hover) {
+                let apps = self.desk_apps.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                if let (Some(&(bx, by, bw)), false) = (self.strip().0.get(i), apps.is_empty()) {
+                    const ROW: f32 = 22.0;
+                    const MAX: usize = 6;
+                    let shown = apps.len().min(MAX);
+                    let rows = shown + (apps.len() > MAX) as usize;
+                    let (pw, ph) = (190.0, rows as f32 * ROW + 14.0);
+                    let px = (bx + bw / 2.0 - pw / 2.0).clamp(4.0, (w - pw - 4.0).max(4.0));
+                    let py = by - ph - 6.0;
+                    p.rrect(px + 1.0, py + 3.0, pw, ph, r, Color(0.0, 0.0, 0.0, 0.25));
+                    p.rrect(px, py, pw, ph, r, Color(0.17, 0.18, 0.21, 0.97));
+                    p.stroke_rrect(px + 0.5, py + 0.5, pw - 1.0, ph - 1.0, r, Color::white(0.14), 1.0);
+                    for (n, name) in apps.iter().take(MAX).enumerate() {
+                        let ty = py + 7.0 + n as f32 * ROW;
+                        p.text(name, &f.label, px + 12.0, ty, pw - 24.0, ROW, Align::Left, Color::white(0.93));
+                    }
+                    if apps.len() > MAX {
+                        let more = format!("+ {} more", apps.len() - MAX);
+                        let ty = py + 7.0 + MAX as f32 * ROW;
+                        p.text(&more, &f.label, px + 12.0, ty, pw - 24.0, ROW, Align::Left, Color::white(0.55));
+                    }
                 }
             }
             // The card being carried to a desktop follows the pointer.

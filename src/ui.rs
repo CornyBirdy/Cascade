@@ -766,8 +766,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::WINDOW_MOVED => {
             if wp.0 != 0 {
-                with_app(move |a| a.switcher.window_moved(HWND(lp.0 as *mut _)));
+                with_app(move |a| {
+                    a.switcher.window_moved(HWND(lp.0 as *mut _));
+                    desktops::spawn_apps();
+                });
             }
+            return LRESULT(0);
+        }
+        msg::DESK_APPS => {
+            let apps = Box::from_raw(lp.0 as *mut Vec<Vec<String>>);
+            with_app(move |a| a.switcher.set_desk_apps(*apps));
             return LRESULT(0);
         }
         msg::CALENDAR => {
@@ -3750,6 +3758,7 @@ impl App {
         self.launcher.hide();
         self.desks = desktops::read();
         self.switcher.begin_view(k, monitor, self.desks.clone());
+        desktops::spawn_apps();
     }
 
     /// A window card was dropped on a desktop in Task View. Windows has to be
