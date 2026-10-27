@@ -240,6 +240,12 @@ unsafe fn masked_release(vk: u16) -> bool {
     SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len()
 }
 
+/// Taps the mask key now: to Windows the Win key held down is part of a
+/// combination, so letting go of it won't open its Start menu.
+pub fn mask_win() {
+    unsafe { mask_tap() };
+}
+
 /// Taps the mask key (down and up as one batch).
 unsafe fn mask_tap() {
     let inputs = [key(MASK_KEY, false), key(MASK_KEY, true)];

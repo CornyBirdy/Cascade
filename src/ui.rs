@@ -1232,6 +1232,7 @@ impl App {
         launcher::spawn_scan();
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
+        crate::superdrag::configure(self.cfg.super_drag);
         desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
@@ -2991,6 +2992,7 @@ impl App {
             }
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
+        crate::superdrag::configure(self.cfg.super_drag);
         self.perf = Perf::new(self.cfg.perf_log);
         self.apply_calendar();
         self.update_display();

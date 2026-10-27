@@ -380,6 +380,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
             row(
+                "super_drag",
+                "Super drag",
+                "Hold the Win key and drag a window by any part of it, not only its title bar.",
+                Toggle,
+            ),
+            row(
                 "battery_saver",
                 "Battery saver",
                 "On battery, turn off refraction and the visualizer bars and read stats less often.",

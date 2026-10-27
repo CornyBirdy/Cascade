@@ -39,6 +39,7 @@ mod settings;
 mod shell;
 mod smart;
 mod spring;
+mod superdrag;
 mod switcher;
 mod sysmon;
 mod systray;
