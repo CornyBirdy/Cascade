@@ -108,6 +108,9 @@ const TIMER_HOVER: usize = 23;
 /// (twice, as the displays can take a few seconds to settle).
 const TIMER_WAKE: usize = 24;
 const TIMER_WAKE2: usize = 25;
+/// While the notch is hidden for a fullscreen app: checks one is still there
+/// (see `check_fullscreen`).
+const TIMER_FULLSCREEN: usize = 26;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -359,6 +362,8 @@ struct App {
     dragging: Option<Hot>,
     peek: Option<PeekKind>,
     fullscreen: bool,
+    /// Looks in a row (`check_fullscreen`) that found no fullscreen app.
+    fullscreen_misses: u8,
     shown: bool,
     last_wheel: Instant,
 
@@ -1110,6 +1115,7 @@ impl App {
             dragging: None,
             peek: None,
             fullscreen: shell::fullscreen_now(),
+            fullscreen_misses: 0,
             shown: false,
             last_wheel: Instant::now(),
             media: None,
@@ -1436,6 +1442,14 @@ impl App {
     /// A fullscreen app came to the front (true) or went.
     fn set_fullscreen(&mut self, on: bool) {
         self.fullscreen = on;
+        self.fullscreen_misses = 0;
+        unsafe {
+            if on {
+                SetTimer(Some(self.hwnd), TIMER_FULLSCREEN, 3000, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_FULLSCREEN);
+            }
+        }
         self.retarget();
         self.show_docks();
         self.sync_visualizer();
@@ -1445,6 +1459,23 @@ impl App {
         mouseedge::pause(self.fullscreen);
         mouseedge::raise();
         self.arm_stats();
+    }
+
+    /// Windows says when a fullscreen app closes, but a missed word (a game
+    /// that crashed, a lock screen, a screen that changed under it) would leave
+    /// the notch and taskbar hidden for good. So while they are hidden for one,
+    /// look now and then that a window still covers a screen; if none has for
+    /// two looks in a row, bring them back.
+    fn check_fullscreen(&mut self) {
+        if !self.fullscreen || shell::foreground_covers_screen() || shell::fullscreen_now() {
+            self.fullscreen_misses = 0;
+            return;
+        }
+        self.fullscreen_misses += 1;
+        if self.fullscreen_misses >= 2 {
+            config::log("fullscreen: no fullscreen app is in front any more; showing the notch again");
+            self.set_fullscreen(false);
+        }
     }
 
     /// Explorer made its taskbar: at sign-in, or after it restarted.
@@ -2586,6 +2617,7 @@ impl App {
             }
             TIMER_TICK => self.dirty = true,
             TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
+            TIMER_FULLSCREEN => self.check_fullscreen(),
             TIMER_PASTE => shell::paste(),
             TIMER_CAL => {
                 self.announce_events();

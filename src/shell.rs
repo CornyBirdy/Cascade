@@ -63,7 +63,7 @@ pub fn fullscreen_now() -> bool {
 }
 
 /// Whether the window in front (not the desktop) covers its whole screen.
-fn foreground_covers_screen() -> bool {
+pub fn foreground_covers_screen() -> bool {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || fg == GetShellWindow() {
