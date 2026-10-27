@@ -16,7 +16,7 @@
 
 use std::ffi::c_void;
 
-use windows::core::{interface, w, BOOL, IUnknown, IUnknown_Vtbl, Interface, Result, GUID, HRESULT, HSTRING, PCWSTR};
+use windows::core::{interface, w, IUnknown, IUnknown_Vtbl, Interface, Result, BOOL, GUID, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{ERROR_SUCCESS, E_INVALIDARG, HANDLE, HWND, LPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
 use windows::Win32::System::Registry::*;
@@ -157,8 +157,7 @@ pub fn apps() -> Vec<Vec<String>> {
     let ids = binary(&key, w!("VirtualDesktopIDs")).unwrap_or_default();
     let ids: Vec<[u8; 16]> = ids.as_chunks::<16>().0.to_vec();
     let mut found: Vec<Vec<String>> = vec![Vec::new(); ids.len().max(1)];
-    let manager: Result<IVirtualDesktopManager> =
-        unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL) };
+    let manager: Result<IVirtualDesktopManager> = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL) };
     let Ok(manager) = manager else { return found };
     for window in windows {
         let Ok(id) = (unsafe { manager.GetWindowDesktopId(window) }) else { continue };

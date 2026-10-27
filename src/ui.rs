@@ -5842,8 +5842,9 @@ impl App {
             Color::white(0.95 * alpha * timer),
         );
 
-        for (n, (hot, bx)) in
-            [(Hot::PomoReset, ox + 274.0), (Hot::PomoToggle, ox + 314.0), (Hot::PomoSkip, ox + 354.0)].into_iter().enumerate()
+        for (n, (hot, bx)) in [(Hot::PomoReset, ox + 274.0), (Hot::PomoToggle, ox + 314.0), (Hot::PomoSkip, ox + 354.0)]
+            .into_iter()
+            .enumerate()
         {
             // The buttons pop in one after another under the ring.
             let pop = pop_out(stag(0.45 + n as f32 * 0.08));
