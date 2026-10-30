@@ -50,6 +50,64 @@ pub const SECTIONS: [&str; 11] = [
     "About",
 ];
 
+/// The page that lists what the search box found: one past the real sections,
+/// so it has no sidebar entry. Its rows are the matching rows of the others.
+const SEARCH: usize = SECTIONS.len();
+/// The search box's id (for its change notifications) and place in the sidebar.
+pub const SEARCH_ID: usize = 900;
+const SEARCH_BOX: (f32, f32, f32, f32) = (14.0, 18.0, SIDEBAR - 28.0, 32.0);
+/// Where the sidebar's section list starts, under the search box.
+const NAV_TOP: f32 = 70.0;
+const BOX_BG: Color = Color(0.169, 0.169, 0.169, 1.0);
+
+/// What the search box found: the settings that match what was typed, each
+/// group under a heading naming its section, and which section each came
+/// from (for `shown`, which goes by the section a row really belongs to).
+struct Found {
+    rows: Vec<Row>,
+    from: Vec<(&'static str, usize)>,
+}
+
+thread_local! {
+    static FOUND: RefCell<Found> = const { RefCell::new(Found { rows: Vec::new(), from: Vec::new() }) };
+}
+
+/// Finds the settings that match every word of `query` in their name,
+/// description, key or section.
+fn search(query: &str) {
+    let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let (mut out, mut from) = (Vec::new(), Vec::new());
+    if !words.is_empty() {
+        for (s, name) in SECTIONS.iter().enumerate() {
+            let hits: Vec<Row> = rows(s)
+                .into_iter()
+                .filter(|r| !matches!(r.ctl, Ctl::Heading | Ctl::Note))
+                .filter(|r| {
+                    let text = format!("{} {} {} {}", r.title, r.desc, r.key.replace('_', " "), name).to_lowercase();
+                    words.iter().all(|w| text.contains(w))
+                })
+                .collect();
+            if hits.is_empty() {
+                continue;
+            }
+            out.push(heading(name, name));
+            for r in hits {
+                from.push((r.key, s));
+                out.push(r);
+            }
+        }
+        if out.is_empty() {
+            out.push(row(
+                "search-none",
+                "Nothing matches that",
+                "Try another word: a setting's name, or what it does.",
+                Ctl::Note,
+            ));
+        }
+    }
+    FOUND.with(|f| *f.borrow_mut() = Found { rows: out, from });
+}
+
 #[derive(Clone, Copy)]
 enum Unit {
     Fps,
@@ -63,6 +121,7 @@ enum Unit {
     Degrees,
 }
 
+#[derive(Clone)]
 enum Ctl {
     Toggle,
     Slider {
@@ -86,6 +145,7 @@ enum Ctl {
     Heading,
 }
 
+#[derive(Clone)]
 struct Row {
     key: &'static str,
     title: &'static str,
@@ -375,6 +435,9 @@ fn location_note(location: &str, on: bool) -> Option<(String, Color, Option<bool
 
 fn rows(section: usize) -> Vec<Row> {
     use Ctl::*;
+    if section == SEARCH {
+        return FOUND.with(|f| f.borrow().rows.clone());
+    }
     match section {
         0 => vec![
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
@@ -390,6 +453,36 @@ fn rows(section: usize) -> Vec<Row> {
                 "Battery saver",
                 "On battery, turn off refraction and the visualizer bars and read stats less often.",
                 Toggle,
+            ),
+            row(
+                "ducker",
+                "Auto ducker",
+                "While one app is making sound (Discord, with friends talking), turn the others down. They come back when it stops.",
+                Toggle,
+            ),
+            row(
+                "ducker_trigger",
+                "When this app makes sound",
+                "Its name as in Task Manager's Details tab, without .exe. Several: separate with commas.",
+                Text { secret: false },
+            ),
+            row(
+                "ducker_targets",
+                "Turn these apps down",
+                "Names, separated by commas, like Spotify, game. Empty: every other app.",
+                Text { secret: false },
+            ),
+            row(
+                "ducker_level",
+                "Turn them down to",
+                "A share of their own volume.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "ducker_release",
+                "Bring them back after",
+                "How long it has to be quiet first.",
+                slider(200.0, 5000.0, 100.0, Unit::Ms),
             ),
             row("alt_tab", "Alt+Tab switcher", "Cascade's own, with live previews, instead of Windows'.", Toggle),
             row(
@@ -595,6 +688,7 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("show_search", "Search box", "Next to the Start button.", Toggle),
             row("show_status", "Network, volume and battery", "Status icons by the clock.", Toggle),
+            row("battery_percent", "Battery percentage", "The charge level as a number next to the battery icon.", Toggle),
             row(
                 "status_click",
                 "Clicking them",
@@ -847,6 +941,7 @@ fn rows(section: usize) -> Vec<Row> {
         9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
+            row("changelog", "What's new", "What changed in each build.", Button("Open changelog")),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
         ],
         _ => vec![
@@ -869,6 +964,10 @@ fn rows(section: usize) -> Vec<Row> {
 /// the Start menu's parts with Cascade's Start menu off) are left out, and
 /// come back as soon as they would.
 fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
+    if section == SEARCH {
+        let from = FOUND.with(|f| f.borrow().from.iter().find(|(k, _)| *k == key).map(|&(_, s)| s));
+        return from.is_none_or(|s| shown(s, key, get));
+    }
     let on = |k: &str| get(k) == "true";
     let lip = get("notch_style") == "lip";
     let side = matches!(get("notch_edge").as_str(), "left" | "right");
@@ -895,10 +994,13 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
         (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
+        (0, "ducker_trigger" | "ducker_targets" | "ducker_level" | "ducker_release") => on("ducker"),
         // Taskbar.
         (3, "dock") => true,
         (3, _) if !on("dock") => false,
         (3, "status_click") => on("show_status"),
+        // Only a PC with a battery has a level to show.
+        (3, "battery_percent") => on("show_status") && on("battery"),
         (3, "taskbar_screen_apps" | "taskbar_screen_clock") => get("taskbar_screens") == "all",
         // Start menu: the helper also serves Alt+Tab and the shortcuts.
         (4, "launcher" | "admin_helper") => true,
@@ -1066,6 +1168,11 @@ pub struct Settings {
     measure: Option<Measure>,
     /// The current section's rows sized to their text.
     fit: RefCell<Fit>,
+    /// The search box (a native text box in the sidebar), what it held when
+    /// last read, and the section to go back to when it is emptied.
+    search_edit: HWND,
+    search: String,
+    before_search: usize,
 }
 
 /// The rows shown (see `shown`), their heights (descriptions wrap onto
@@ -1122,8 +1229,30 @@ impl Settings {
                 brush: CreateSolidBrush(COLORREF(0x002B2B2B)),
                 measure: Measure::new().ok(),
                 fit: RefCell::default(),
+                search_edit: HWND::default(),
+                search: String::new(),
+                before_search: 0,
             };
             s.apply_dpi(None);
+            s.search_edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x80), // ES_AUTOHSCROLL
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                Some(HMENU(SEARCH_ID as *mut _)),
+                Some(instance),
+                None,
+            )
+            .unwrap_or_default();
+            // EM_SETCUEBANNER: the grey hint while it is empty.
+            let hint: Vec<u16> = "Search settings\0".encode_utf16().collect();
+            SendMessageW(s.search_edit, 0x1501, Some(WPARAM(1)), Some(LPARAM(hint.as_ptr() as isize)));
+            s.place_search();
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             Ok(s)
@@ -1175,6 +1304,58 @@ impl Settings {
                 w!("Segoe UI"),
             );
         }
+        self.place_search();
+    }
+
+    /// Puts the search box in its place in the sidebar (and its font).
+    fn place_search(&self) {
+        if self.search_edit.is_invalid() {
+            return;
+        }
+        let (x, y, w, h) = SEARCH_BOX;
+        let k = self.k;
+        unsafe {
+            SendMessageW(self.search_edit, WM_SETFONT, Some(WPARAM(self.font.0 as usize)), Some(LPARAM(1)));
+            let _ = SetWindowPos(
+                self.search_edit,
+                None,
+                ((x + 32.0) * k) as i32,
+                ((y + 6.0) * k) as i32,
+                ((w - 32.0 - 12.0) * k) as i32,
+                ((h - 12.0) * k) as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    /// The search box changed: list what matches, or (once it is emptied)
+    /// go back to the section that was open.
+    pub fn search_changed(&mut self, get: &dyn Fn(&str) -> String) {
+        let text = edit_text(self.search_edit).trim().to_string();
+        if text == self.search {
+            return;
+        }
+        self.search = text;
+        if self.search.is_empty() {
+            if self.section == SEARCH {
+                self.section = self.before_search;
+            }
+        } else {
+            if self.section != SEARCH {
+                self.before_search = self.section;
+                self.section = SEARCH;
+            }
+            search(&self.search);
+        }
+        self.scroll = 0.0;
+        self.hovered = None;
+        self.sync_edits(get);
+        self.invalidate();
+    }
+
+    /// The page's title.
+    fn title(&self) -> &'static str {
+        SECTIONS.get(self.section).copied().unwrap_or("Search results")
     }
 
     pub fn invalidate(&self) {
@@ -1457,8 +1638,8 @@ impl Settings {
     fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         if lx < SIDEBAR {
-            let i = ((ly - 24.0) / 40.0).floor();
-            return (ly >= 24.0 && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
+            let i = ((ly - NAV_TOP) / 40.0).floor();
+            return (ly >= NAV_TOP && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
         }
         for (i, r) in self.rows().iter().enumerate() {
             let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
@@ -1588,7 +1769,14 @@ impl Settings {
                 None
             }
             Hit::Nav(i) => {
-                if i != self.section {
+                if i != self.section || !self.search.is_empty() {
+                    // Picking a section leaves the search.
+                    if !self.search.is_empty() {
+                        self.search.clear();
+                        unsafe {
+                            let _ = SetWindowTextW(self.search_edit, w!(""));
+                        }
+                    }
                     self.section = i;
                     self.scroll = 0.0;
                     self.hovered = None;
@@ -1690,8 +1878,12 @@ impl Settings {
                 let f = &gfx.fonts;
                 // Sidebar.
                 p.rrect(0.0, 0.0, SIDEBAR, CH, 0.0, Color(0.09, 0.09, 0.10, 1.0));
+                let (bx, by, bw, bh) = SEARCH_BOX;
+                p.rrect(bx, by, bw, bh, bh / 2.0, BOX_BG);
+                p.stroke_circle(bx + 17.0, by + 15.0, 5.0, Color::white(0.55), 1.5);
+                p.line(bx + 20.5, by + 18.5, bx + 24.0, by + 22.0, Color::white(0.55), 1.5);
                 for (i, name) in SECTIONS.iter().enumerate() {
-                    let y = 24.0 + i as f32 * 40.0;
+                    let y = NAV_TOP + i as f32 * 40.0;
                     let active = i == self.section;
                     if active || self.hovered == Some(Hit::Nav(i)) {
                         p.rrect(
@@ -1734,16 +1926,7 @@ impl Settings {
                 let x0 = SIDEBAR + 24.0;
                 let cw = self.content_w();
                 p.clip(SIDEBAR, 0.0, CW - SIDEBAR, CH);
-                p.text(
-                    SECTIONS[self.section],
-                    &f.big,
-                    x0,
-                    22.0 - self.scroll(),
-                    cw,
-                    44.0,
-                    Align::Left,
-                    Color::white(0.95),
-                );
+                p.text(self.title(), &f.big, x0, 22.0 - self.scroll(), cw, 44.0, Align::Left, Color::white(0.95));
                 for (i, r) in self.rows().iter().enumerate() {
                     let y = self.row_y(i);
                     let h = self.row_h(i);
@@ -2133,6 +2316,42 @@ mod tests {
         assert!(!keys(6, &[("taskbar_left", ""), ("taskbar_right", ""), ("widgets_panel", "calendar")])
             .contains(&"widget_visualizer"));
         assert!(keys(6, &[("taskbar_left", "music"), ("taskbar_right", "")]).contains(&"widget_visualizer"));
+    }
+
+    #[test]
+    fn search_finds_settings_across_sections() {
+        search("battery");
+        let found = rows(SEARCH);
+        let keys: Vec<_> = found.iter().map(|r| r.key).collect();
+        assert!(keys.contains(&"battery_saver") && keys.contains(&"battery_percent"));
+        // Each group starts with a heading naming its section.
+        assert!(matches!(found[0].ctl, Ctl::Heading));
+        assert!(found.iter().filter(|r| matches!(r.ctl, Ctl::Heading)).all(|r| SECTIONS.contains(&r.title)));
+        // Every word has to match, in any order and any case.
+        search("SAVER battery");
+        assert!(rows(SEARCH).iter().any(|r| r.key == "battery_saver"));
+        search("battery zzzzqq");
+        assert_eq!(rows(SEARCH).iter().map(|r| r.key).collect::<Vec<_>>(), vec!["search-none"]);
+        // Nothing typed, nothing listed.
+        search("   ");
+        assert!(rows(SEARCH).is_empty());
+    }
+
+    #[test]
+    fn search_results_keep_their_own_sections_conditions() {
+        search("battery percentage");
+        let get = |set: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                set.iter().find(|(s, _)| *s == k).map_or_else(|| Config::default().get(k), |(_, v)| v.to_string())
+            }
+        };
+        // On a laptop with the status icons showing, the percentage row is there...
+        assert!(shown(SEARCH, "battery_percent", &get(&[("battery", "true"), ("show_status", "true")])));
+        // ...and not without the icons, or without a battery.
+        assert!(!shown(SEARCH, "battery_percent", &get(&[("battery", "true"), ("show_status", "false")])));
+        assert!(!shown(SEARCH, "battery_percent", &get(&[("battery", "false"), ("show_status", "true")])));
+        // The "nothing matches" note always shows.
+        assert!(shown(SEARCH, "search-none", &get(&[])));
     }
 
     #[test]

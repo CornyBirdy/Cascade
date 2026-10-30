@@ -417,6 +417,8 @@ pub struct Launcher {
     pinned: Vec<(String, String)>,
     recent: Vec<RecentFile>,
     query: String,
+    /// Ctrl+A picked all of `query`: typing replaces it, Backspace clears it.
+    all_selected: bool,
     results: Vec<usize>,
     /// What the search answers besides apps: the first `answers_top` go
     /// above the apps, the rest below them.
@@ -490,6 +492,7 @@ impl Launcher {
             pinned: Vec::new(),
             recent: Vec::new(),
             query: String::new(),
+            all_selected: false,
             results: Vec::new(),
             answers: Vec::new(),
             answers_top: 0,
@@ -578,6 +581,7 @@ impl Launcher {
             spawn_recent();
         }
         self.query.clear();
+        self.all_selected = false;
         self.filter();
         self.reset_scroll();
         self.close_popups();
@@ -752,17 +756,39 @@ impl Launcher {
     // -------------------------------------------------------------- input --
 
     pub fn on_char(&mut self, c: char) {
-        if !c.is_control() {
-            self.close_popups();
-            self.query.push(c);
-            self.filter();
-            self.dirty = true;
+        match c {
+            // Ctrl+A, Ctrl+C, Ctrl+X: the search box is a plain text box too.
+            '\u{1}' if !self.query.is_empty() => {
+                self.all_selected = true;
+                self.dirty = true;
+            }
+            '\u{3}' | '\u{18}' if !self.query.is_empty() => {
+                crate::clipboard::copy(&self.query);
+                if c == '\u{18}' {
+                    self.query.clear();
+                    self.all_selected = false;
+                    self.filter();
+                    self.dirty = true;
+                }
+            }
+            c if !c.is_control() => {
+                self.close_popups();
+                if self.all_selected {
+                    self.query.clear();
+                    self.all_selected = false;
+                }
+                self.query.push(c);
+                self.filter();
+                self.dirty = true;
+            }
+            _ => {}
         }
     }
 
     /// Returns an action for keys that do something.
     pub fn on_key(&mut self, vk: u16) -> Option<Action> {
         const BACK: u16 = 0x08;
+        const DELETE: u16 = 0x2E;
         const ENTER: u16 = 0x0D;
         const ESC: u16 = 0x1B;
         const UP: u16 = 0x26;
@@ -773,11 +799,17 @@ impl Launcher {
             ESC if self.side_open => self.open_side(false),
             ESC if self.searching() => {
                 self.query.clear();
+                self.all_selected = false;
                 self.filter();
             }
             ESC => return Some(Action::Close),
-            BACK => {
-                self.query.pop();
+            BACK | DELETE => {
+                if self.all_selected {
+                    self.query.clear();
+                    self.all_selected = false;
+                } else if vk == BACK {
+                    self.query.pop();
+                }
                 self.filter();
             }
             ENTER => {
@@ -1055,9 +1087,14 @@ impl Launcher {
                 p.text("Search for apps", &f.body, sx + 40.0, 18.0, sw - 60.0, sh, Align::Left, Color::white(0.45));
                 p.line(sx + 39.0, 28.0, sx + 39.0, 46.0, Color::white(0.8), 1.2);
             } else {
+                let tw = gfx.measure(&self.query, &f.body).min(sw - 62.0);
+                if self.all_selected {
+                    p.rrect(sx + 38.0, 26.0, tw + 4.0, 22.0, 4.0, theme::accent().alpha(0.45));
+                }
                 p.text(&self.query, &f.body, sx + 40.0, 18.0, sw - 60.0, sh, Align::Left, Color::white(0.95));
-                let caret = sx + 40.0 + gfx.measure(&self.query, &f.body).min(sw - 62.0) + 1.0;
-                p.line(caret, 28.0, caret, 46.0, Color::white(0.8), 1.2);
+                if !self.all_selected {
+                    p.line(sx + 40.0 + tw + 1.0, 28.0, sx + 40.0 + tw + 1.0, 46.0, Color::white(0.8), 1.2);
+                }
             }
 
             // Rows ease in one after another when the list opens or changes.

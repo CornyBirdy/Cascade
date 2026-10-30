@@ -16,6 +16,7 @@ mod desktops;
 mod devices;
 mod dock;
 mod drop;
+mod ducker;
 mod gfx;
 mod helper;
 mod http;

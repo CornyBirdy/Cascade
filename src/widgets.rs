@@ -200,6 +200,13 @@ pub struct Widgets {
     /// picked on it (None: today).
     cal_month: i32,
     cal_day: Option<i64>,
+    /// 0 to 1 as the calendar card's month comes in (its title, weekdays and
+    /// days one after another), and as the picked day's events do: they
+    /// replay when the panel opens, and when the month or the day changes.
+    cal_in: Spring,
+    cal_ev: Spring,
+    /// Which way the month went (-1 earlier, 1 later), so its days slide in from that side.
+    cal_dir: f32,
 }
 
 /// How long after opening the cards' data is still arriving.
@@ -338,6 +345,9 @@ impl Widgets {
             dirty: false,
             cal_month: 0,
             cal_day: None,
+            cal_in: Spring::new(1.0, 110.0, 21.0),
+            cal_ev: Spring::new(1.0, 130.0, 22.0),
+            cal_dir: 0.0,
         }
     }
 
@@ -378,6 +388,7 @@ impl Widgets {
             // Opened afresh: back to today on the calendar.
             self.cal_month = 0;
             self.cal_day = None;
+            self.replay_month(0.0);
             self.opened_at = Instant::now();
             self.visible = true;
             self.reveal.snap(0.0);
@@ -517,18 +528,24 @@ impl Widgets {
             Target::CalMonth(d) => {
                 self.cal_month += d;
                 self.cal_day = None;
+                self.replay_month(d as f32);
                 self.dirty = true;
                 return None;
             }
             Target::CalToday => {
-                self.cal_month = 0;
-                self.cal_day = None;
+                if self.cal_month != 0 || self.cal_day.is_some() {
+                    let dir = if self.cal_month > 0 { -1.0 } else { 1.0 };
+                    self.cal_month = 0;
+                    self.cal_day = None;
+                    self.replay_month(dir);
+                }
                 self.dirty = true;
                 return None;
             }
             Target::CalDay(d) => {
                 // A second click on the picked day goes back to today.
                 self.cal_day = if self.cal_day == Some(d) { None } else { Some(d) };
+                self.replay_day();
                 self.dirty = true;
                 return None;
             }
@@ -557,11 +574,26 @@ impl Widgets {
     }
 
     pub fn wants_frame(&self) -> bool {
-        self.visible && (self.dirty || !self.reveal.settled())
+        self.visible && (self.dirty || !self.reveal.settled() || !self.cal_in.settled() || !self.cal_ev.settled())
     }
 
     pub fn step(&mut self, dt: f32) -> bool {
-        self.reveal.step(dt)
+        let calendar = self.cal_in.step(dt) | self.cal_ev.step(dt);
+        self.reveal.step(dt) | calendar
+    }
+
+    /// The calendar card's month comes in again (`dir`: which way it moved).
+    fn replay_month(&mut self, dir: f32) {
+        self.cal_dir = dir;
+        self.cal_in.snap(0.0);
+        self.cal_in.set(1.0);
+        self.replay_day();
+    }
+
+    /// The picked day's events come in again.
+    fn replay_day(&mut self) {
+        self.cal_ev.snap(0.0);
+        self.cal_ev.set(1.0);
     }
 
     fn layout(&self, ctx: &Ctx) -> Layout {
@@ -1079,21 +1111,28 @@ impl Widgets {
     /// The month (arrows to step through months, the title back to this one),
     /// a dot on days with events, and the picked day's events under it.
     fn calendar_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, x: f32, y: f32) {
+        // The month comes in one item after another as `cal_in` goes from 0
+        // to 1 (see `ui::stagger`), the picked day's events as `cal_ev` does.
+        let stag = |delay: f32| crate::ui::stagger(self.cal_in.value, delay);
+        let ev_stag = |delay: f32| crate::ui::stagger(self.cal_ev.value, delay);
+        let (ease, pop) = (crate::ui::ease_out, crate::ui::pop_out);
         let now = unsafe { GetLocalTime() };
         let (year, month) = month_from(&now, self.cal_month);
         let title = format!("{} {}", MONTHS[(month - 1) as usize], year);
         let tw = 200.0;
+        let head = ease(stag(0.0));
         if self.hovered == Some(Target::CalToday) && self.cal_month != 0 {
             p.rrect(x + 8.0, y + 6.0, tw - 40.0, 26.0, 6.0, Color::white(0.08));
         }
-        p.text(&title, &f.label, x + 14.0, y + 6.0, tw, 26.0, Align::Left, Color::white(0.9));
+        let slide = self.cal_dir * (1.0 - head) * 14.0;
+        p.text(&title, &f.label, x + 14.0 + slide, y + 6.0, tw, 26.0, Align::Left, Color::white(0.9 * head));
         self.hits.push((Target::CalToday, x + 8.0, y + 6.0, tw - 40.0, 26.0));
         if self.cal_month != 0 {
             let back = "Today";
             let (bx, bw) = (x + CARD_W - 14.0 - 56.0 - 64.0, 56.0);
             let a = if self.hovered == Some(Target::CalToday) { 0.16 } else { 0.09 };
-            p.rrect(bx, y + 8.0, bw, 22.0, 6.0, Color::white(a));
-            p.text(back, &f.small, bx, y + 8.0, bw, 22.0, Align::Center, Color::white(0.85));
+            p.rrect(bx, y + 8.0, bw, 22.0, 6.0, Color::white(a * head));
+            p.text(back, &f.small, bx, y + 8.0, bw, 22.0, Align::Center, Color::white(0.85 * head));
             self.hits.push((Target::CalToday, bx, y + 8.0, bw, 22.0));
         }
         // Month arrows.
@@ -1118,25 +1157,36 @@ impl Widgets {
         let busy: Vec<i64> = ctx.events.iter().flat_map(event_days).collect();
         let (cell, top) = ((CARD_W - 28.0) / 7.0, y + 36.0);
         for (i, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-            p.text(d, &f.small, x + 14.0 + i as f32 * cell, top, cell, 20.0, Align::Center, Color::white(0.45));
+            let a = ease(stag(0.05 + i as f32 * 0.03));
+            let c = Color::white(0.45 * a);
+            p.text(d, &f.small, x + 14.0 + i as f32 * cell, top - (1.0 - a) * 4.0, cell, 20.0, Align::Center, c);
         }
         for day in 1..=days_in_month(year as u16, month as u16) {
             let slot = first + day as i32 - 1;
             let (col, row) = ((slot % 7) as f32, (slot / 7) as f32);
-            let (cx, cy) = (x + 14.0 + col * cell + cell / 2.0, top + 30.0 + row * 31.0);
+            // Each day rises into place (from the side the month came from) a moment after the one before it.
+            let rise = ease(stag(0.12 + slot as f32 * 0.016));
+            let (cx, cy) = (
+                x + 14.0 + col * cell + cell / 2.0 + self.cal_dir * (1.0 - rise) * 10.0,
+                top + 30.0 + row * 31.0 + (1.0 - rise) * 6.0,
+            );
             let date = first_day + day as i64 - 1;
             let t = Target::CalDay(date);
             let is_today = date == today;
             if is_today {
-                p.circle(cx, cy, 13.0, theme::accent());
+                // Today's circle pops in after the days, with a little overshoot.
+                let grow = pop(stag(0.5 + slot as f32 * 0.008));
+                p.circle(cx, cy, 13.0 * grow, theme::accent().alpha(rise));
             } else if picked == Some(date) {
-                p.circle(cx, cy, 13.0, Color::white(0.14));
+                // A picked day's circle grows as its events come in.
+                let grow = pop(ev_stag(0.0).min(stag(0.5)));
+                p.circle(cx, cy, 13.0 * grow, Color::white(0.14));
             } else if self.hovered == Some(t) {
                 p.circle(cx, cy, 13.0, Color::white(0.08));
             }
             if is_today && picked.is_some_and(|d| d != today) {
                 // Today stays marked while another day is picked.
-                p.stroke_circle(cx, cy, 13.0, Color::white(0.5), 1.0);
+                p.stroke_circle(cx, cy, 13.0, Color::white(0.5 * rise), 1.0);
             }
             let weekend = col >= 5.0;
             let c = match (is_today, weekend) {
@@ -1144,30 +1194,42 @@ impl Widgets {
                 (false, true) => Color::white(0.55),
                 _ => Color::white(0.85),
             };
+            let c = Color(c.0, c.1, c.2, c.3 * rise);
             p.text(&day.to_string(), &f.body, cx - cell / 2.0, cy - 12.0, cell, 24.0, Align::Center, c);
             if busy.contains(&date) {
                 let dot = if is_today { Color::white(1.0) } else { theme::accent() };
-                p.circle(cx, cy + 9.0, 1.7, dot);
+                p.circle(cx, cy + 9.0, 1.7 * pop(stag(0.7 + slot as f32 * 0.01)), dot);
             }
-            self.hits.push((t, cx - cell / 2.0, cy - 14.0, cell, 28.0));
+            self.hits.push((t, cx - cell / 2.0 - self.cal_dir * (1.0 - rise) * 10.0, cy - 14.0, cell, 28.0));
         }
 
-        // The picked day's events (or today's).
+        // The picked day's events (or today's): the divider draws across, then each one slides in.
         let rows = self.cal_rows(ctx);
         if rows == 0 {
             return;
         }
         let sel = self.cal_selected();
         let ly = y + 256.0;
-        p.rrect(x + 14.0, ly - 4.0, CARD_W - 28.0, 1.0, 0.0, Color::white(0.08));
+        p.rrect(x + 14.0, ly - 4.0, (CARD_W - 28.0) * ease(ev_stag(0.0)), 1.0, 0.0, Color::white(0.08));
         let on = events_on(ctx.events, sel);
         if on.is_empty() {
+            let a = ease(ev_stag(0.15));
             let label = if sel == today { "Nothing on today".to_string() } else { "Nothing on".to_string() };
-            p.text(&label, &f.small, x + 14.0, ly + 2.0, CARD_W - 28.0, CAL_ROW, Align::Left, Color::white(0.5));
+            p.text(
+                &label,
+                &f.small,
+                x + 14.0 - (1.0 - a) * 12.0,
+                ly + 2.0,
+                CARD_W - 28.0,
+                CAL_ROW,
+                Align::Left,
+                Color::white(0.5 * a),
+            );
             return;
         }
         let now_t = crate::calendar::now();
         for (i, e) in on.iter().take(CAL_EVENTS).enumerate() {
+            let a = ease(ev_stag(0.15 + i as f32 * 0.12));
             let ry = ly + 2.0 + i as f32 * CAL_ROW;
             let live = e.start <= now_t && e.end > now_t;
             let when = if e.all_day {
@@ -1178,10 +1240,11 @@ impl Widgets {
                 crate::ui::time_at(e.start)
             };
             let c = if live { theme::accent() } else { Color::white(0.6) };
-            p.text(&when, &f.small, x + 14.0, ry, 76.0, CAL_ROW, Align::Left, c);
+            let off = (1.0 - a) * 12.0;
+            p.text(&when, &f.small, x + 14.0 - off, ry, 76.0, CAL_ROW, Align::Left, c.alpha(a));
             let what =
                 if e.location.is_empty() { e.title.clone() } else { format!("{} \u{b7} {}", e.title, e.location) };
-            p.text(&what, &f.small, x + 92.0, ry, CARD_W - 106.0, CAL_ROW, Align::Left, Color::white(0.92));
+            p.text(&what, &f.small, x + 92.0 - off, ry, CARD_W - 106.0, CAL_ROW, Align::Left, Color::white(0.92 * a));
         }
     }
 }
