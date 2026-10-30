@@ -50,6 +50,8 @@ const CLOCK_W: f32 = 78.0;
 const TRAY_W: f32 = 28.0;
 const TRAY_ICON_W: f32 = 28.0;
 const STATUS_ICON: f32 = 24.0;
+/// Room for the battery's charge level ("100%") beside its icon.
+const BATTERY_PCT_W: f32 = 32.0;
 /// Space between floating islands.
 const ISLAND_GAP: f32 = 8.0;
 const CHIP_STAT_W: f32 = 48.0;
@@ -380,6 +382,7 @@ pub struct Dock {
     opacity: f32,
     show_search: bool,
     show_status: bool,
+    battery_percent: bool,
     show_clock: bool,
     show_weather: bool,
     show_tray: bool,
@@ -699,6 +702,7 @@ impl Dock {
             opacity: 0.55,
             show_search: true,
             show_status: true,
+            battery_percent: false,
             show_clock: true,
             show_weather: true,
             show_tray: true,
@@ -943,6 +947,7 @@ impl Dock {
         self.opacity = cfg.taskbar_opacity;
         self.show_search = cfg.show_search;
         self.show_status = cfg.show_status;
+        self.battery_percent = cfg.battery_percent;
         self.show_clock = cfg.show_clock;
         self.show_weather = cfg.weather;
         self.show_tray = cfg.tray_icons;
@@ -1089,6 +1094,21 @@ impl Dock {
         }
     }
 
+    /// Show desktop (Win+D) and the like can hide or minimise windows from
+    /// outside. If the taskbar should be on screen and isn't, bring it back.
+    pub fn keep_shown(&mut self) {
+        if !(self.shown && self.window_visible) {
+            return;
+        }
+        unsafe {
+            if !IsWindowVisible(self.hwnd).as_bool() || IsIconic(self.hwnd).as_bool() {
+                crate::config::log("taskbar: it was hidden from outside (Show desktop?); showing it again");
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Brings the taskbar in (auto-hide, or when it becomes visible).
     pub fn show_now(&mut self) {
         if !self.shown {
@@ -1207,6 +1227,13 @@ impl Dock {
         2 + status.battery.is_some() as usize
     }
 
+    /// How wide the status icons are: three slots, and the battery's charge
+    /// level after them if that's switched on.
+    fn status_width(&self, status: &Status) -> f32 {
+        let level = if self.battery_percent && status.battery.is_some() { BATTERY_PCT_W } else { 0.0 };
+        STATUS_ICON * self.status_icons(status) as f32 + 12.0 + level
+    }
+
     /// Lays everything out for a window `ww` layout units wide. The same
     /// padding is used between every island edge and what's inside it.
     fn layout(
@@ -1271,7 +1298,7 @@ impl Dock {
         let mut rx = x1 - pad;
         let clock = if self.show_clock { Span { x: rx - CLOCK_W, w: CLOCK_W } } else { Span { x: rx, w: 0.0 } };
         rx = clock.x;
-        let status_w = if self.show_status { STATUS_ICON * self.status_icons(status) as f32 + 12.0 } else { 0.0 };
+        let status_w = if self.show_status { self.status_width(status) } else { 0.0 };
         let status_span = Span { x: rx - status_w, w: status_w };
         rx = status_span.x;
         let mut tray_icons = Vec::new();
@@ -2245,6 +2272,18 @@ impl Dock {
                     p.rrect(bx + 1.5, ty + 1.5, 12.0 * pct as f32 / 100.0, 6.0, 1.0, c);
                     if charging {
                         crate::ui::bolt(&p, bx + 7.5, ty + 4.5, 11.0, 1.0);
+                    }
+                    if self.battery_percent {
+                        p.text(
+                            &format!("{pct}%"),
+                            &f.small,
+                            bx + 21.0,
+                            cy - 8.0,
+                            BATTERY_PCT_W,
+                            16.0,
+                            Align::Left,
+                            white,
+                        );
                     }
                 }
             }

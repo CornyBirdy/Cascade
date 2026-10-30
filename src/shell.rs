@@ -385,6 +385,11 @@ unsafe fn class_is(h: HWND, name: &str) -> bool {
     String::from_utf16_lossy(&class[..n]) == name
 }
 
+/// The desktop itself (what Show desktop, Win+D, puts in front).
+pub fn is_desktop(hwnd: HWND) -> bool {
+    unsafe { hwnd == GetShellWindow() || class_is(hwnd, "Progman") || class_is(hwnd, "WorkerW") }
+}
+
 pub fn is_taskbar(hwnd: HWND) -> bool {
     taskbars().contains(&hwnd)
 }

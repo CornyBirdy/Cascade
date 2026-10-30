@@ -47,6 +47,18 @@ hide_in_fullscreen = true
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
 super_drag = true
+# Auto ducker: while one app is making sound (Discord, with friends talking),
+# turn the others down, and bring them back a moment after it stops.
+ducker = false
+# The app that does it: its name as in Task Manager's Details tab, no .exe.
+# Several can be listed, separated by commas.
+ducker_trigger = Discord
+# The apps that are turned down. Empty: every other app.
+ducker_targets =
+# What they're turned down to, as a share of their own volume (0 to 1).
+ducker_level = 0.25
+# How long after it stops they come back, in milliseconds.
+ducker_release = 1500
 # While music or a focus timer plays, show it on the closed notch: the notch
 # style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
@@ -117,6 +129,8 @@ show_status = true
 # What clicking network / volume / battery does: notch (the notch's Controls)
 # or windows (Windows' quick settings).
 status_click = notch
+# Show the charge level as a number next to the battery icon (laptops).
+battery_percent = false
 show_clock = true
 # App icons in the notification area (as set in Windows' taskbar settings).
 tray_icons = true
@@ -292,6 +306,11 @@ pub struct Config {
     pub hide_in_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
+    pub ducker: bool,
+    pub ducker_trigger: String,
+    pub ducker_targets: String,
+    pub ducker_level: f32,
+    pub ducker_release: u32,
     pub live_activity: bool,
     pub visualizer: bool,
     pub lip_visualizer: bool,
@@ -330,6 +349,7 @@ pub struct Config {
     pub show_search: bool,
     pub show_status: bool,
     pub status_click: String,
+    pub battery_percent: bool,
     pub show_clock: bool,
     pub tray_icons: bool,
     pub alt_tab: bool,
@@ -405,6 +425,11 @@ impl Default for Config {
             hide_in_fullscreen: true,
             battery_saver: false,
             super_drag: true,
+            ducker: false,
+            ducker_trigger: "Discord".into(),
+            ducker_targets: String::new(),
+            ducker_level: 0.25,
+            ducker_release: 1500,
             live_activity: true,
             visualizer: true,
             lip_visualizer: true,
@@ -443,6 +468,7 @@ impl Default for Config {
             show_search: true,
             show_status: true,
             status_click: "notch".into(),
+            battery_percent: false,
             show_clock: true,
             tray_icons: true,
             admin_helper: false,
@@ -547,6 +573,16 @@ fn list_without(list: &str, name: &str) -> Vec<String> {
 }
 
 impl Config {
+    /// The auto ducker's settings, or None while it's off or has nothing to listen for.
+    pub fn ducker_params(&self) -> Option<crate::ducker::Params> {
+        self.ducker.then(|| crate::ducker::Params {
+            trigger: crate::ducker::parse_list(&self.ducker_trigger),
+            targets: crate::ducker::parse_list(&self.ducker_targets),
+            level: self.ducker_level,
+            release: std::time::Duration::from_millis(self.ducker_release as u64),
+        })
+    }
+
     /// Battery saver (`battery_saver`): while the PC runs on its battery
     /// (`power`: its level, and whether the charger is in), the costly extras
     /// are off. Applied to the loaded settings only; the file is untouched.
@@ -654,6 +690,11 @@ impl Config {
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
+                "ducker" => set_b(&mut c.ducker),
+                "ducker_trigger" => c.ducker_trigger = v.trim_matches('"').to_string(),
+                "ducker_targets" => c.ducker_targets = v.trim_matches('"').to_string(),
+                "ducker_level" => set_f(&mut c.ducker_level, 0.0, 1.0),
+                "ducker_release" => set_u(&mut c.ducker_release, 200.0, 10000.0),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
                 "lip_visualizer" => set_b(&mut c.lip_visualizer),
@@ -716,6 +757,7 @@ impl Config {
                 "show_search" => set_b(&mut c.show_search),
                 "show_status" => set_b(&mut c.show_status),
                 "status_click" if matches!(v, "notch" | "windows") => c.status_click = v.into(),
+                "battery_percent" => set_b(&mut c.battery_percent),
                 "show_clock" => set_b(&mut c.show_clock),
                 "alt_tab" => set_b(&mut c.alt_tab),
                 "alt_tab_style" if matches!(v, "cards" | "large" | "icons" | "list") => c.alt_tab_style = v.into(),
@@ -806,6 +848,11 @@ impl Config {
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
+            "ducker" => b(self.ducker),
+            "ducker_trigger" => self.ducker_trigger.clone(),
+            "ducker_targets" => self.ducker_targets.clone(),
+            "ducker_level" => self.ducker_level.to_string(),
+            "ducker_release" => self.ducker_release.to_string(),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
             "lip_visualizer" => b(self.lip_visualizer),
@@ -860,6 +907,7 @@ impl Config {
             "show_search" => b(self.show_search),
             "show_status" => b(self.show_status),
             "status_click" => self.status_click.clone(),
+            "battery_percent" => b(self.battery_percent),
             "show_clock" => b(self.show_clock),
             "alt_tab" => b(self.alt_tab),
             "alt_tab_style" => self.alt_tab_style.clone(),

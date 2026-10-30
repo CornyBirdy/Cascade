@@ -283,6 +283,8 @@ enum Hot {
     BtSettings,
     /// Media: switch to the next app (or phone) with media.
     MediaSource,
+    /// The battery's level (Home and Media): click to swap it for the time left.
+    Battery,
 }
 
 thread_local! {
@@ -496,6 +498,8 @@ struct App {
     /// without a battery), so plugging in or out can be told apart from the
     /// level moving.
     power: Option<(u8, bool)>,
+    /// The battery shows the time left instead of its level (click it).
+    battery_eta: bool,
     /// Hover checks in a row that found the pointer off the taskbar and its
     /// previews (see `check_hover`).
     hover_misses: u8,
@@ -997,6 +1001,25 @@ fn battery() -> Option<(u8, bool)> {
     Some((s.BatteryLifePercent, s.ACLineStatus == 1))
 }
 
+/// What the battery reads in the notch: its level, or (after a click) how
+/// long it will last. Windows only knows that on battery, and not at once
+/// after unplugging.
+fn battery_label(pct: u8, charging: bool, eta: bool) -> String {
+    if !eta {
+        return format!("{pct}%");
+    }
+    if charging {
+        return if pct >= 100 { "Full".to_string() } else { "Charging".to_string() };
+    }
+    let mut s = SYSTEM_POWER_STATUS::default();
+    let left = unsafe { GetSystemPowerStatus(&mut s).ok() }.map(|_| s.BatteryLifeTime).filter(|&t| t != u32::MAX);
+    match left {
+        Some(t) if t >= 3600 => format!("{}h {:02}m", t / 3600, t % 3600 / 60),
+        Some(t) => format!("{}m", (t / 60).max(1)),
+        None => "\u{2026}".to_string(),
+    }
+}
+
 unsafe extern "system" fn collect_monitor(h: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
     (*(out.0 as *mut Vec<HMONITOR>)).push(h);
     true.into()
@@ -1208,6 +1231,7 @@ impl App {
             update_available: None,
             updating: false,
             power: battery(),
+            battery_eta: false,
             hover_misses: 0,
             cfg,
         })
@@ -1233,6 +1257,7 @@ impl App {
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::ducker::configure(self.cfg.ducker_params());
         desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
@@ -1260,6 +1285,8 @@ impl App {
 
     fn shutdown(&mut self) {
         keyhook::configure(false, false, 0);
+        // Puts any turned-down app's volume back.
+        crate::ducker::configure(None);
         self.settings = None;
         self.visualizer.set(false);
         weather::stop();
@@ -2536,6 +2563,10 @@ impl App {
             Hot::MediaSource => {
                 let _ = self.media_tx.send(MediaCmd::NextSource);
             }
+            Hot::Battery => {
+                self.battery_eta = !self.battery_eta;
+                self.dirty = true;
+            }
             Hot::WifiMore => {
                 self.wifi_open = true;
                 self.wifi.note = None;
@@ -2780,6 +2811,10 @@ impl App {
         if rescan {
             unsafe {
                 SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 120, None);
+                // Show desktop can hide things a moment after it takes the foreground: look again later.
+                if event == EVENT_SYSTEM_FOREGROUND && shell::is_desktop(hwnd) {
+                    SetTimer(Some(self.dock.hwnd), TIMER_SCAN2, 1500, None);
+                }
             }
         }
     }
@@ -2993,6 +3028,7 @@ impl App {
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::ducker::configure(self.cfg.ducker_params());
         self.perf = Perf::new(self.cfg.perf_log);
         self.apply_calendar();
         self.update_display();
@@ -3241,6 +3277,7 @@ impl App {
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
             Change::Action("open_config") => shell::open_file(&config::path()),
             Change::Action("open_folder") => shell::open_file(&config::dir()),
+            Change::Action("changelog") => shell::open("https://github.com/CornyBirdy/Cascade/releases"),
             Change::Action("defender_exclude") => {
                 std::thread::spawn(|| {
                     let ok = helper::exclude_from_defender();
@@ -3297,6 +3334,19 @@ impl App {
                 SetBkColor(hdc, COLORREF(0x002B2B2B));
                 return Some(LRESULT(s.brush.0 as isize));
             },
+            // The search box changed (EN_CHANGE): save any other text box first,
+            // then list what matches.
+            WM_COMMAND if wp.0 & 0xFFFF == crate::settings::SEARCH_ID && (wp.0 >> 16) & 0xFFFF == 0x0300 => {
+                let pending = s.commit_all();
+                for p in pending {
+                    self.apply_change(p);
+                }
+                let cfg = &self.cfg;
+                if let Some(s) = self.settings.as_mut() {
+                    s.search_changed(&|k: &str| setting_value(cfg, k));
+                }
+                return Some(LRESULT(0));
+            }
             WM_COMMAND if (wp.0 >> 16) & 0xFFFF == 0x0200 => s.commit_edit(HWND(lp.0 as *mut _)),
             WM_DPICHANGED => {
                 let suggested = unsafe { *(lp.0 as *const RECT) };
@@ -3607,8 +3657,18 @@ impl App {
 
     fn scan_docks(&mut self) {
         self.dock.scan();
+        self.dock.keep_shown();
         for d in &mut self.screens {
             d.scan();
+            d.keep_shown();
+        }
+        // Show desktop (Win+D) must not take the notch away either.
+        unsafe {
+            if self.shown && (!IsWindowVisible(self.hwnd).as_bool() || IsIconic(self.hwnd).as_bool()) {
+                config::log("notch: it was hidden from outside (Show desktop?); showing it again");
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                self.dirty = true;
+            }
         }
     }
 
@@ -4929,8 +4989,15 @@ impl App {
                 if self.media.as_ref().is_some_and(|m| m.sources > 1) {
                     out.push((Hot::MediaSource, tw - 18.0 - 34.0, 107.0, 34.0, 34.0));
                 }
+                if self.power.is_some() {
+                    out.push((Hot::Battery, 14.0, 107.0, 108.0, 34.0));
+                }
             }
-            Mode::Media => {}
+            Mode::Media => {
+                if self.power.is_some() {
+                    out.push((Hot::Battery, tw - 50.0 - 82.0, 76.0, 114.0, 22.0));
+                }
+            }
             Mode::Controls if self.bt_open => {
                 let l = self.bt_layout();
                 out.push((Hot::BtBack, 14.0, 14.0, 36.0, 34.0));
@@ -5316,6 +5383,17 @@ impl App {
         let cy = 124.0;
         let cx = ox + tw / 2.0;
         let white = Color::white(0.95 * alpha);
+        // The battery, at the left of the controls (Home has it too): its
+        // level, or the time left after a click.
+        if let Some((pct, charging)) = self.power {
+            let bx = ox + 18.0;
+            if self.hovered == Some(Hot::Battery) {
+                p.rrect(bx - 6.0, cy - 15.0, 104.0, 30.0, 10.0, Color::white(0.08 * alpha));
+            }
+            self.draw_battery(p, bx, cy - 6.5, pct, charging, alpha);
+            let label = battery_label(pct, charging, self.battery_eta);
+            p.text(&label, &fonts.body, bx + 34.0, cy - 10.5, 62.0, 21.0, Align::Left, Color::white(0.7 * alpha));
+        }
         // More than one thing with media (your phone and a browser, say): a
         // button to switch between them, at the right of the controls.
         if m.sources > 1 {
@@ -5380,29 +5458,30 @@ impl App {
         }
         if let Some((pct, charging)) = battery() {
             let (bx, by) = (ox + tw - 22.0 - 28.0, 80.0);
-            p.stroke_rrect(bx, by, 25.0, 13.0, 3.5, Color::white(0.5 * alpha), 1.2);
-            p.rrect(bx + 26.0, by + 4.0, 2.0, 5.0, 1.0, Color::white(0.5 * alpha));
-            let c = if charging {
-                GREEN.alpha(alpha)
-            } else if pct <= 20 {
-                Color(1.0, 0.4, 0.35, alpha)
-            } else {
-                Color::white(0.9 * alpha)
-            };
-            p.rrect(bx + 2.0, by + 2.0, 21.0 * pct as f32 / 100.0, 9.0, 2.0, c);
-            if charging {
-                bolt(p, bx + 12.5, by + 6.5, 15.0, alpha);
+            self.draw_battery(p, bx, by, pct, charging, alpha);
+            if self.hovered == Some(Hot::Battery) {
+                p.rrect(bx - 86.0, by - 6.0, 118.0, 26.0, 8.0, Color::white(0.07 * alpha));
             }
-            p.text(
-                &format!("{pct}%"),
-                &fonts.body,
-                bx - 60.0,
-                by - 4.0,
-                54.0,
-                21.0,
-                Align::Right,
-                Color::white(0.7 * alpha),
-            );
+            let label = battery_label(pct, charging, self.battery_eta);
+            p.text(&label, &fonts.body, bx - 82.0, by - 4.0, 76.0, 21.0, Align::Right, Color::white(0.7 * alpha));
+        }
+    }
+
+    /// The battery glyph: its outline, how full it is and, while it's
+    /// charging, a bolt. (`bx`, `by`) is its top left.
+    fn draw_battery(&self, p: &Painter, bx: f32, by: f32, pct: u8, charging: bool, alpha: f32) {
+        p.stroke_rrect(bx, by, 25.0, 13.0, 3.5, Color::white(0.5 * alpha), 1.2);
+        p.rrect(bx + 26.0, by + 4.0, 2.0, 5.0, 1.0, Color::white(0.5 * alpha));
+        let c = if charging {
+            GREEN.alpha(alpha)
+        } else if pct <= 20 {
+            Color(1.0, 0.4, 0.35, alpha)
+        } else {
+            Color::white(0.9 * alpha)
+        };
+        p.rrect(bx + 2.0, by + 2.0, 21.0 * pct as f32 / 100.0, 9.0, 2.0, c);
+        if charging {
+            bolt(p, bx + 12.5, by + 6.5, 15.0, alpha);
         }
     }
 
@@ -5940,17 +6019,17 @@ impl App {
 
 /// How far along (0 to 1) something is that starts at `delay` while `v`, the
 /// whole entrance, goes from 0 to 1.
-fn stagger(v: f32, delay: f32) -> f32 {
+pub(crate) fn stagger(v: f32, delay: f32) -> f32 {
     ((v * 1.8 - delay) / 0.8).clamp(0.0, 1.0)
 }
 
 /// Slows to a stop: 0 to 1.
-fn ease_out(t: f32) -> f32 {
+pub(crate) fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
 /// Grows from 0 to a little past 1 and settles on 1.
-fn pop_out(t: f32) -> f32 {
+pub(crate) fn pop_out(t: f32) -> f32 {
     let (c1, c3) = (1.70158f32, 2.70158f32);
     let u = t - 1.0;
     1.0 + c3 * u.powi(3) + c1 * u * u
