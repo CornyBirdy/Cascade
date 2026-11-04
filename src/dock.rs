@@ -588,6 +588,24 @@ pub fn focus_window(h: HWND) {
     unsafe {
         if IsIconic(h).as_bool() {
             let _ = ShowWindow(h, SW_RESTORE);
+            // Some windows are slow to take it or ignore it (the click then
+            // seems to do nothing): ask the way the title bar's own button does,
+            // and as a last resort the way Alt+Tab does.
+            if IsIconic(h).as_bool() {
+                let _ = OpenIcon(h);
+            }
+            if IsIconic(h).as_bool() {
+                let mut res = 0usize;
+                let _ = SendMessageTimeoutW(
+                    h,
+                    WM_SYSCOMMAND,
+                    WPARAM(SC_RESTORE as usize),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    300,
+                    Some(&mut res),
+                );
+            }
         }
         let _ = SetForegroundWindow(h);
         // Windows' foreground lock can turn that down (a click that took a

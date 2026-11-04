@@ -4,6 +4,18 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-04
+
+**New**
+- **Phone hotspot** button in the Wi-Fi list: opens Windows' network list, where your phone's Instant Hotspot has its Connect button.
+- **Seconds on the notch's clock** (Settings > Notch).
+
+**Fixed**
+- **A new desktop made from Task View's +** no longer takes you into it: you stay on the desktop you were on.
+- **Switching desktops** from the desktops widget or Task View goes one step at a time, so a jump of several desktops lands where you clicked instead of stopping short.
+- **Super drag**: a short Win+drag no longer counts as a lone tap of Win, so letting go of it can't open the Start menu.
+- **Restoring a minimised app** from the taskbar tries again with Windows' other restore routes when the first one is ignored, instead of needing another click.
+
 ## 2026-10-30
 
 **New**

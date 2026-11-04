@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, ENUM_DATE_FORMATS_FLAGS, TIME_NOSECONDS};
+use windows::Win32::Globalization::{
+    GetDateFormatEx, GetTimeFormatEx, ENUM_DATE_FORMATS_FLAGS, TIME_FORMAT_FLAGS, TIME_NOSECONDS,
+};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -274,6 +276,10 @@ enum Hot {
     WifiBack,
     WifiNet(usize),
     WifiSettings,
+    /// Opens Windows' own network list, where Phone Link's Instant Hotspot (your
+    /// phone's hotspot, with its Connect button) shows; Windows has no way for
+    /// another program to start that connection.
+    WifiHotspot,
     WifiQuick,
     /// The Bluetooth list (Controls): the chevron on the Bluetooth tile, its
     /// back button, a device, and Windows' Bluetooth settings.
@@ -984,10 +990,12 @@ fn when(e: &ics::Event, now: i64) -> String {
     }
 }
 
-fn clock() -> (String, String) {
+fn clock(seconds: bool) -> (String, String) {
     let mut t = [0u16; 64];
     unsafe {
-        let n = GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, None, PCWSTR::null(), Some(&mut t));
+        // No flag = Windows' own long time, which has the seconds in it.
+        let flags = if seconds { TIME_FORMAT_FLAGS(0) } else { TIME_NOSECONDS };
+        let n = GetTimeFormatEx(PCWSTR::null(), flags, None, PCWSTR::null(), Some(&mut t));
         (String::from_utf16_lossy(&t[..(n.max(1) - 1) as usize]), date_text(w!("dddd d MMMM")))
     }
 }
@@ -2604,6 +2612,10 @@ impl App {
                 shell::open("ms-settings:network-wifi");
                 self.expanded = false;
             }
+            Hot::WifiHotspot => {
+                shell::open("ms-availablenetworks:");
+                self.expanded = false;
+            }
             Hot::WifiQuick => {
                 // Windows' own quick settings, for anything Controls doesn't do
                 // (Cascade lets an injected Win+A through even when it takes the key).
@@ -3928,7 +3940,11 @@ impl App {
             ViewAction::MoveWindow(..) => {}
             ViewAction::Focus(h) => dock::focus_window(h),
             ViewAction::Desktop(i) => desktops::switch(self.desks.current, i),
-            ViewAction::NewDesktop => desktops::create(),
+            // Windows jumps into a new desktop; stay on this one.
+            ViewAction::NewDesktop => {
+                let (n, cur) = (self.desks.names.len(), self.desks.current);
+                desktops::create(n.saturating_sub(cur));
+            }
             ViewAction::Close => {}
         }
     }
@@ -5016,9 +5032,10 @@ impl App {
                 for i in 0..l.rows {
                     out.push((Hot::WifiNet(i), 14.0, l.top + i as f32 * WIFI_ROW, tw - 28.0, WIFI_ROW));
                 }
-                let bw = (tw - 36.0 - 8.0) / 2.0;
+                let bw = (tw - 36.0 - 16.0) / 3.0;
                 out.push((Hot::WifiSettings, 18.0, l.foot, bw, WIFI_BTN_H));
-                out.push((Hot::WifiQuick, 18.0 + bw + 8.0, l.foot, bw, WIFI_BTN_H));
+                out.push((Hot::WifiHotspot, 18.0 + bw + 8.0, l.foot, bw, WIFI_BTN_H));
+                out.push((Hot::WifiQuick, 18.0 + 2.0 * (bw + 8.0), l.foot, bw, WIFI_BTN_H));
             }
             Mode::Controls => {
                 let tile_w = (tw - 36.0 - 16.0) / 3.0;
@@ -5425,7 +5442,7 @@ impl App {
         let ox = self.origin;
         let tw = self.content_w;
         let fonts = &self.gfx.fonts;
-        let (time, date) = clock();
+        let (time, date) = clock(self.cfg.clock_seconds);
         p.text(&time, &fonts.big, ox + 22.0, 10.0, 190.0, 44.0, Align::Left, Color::white(0.95 * alpha));
         if matches!(self.peek, Some(PeekKind::Volume | PeekKind::Brightness)) {
             self.draw_level_row(p, ox + 22.0, 68.0, tw - 44.0, self.peek, alpha);
@@ -5581,11 +5598,14 @@ impl App {
             p.text(&note, &fonts.small, ox + 20.0, l.note, tw - 40.0, 22.0, Align::Left, dim);
         }
         // Ways on to Windows' own.
-        let bw = (tw - 36.0 - 8.0) / 2.0;
-        for (i, (hot, label)) in
-            [(Hot::WifiSettings, "More Wi-Fi settings"), (Hot::WifiQuick, "Windows quick settings")]
-                .into_iter()
-                .enumerate()
+        let bw = (tw - 36.0 - 16.0) / 3.0;
+        for (i, (hot, label)) in [
+            (Hot::WifiSettings, "Wi-Fi settings"),
+            (Hot::WifiHotspot, "Phone hotspot"),
+            (Hot::WifiQuick, "Quick settings"),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let x = ox + 18.0 + i as f32 * (bw + 8.0);
             let fill = if self.hovered == Some(hot) { 0.13 } else { 0.08 };
