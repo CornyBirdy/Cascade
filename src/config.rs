@@ -132,6 +132,8 @@ status_click = notch
 # Show the charge level as a number next to the battery icon (laptops).
 battery_percent = false
 show_clock = true
+# Seconds on the notch's clock (the format is Windows' own long time).
+clock_seconds = false
 # App icons in the notification area (as set in Windows' taskbar settings).
 tray_icons = true
 dock_icon_size = 24
@@ -351,6 +353,7 @@ pub struct Config {
     pub status_click: String,
     pub battery_percent: bool,
     pub show_clock: bool,
+    pub clock_seconds: bool,
     pub tray_icons: bool,
     pub alt_tab: bool,
     pub alt_tab_style: String,
@@ -470,6 +473,7 @@ impl Default for Config {
             status_click: "notch".into(),
             battery_percent: false,
             show_clock: true,
+            clock_seconds: false,
             tray_icons: true,
             admin_helper: false,
             start_position: "auto".into(),
@@ -759,6 +763,7 @@ impl Config {
                 "status_click" if matches!(v, "notch" | "windows") => c.status_click = v.into(),
                 "battery_percent" => set_b(&mut c.battery_percent),
                 "show_clock" => set_b(&mut c.show_clock),
+                "clock_seconds" => set_b(&mut c.clock_seconds),
                 "alt_tab" => set_b(&mut c.alt_tab),
                 "alt_tab_style" if matches!(v, "cards" | "large" | "icons" | "list") => c.alt_tab_style = v.into(),
                 "mouse_match" => set_b(&mut c.mouse_match),
@@ -909,6 +914,7 @@ impl Config {
             "status_click" => self.status_click.clone(),
             "battery_percent" => b(self.battery_percent),
             "show_clock" => b(self.show_clock),
+            "clock_seconds" => b(self.clock_seconds),
             "alt_tab" => b(self.alt_tab),
             "alt_tab_style" => self.alt_tab_style.clone(),
             "mouse_match" => b(self.mouse_match),

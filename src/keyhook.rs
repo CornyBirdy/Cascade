@@ -243,6 +243,9 @@ unsafe fn masked_release(vk: u16) -> bool {
 /// Taps the mask key now: to Windows the Win key held down is part of a
 /// combination, so letting go of it won't open its Start menu.
 pub fn mask_win() {
+    // The press is part of a combination (a super drag, say) for Cascade's own
+    // Win handling too: a short drag mustn't look like a lone tap and open Start.
+    COMBO.store(true, Ordering::Relaxed);
     unsafe { mask_tap() };
 }
 

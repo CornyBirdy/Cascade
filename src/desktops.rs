@@ -301,18 +301,46 @@ fn ctrl_win(vk: VIRTUAL_KEY, extended: bool, times: usize) {
     unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 }
 
-/// Goes from desktop `from` to desktop `to`.
+/// How long to leave Explorer between desktop steps: it drops a Ctrl+Win+arrow
+/// that comes while the last switch is still sliding in, which is why a jump
+/// of several desktops used to land short (or not move at all).
+const STEP_GAP: std::time::Duration = std::time::Duration::from_millis(140);
+
+/// Goes from desktop `from` to desktop `to`, one step at a time, on a thread
+/// of its own so the pauses never hold up the UI.
 pub fn switch(from: usize, to: usize) {
-    if to > from {
-        ctrl_win(VK_RIGHT, true, to - from);
-    } else if from > to {
-        ctrl_win(VK_LEFT, true, from - to);
+    if from == to {
+        return;
     }
+    let (vk, steps) = if to > from { (VK_RIGHT, to - from) } else { (VK_LEFT, from - to) };
+    std::thread::spawn(move || {
+        for i in 0..steps {
+            if i > 0 {
+                std::thread::sleep(STEP_GAP);
+            }
+            ctrl_win(vk, true, 1);
+        }
+    });
 }
 
-/// Makes a new desktop and goes to it, as Ctrl+Win+D does.
-pub fn create() {
-    ctrl_win(VK_D, false, 1);
+/// Makes a new desktop, as Ctrl+Win+D does, and stays where you were: Windows
+/// goes to the new desktop by itself, so this goes back `back` desktops
+/// afterwards (the new one is added at the end). `back` is how many desktops
+/// the new one is from the one you're on; 0 stays on the new desktop.
+pub fn create(back: usize) {
+    std::thread::spawn(move || {
+        ctrl_win(VK_D, false, 1);
+        if back > 0 {
+            // Let the new desktop finish appearing before going back.
+            std::thread::sleep(std::time::Duration::from_millis(420));
+            for i in 0..back {
+                if i > 0 {
+                    std::thread::sleep(STEP_GAP);
+                }
+                ctrl_win(VK_LEFT, true, 1);
+            }
+        }
+    });
 }
 
 // The shell's own desktop interfaces. They're undocumented, so only the parts
