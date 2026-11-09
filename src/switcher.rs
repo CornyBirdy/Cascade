@@ -91,6 +91,9 @@ const DESK_PIC_MAX: usize = 12;
 /// The icon in a window's place in a picture of a desktop.
 const MINI_ICON: f32 = 16.0;
 const DESK_GAP: f32 = 8.0;
+/// The × that closes a desktop, in the corner of its box (size, and gap from the corner).
+const CLOSE_SIZE: f32 = 20.0;
+const CLOSE_INSET: f32 = 5.0;
 /// The "new desktop" button at the end of the strip.
 const PLUS_W: f32 = 44.0;
 
@@ -101,6 +104,8 @@ pub enum ViewAction {
     /// A card dropped on a desktop in the strip: send that window there.
     MoveWindow(HWND, usize),
     NewDesktop,
+    /// The × on a desktop in the strip: close that desktop.
+    CloseDesktop(usize),
     Close,
 }
 
@@ -111,6 +116,8 @@ type StripBox = (f32, f32, f32);
 enum Spot {
     Card(usize),
     Desk(usize),
+    /// The × in a desktop's corner, to close it.
+    DeskClose(usize),
     Plus,
 }
 
@@ -525,6 +532,11 @@ impl Switcher {
         (desks, (x, y, PLUS_W))
     }
 
+    /// Where the × that closes a desktop is in its box (x, y, width, height).
+    fn close_box((bx, by, bw): StripBox) -> (f32, f32, f32, f32) {
+        (bx + bw - CLOSE_SIZE - CLOSE_INSET, by + CLOSE_INSET, CLOSE_SIZE, CLOSE_SIZE)
+    }
+
     /// Where a desktop's picture is inside its box (x, y, width, height), the
     /// shape of the screen, centred above the name.
     fn desk_picture(&self, bx: f32, by: f32, bw: f32) -> (f32, f32, f32, f32) {
@@ -546,6 +558,13 @@ impl Switcher {
         let inside = |(bx, by, bw): (f32, f32, f32)| lx >= bx && lx < bx + bw && ly >= by && ly < by + DESK_H;
         let (desks, plus) = self.strip();
         if let Some(i) = desks.iter().position(|&b| inside(b)) {
+            // The last desktop can't be closed.
+            if self.desks.names.len() > 1 {
+                let (cx, cy, cw, ch) = Self::close_box(desks[i]);
+                if lx >= cx && lx < cx + cw && ly >= cy && ly < cy + ch {
+                    return Some(Spot::DeskClose(i));
+                }
+            }
             return Some(Spot::Desk(i));
         }
         inside(plus).then_some(Spot::Plus)
@@ -813,6 +832,7 @@ impl Switcher {
         Some(match self.spot(x, y)? {
             Spot::Card(i) => ViewAction::Focus(self.items.get(i)?.window),
             Spot::Desk(i) => ViewAction::Desktop(i),
+            Spot::DeskClose(i) => ViewAction::CloseDesktop(i),
             Spot::Plus => ViewAction::NewDesktop,
         })
     }
@@ -1007,7 +1027,8 @@ impl Switcher {
                 let (desks, plus) = self.strip();
                 for (i, &(bx, by, bw)) in desks.iter().enumerate() {
                     let current = i == self.desks.current;
-                    let hot = self.desk_hover == Some(Spot::Desk(i));
+                    let on_close = self.desk_hover == Some(Spot::DeskClose(i));
+                    let hot = on_close || self.desk_hover == Some(Spot::Desk(i));
                     // A card being carried: the desktop it would land on lights up.
                     let target = hot && !current && carrying;
                     let fill = if target {
@@ -1040,6 +1061,14 @@ impl Switcher {
                         {
                             p.icon(bmp, wx + ww / 2.0, wy + wh / 2.0, 1.0);
                         }
+                    }
+                    // The × to close it, while the pointer is over the desktop.
+                    if hot && !carrying && self.desks.names.len() > 1 {
+                        let (cx, cy, cw, ch) = Self::close_box((bx, by, bw));
+                        p.rrect(cx, cy, cw, ch, cw / 2.0, Color::white(if on_close { 0.30 } else { 0.14 }));
+                        let (mx, my, d, c) = (cx + cw / 2.0, cy + ch / 2.0, 4.0, Color::white(0.95));
+                        p.line(mx - d, my - d, mx + d, my + d, c, 1.5);
+                        p.line(mx - d, my + d, mx + d, my - d, c, 1.5);
                     }
                     let name = &self.desks.names[i];
                     let label = by + DESK_H - DESK_LABEL;
