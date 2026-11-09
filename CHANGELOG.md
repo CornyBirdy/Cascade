@@ -4,6 +4,15 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-09
+
+**New**
+- **Closing a desktop from Task View**: point at a desktop in the strip and click the × in its corner. Its windows move to the desktop next to it, as Windows does, and you stay on the desktop you were on. The only desktop left has no ×.
+
+**Fixed**
+- **Super drag opening Start when Win is let go**: a drag takes a while, long enough for the key tap that keeps Start shut to be forgotten, so the release of Win now goes out with a fresh tap in front of it, the way a long lone Win hold already did. It also works with the Win-key launcher and every Win+key shortcut turned off. When a Win+click isn't taken as a drag, `cascade.log` now says why (the window's kind, admin rights, maximised...).
+- **A new desktop made from Task View's +**: Task View stays open, and Cascade waits for the desktop to exist and then jumps straight back to the one you were on, instead of stepping back one desktop at a time. Windows still flashes the new desktop for a moment (it has no way to make one without going there).
+
 ## 2026-11-04
 
 **New**

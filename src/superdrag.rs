@@ -45,30 +45,42 @@ fn class_of(h: HWND) -> String {
 }
 
 /// The window to drag from a click at `pt`: the top-level window under it, if
-/// it's one that can be moved this way.
-fn pick(pt: POINT) -> Option<HWND> {
+/// it's one that can be moved this way. Otherwise why not, for the log.
+fn pick(pt: POINT) -> Result<HWND, String> {
     unsafe {
         let under = WindowFromPoint(pt);
         if under.is_invalid() {
-            return None;
+            return Err("no window under the pointer".into());
         }
         let root = GetAncestor(under, GA_ROOT);
-        if root.is_invalid() || !IsWindowVisible(root).as_bool() || IsIconic(root).as_bool() || IsZoomed(root).as_bool()
-        {
-            return None;
+        if root.is_invalid() {
+            return Err(format!("no top-level window ({})", class_of(under)));
+        }
+        let class = class_of(root);
+        if !IsWindowVisible(root).as_bool() {
+            return Err(format!("{class} is not visible"));
+        }
+        if IsIconic(root).as_bool() {
+            return Err(format!("{class} is minimised"));
+        }
+        if IsZoomed(root).as_bool() {
+            return Err(format!("{class} is maximised"));
         }
         if matches!(
-            class_of(root).as_str(),
+            class.as_str(),
             "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow"
         ) {
-            return None;
+            return Err(format!("{class} is the desktop or the taskbar"));
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(root, Some(&mut pid));
-        if pid == GetCurrentProcessId() || crate::helper::window_above_us(root) {
-            return None;
+        if pid == GetCurrentProcessId() {
+            return Err(format!("{class} is one of Cascade's own windows"));
         }
-        Some(root)
+        if crate::helper::window_above_us(root) {
+            return Err(format!("{class} has admin rights (Cascade doesn't)"));
+        }
+        Ok(root)
     }
 }
 
@@ -78,7 +90,12 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let injected = info.flags & LLMHF_INJECTED != 0;
         match wp.0 as u32 {
             WM_LBUTTONDOWN if !injected && (down(VK_LWIN) || down(VK_RWIN)) => {
-                if let Some(h) = pick(info.pt) {
+                let picked = pick(info.pt);
+                // Why a Win+click wasn't a drag, for `cascade.log`.
+                if let Err(why) = &picked {
+                    crate::config::log(&format!("super drag: left alone: {why}"));
+                }
+                if let Ok(h) = picked {
                     let mut r = RECT::default();
                     if GetWindowRect(h, &mut r).is_ok() {
                         for (slot, v) in FROM.iter().zip([info.pt.x, info.pt.y, r.left, r.top]) {
@@ -136,6 +153,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// Turns super drag on or off, starting or stopping the hook's thread.
 pub fn configure(on: bool) {
+    crate::keyhook::watch_super(on);
     let mut thread = THREAD.lock().unwrap_or_else(|e| e.into_inner());
     if on && thread.is_none() {
         *thread = start();

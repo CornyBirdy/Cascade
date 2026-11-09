@@ -163,6 +163,11 @@ static WIN_EVENT_AT: AtomicU32 = AtomicU32::new(0);
 /// that comes sooner doesn't count as proof the key is stuck.
 const SETTLE: u32 = 60;
 static COMBO: AtomicBool = AtomicBool::new(false);
+/// Super drag is on: the hook runs for it even with every shortcut off.
+static SUPER_ON: AtomicBool = AtomicBool::new(false);
+/// This Win press was used for a super drag, so its release is replaced by
+/// mask + release (see `mask_win`).
+static SUPER_WIN: AtomicBool = AtomicBool::new(false);
 /// The mask key tap for the current Win press has gone by.
 static MASK_SEEN: AtomicBool = AtomicBool::new(false);
 /// Tick count of the latest swallowed Win+key shortcut press (repeats included).
@@ -246,6 +251,10 @@ pub fn mask_win() {
     // The press is part of a combination (a super drag, say) for Cascade's own
     // Win handling too: a short drag mustn't look like a lone tap and open Start.
     COMBO.store(true, Ordering::Relaxed);
+    // A drag takes a while, and by the time Win is let go this tap may be
+    // forgotten (the same reason a long lone hold gets a fresh one): the
+    // release is replaced by a mask + release batch, as a long hold's is.
+    SUPER_WIN.store(true, Ordering::Relaxed);
     unsafe { mask_tap() };
 }
 
@@ -308,6 +317,11 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let is_win = vk == VK_LWIN.0 || vk == VK_RWIN.0;
         let is_alt = vk == VK_LMENU.0 || vk == VK_RMENU.0;
         if is_win {
+            // A fresh press (not a repeat of one held, nor one sent by us)
+            // forgets a super drag whose release was never seen.
+            if down && !injected && !WIN_LAST_DOWN.load(Ordering::Relaxed) {
+                SUPER_WIN.store(false, Ordering::Relaxed);
+            }
             track(&WIN_LAST_DOWN, down, up);
             WIN_EVENT_AT.store(k.time, Ordering::Relaxed);
             // Whatever happened while it was held (a mask tap, a swallowed
@@ -419,6 +433,18 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
 
+            // Letting go of Win after a super drag: Windows' Start menu opens
+            // on a release it thinks came with no other key, so the release
+            // goes out with a mask tap in front of it, in one batch. Cascade's
+            // own launcher doesn't open (the drag made it a combination).
+            if is_win && up && SUPER_WIN.swap(false, Ordering::Relaxed) {
+                WIN_DOWN.store(false, Ordering::Relaxed);
+                if masked_release(vk) {
+                    request_check();
+                    return LRESULT(1);
+                }
+            }
+
             // Win key.
             if WIN_ON.load(Ordering::Relaxed) {
                 if is_win && down {
@@ -506,7 +532,25 @@ pub fn configure(win: bool, tab: bool, shortcuts: u32) {
     WIN_ON.store(win, Ordering::Relaxed);
     TAB_ON.store(tab, Ordering::Relaxed);
     SHORTCUTS.store(shortcuts, Ordering::Relaxed);
-    let wanted = win || tab || shortcuts != 0;
+    sync_thread();
+}
+
+/// Super drag (see `superdrag`) is turned on or off: it needs this hook to
+/// see the Win key let go, even with every other use of it off.
+pub fn watch_super(on: bool) {
+    SUPER_ON.store(on, Ordering::Relaxed);
+    if !on {
+        SUPER_WIN.store(false, Ordering::Relaxed);
+    }
+    sync_thread();
+}
+
+/// Starts or stops the hook's thread to match what's wanted of it.
+fn sync_thread() {
+    let wanted = WIN_ON.load(Ordering::Relaxed)
+        || TAB_ON.load(Ordering::Relaxed)
+        || SHORTCUTS.load(Ordering::Relaxed) != 0
+        || SUPER_ON.load(Ordering::Relaxed);
     let mut thread = THREAD.lock().unwrap_or_else(|e| e.into_inner());
     if wanted && thread.is_none() {
         *thread = start();

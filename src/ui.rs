@@ -3935,16 +3935,18 @@ impl App {
 
     fn run_view(&mut self, action: crate::switcher::ViewAction) {
         use crate::switcher::ViewAction;
-        self.switcher.hide();
+        // Making or closing a desktop leaves Task View up, to show it.
+        if !matches!(action, ViewAction::NewDesktop | ViewAction::CloseDesktop(_)) {
+            self.switcher.hide();
+        }
         match action {
             ViewAction::MoveWindow(..) => {}
             ViewAction::Focus(h) => dock::focus_window(h),
             ViewAction::Desktop(i) => desktops::switch(self.desks.current, i),
             // Windows jumps into a new desktop; stay on this one.
-            ViewAction::NewDesktop => {
-                let (n, cur) = (self.desks.names.len(), self.desks.current);
-                desktops::create(n.saturating_sub(cur));
-            }
+            ViewAction::NewDesktop => desktops::create(self.desks.current),
+            // Task View stays up while it closes, showing the strip shrink.
+            ViewAction::CloseDesktop(i) => desktops::close(self.desks.current, i),
             ViewAction::Close => {}
         }
     }

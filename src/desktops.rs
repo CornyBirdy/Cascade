@@ -323,22 +323,99 @@ pub fn switch(from: usize, to: usize) {
     });
 }
 
-/// Makes a new desktop, as Ctrl+Win+D does, and stays where you were: Windows
-/// goes to the new desktop by itself, so this goes back `back` desktops
-/// afterwards (the new one is added at the end). `back` is how many desktops
-/// the new one is from the one you're on; 0 stays on the new desktop.
-pub fn create(back: usize) {
-    std::thread::spawn(move || {
-        ctrl_win(VK_D, false, 1);
-        if back > 0 {
-            // Let the new desktop finish appearing before going back.
-            std::thread::sleep(std::time::Duration::from_millis(420));
-            for i in 0..back {
-                if i > 0 {
-                    std::thread::sleep(STEP_GAP);
-                }
-                ctrl_win(VK_LEFT, true, 1);
+/// Goes to desktop number `to` in one jump (no stops on the way), with the
+/// shell's own manager. Talks to Explorer, so it initialises COM for itself.
+/// False if this Windows won't (the keys are the way then).
+fn jump_to(to: usize) -> bool {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    unsafe {
+        let inited = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let went = match shell_api::try_switch(to) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::config::log(&format!("jumping to desktop {} failed ({e}); using the keys", to + 1));
+                false
             }
+        };
+        if inited {
+            CoUninitialize();
+        }
+        went
+    }
+}
+
+/// Closes desktop number `which` (0 is the first), leaving you on the desktop
+/// you were on (`current`), or, if that's the one closed, on the one Windows
+/// moves you to. Its windows go to the desktop next to it, as Windows does.
+/// Windows only closes the desktop you're on (Ctrl+Win+F4), so this goes there
+/// first and comes back after.
+pub fn close(current: usize, which: usize) {
+    std::thread::spawn(move || {
+        let before = read().names.len();
+        if before < 2 || which >= before {
+            return;
+        }
+        if which != current && !jump_to(which) {
+            step_to(current, which);
+        }
+        // Let the switch settle before closing.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        ctrl_win(VK_F4, false, 1);
+        let start = std::time::Instant::now();
+        while read().names.len() >= before && start.elapsed() < std::time::Duration::from_millis(1500) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if which == current {
+            return;
+        }
+        // Windows lands on the desktop before the closed one (the next, if it was
+        // the first); the one you were on may have moved up a place.
+        let landed = which.saturating_sub(1);
+        let back = if current > which { current - 1 } else { current };
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if !jump_to(back) {
+            step_to(landed, back);
+        }
+    });
+}
+
+/// Goes from desktop `from` to `to` with the keys, a step at a time (blocking).
+fn step_to(from: usize, to: usize) {
+    let (vk, steps) = if to > from { (VK_RIGHT, to - from) } else { (VK_LEFT, from - to) };
+    for i in 0..steps {
+        if i > 0 {
+            std::thread::sleep(STEP_GAP);
+        }
+        ctrl_win(vk, true, 1);
+    }
+}
+
+/// Makes a new desktop, as Ctrl+Win+D does, and stays where you were:
+/// Windows goes to the new desktop by itself (and Windows has no way to make
+/// one without going there), so once it has appeared this jumps straight back
+/// to desktop number `stay` (0 is the first) rather than stepping back through
+/// the ones in between.
+pub fn create(stay: usize) {
+    std::thread::spawn(move || {
+        let before = read().names.len();
+        ctrl_win(VK_D, false, 1);
+        // Wait for Explorer to have made it (it shows in the registry), not a
+        // guessed time: going back sooner would be dropped.
+        let start = std::time::Instant::now();
+        while read().names.len() <= before && start.elapsed() < std::time::Duration::from_millis(1500) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Let the switch to it start before switching away again.
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if stay + 1 >= read().names.len() || jump_to(stay) {
+            return;
+        }
+        // The keys, a step at a time, from the new desktop at the end.
+        for i in 0..(read().names.len() - 1 - stay) {
+            if i > 0 {
+                std::thread::sleep(STEP_GAP);
+            }
+            ctrl_win(VK_LEFT, true, 1);
         }
     });
 }
@@ -379,6 +456,25 @@ mod shell_api {
         unsafe fn CanViewMoveDesktops(&self, view: *mut c_void, can: *mut i32) -> HRESULT;
         unsafe fn GetCurrentDesktop(&self, desktop: *mut *mut c_void) -> HRESULT;
         unsafe fn GetDesktops(&self, desktops: *mut *mut c_void) -> HRESULT;
+        unsafe fn GetAdjacentDesktop(&self, from: *mut c_void, direction: i32, desktop: *mut *mut c_void) -> HRESULT;
+        unsafe fn SwitchDesktop(&self, desktop: *mut c_void) -> HRESULT;
+    }
+
+    /// Goes straight to desktop number `to`, with no stops on the way.
+    pub unsafe fn try_switch(to: usize) -> Result<()> {
+        let shell: IServiceProvider = CoCreateInstance(&CLSID_IMMERSIVE_SHELL, None, CLSCTX_ALL)?;
+        let manager: IVirtualDesktopManagerInternal = shell.QueryService(&SERVICE_VIRTUAL_DESKTOP_MANAGER)?;
+        let mut raw = std::ptr::null_mut();
+        manager.GetDesktops(&mut raw).ok()?;
+        if raw.is_null() {
+            return Err(E_INVALIDARG.into());
+        }
+        let desktops = IObjectArray::from_raw(raw);
+        if to as u32 >= desktops.GetCount()? {
+            return Err(E_INVALIDARG.into());
+        }
+        let desktop: IVirtualDesktop = desktops.GetAt(to as u32)?;
+        manager.SwitchDesktop(desktop.as_raw()).ok()
     }
 
     pub unsafe fn try_move(window: HWND, to: usize) -> Result<()> {
