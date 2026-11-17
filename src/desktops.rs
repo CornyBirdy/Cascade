@@ -109,10 +109,9 @@ fn session_key() -> HSTRING {
 
 /// The desktops as they are now (one, if Windows has never had more).
 pub fn read() -> Desktops {
-    // Virtual desktops are Explorer's: as the shell (see `shellmode`) there
-    // is one desktop, and the registry only remembers the last Explorer session's.
+    // Virtual desktops are Explorer's: as the shell (see `shellmode`), Cascade keeps its own.
     if crate::shellmode::active() {
-        return Desktops::default();
+        return crate::vdesk::read();
     }
     let key = HSTRING::from(KEY);
     let Some(ids) = binary(&key, w!("VirtualDesktopIDs")).filter(|b| b.len() >= 16) else {
@@ -159,6 +158,9 @@ pub struct DeskWindow {
 /// first, placed on `monitor`. Asks Explorer which desktop each window is on,
 /// so call it off the UI thread, on one that has initialised COM.
 pub fn windows(monitor: RECT) -> Vec<Vec<DeskWindow>> {
+    if crate::shellmode::active() {
+        return crate::vdesk::windows(monitor);
+    }
     unsafe extern "system" fn collect(h: HWND, out: LPARAM) -> BOOL {
         let (windows, own) = &mut *(out.0 as *mut (Vec<HWND>, u32));
         if crate::dock::is_app_window_any_desktop(h, *own) {
@@ -235,6 +237,10 @@ pub fn spawn_windows(monitor: RECT) {
 /// Starts the thread that posts `msg::DESKTOPS` whenever the desktops (or
 /// the current one) change.
 pub fn watch() {
+    // As the shell, Cascade's own desktops say when they change.
+    if crate::shellmode::active() {
+        return;
+    }
     std::thread::spawn(|| unsafe {
         let mut keys: Vec<HKEY> = Vec::new();
         for path in [HSTRING::from(KEY), session_key()] {
@@ -314,6 +320,10 @@ const STEP_GAP: std::time::Duration = std::time::Duration::from_millis(140);
 /// Goes from desktop `from` to desktop `to`, one step at a time, on a thread
 /// of its own so the pauses never hold up the UI.
 pub fn switch(from: usize, to: usize) {
+    if crate::shellmode::active() {
+        crate::vdesk::switch(to);
+        return;
+    }
     if from == to {
         return;
     }
@@ -355,6 +365,10 @@ fn jump_to(to: usize) -> bool {
 /// Windows only closes the desktop you're on (Ctrl+Win+F4), so this goes there
 /// first and comes back after.
 pub fn close(current: usize, which: usize) {
+    if crate::shellmode::active() {
+        crate::vdesk::close(which);
+        return;
+    }
     std::thread::spawn(move || {
         let before = read().names.len();
         if before < 2 || which >= before {
@@ -384,6 +398,32 @@ pub fn close(current: usize, which: usize) {
     });
 }
 
+/// Puts every window on one desktop by closing the others, each closed
+/// desktop's windows going to the one before it (blocking). Before Explorer
+/// is left (see `shellmode::take_over`): a window on another desktop is
+/// hidden by Explorer, and would stay hidden once it has gone.
+pub fn merge_all() {
+    let n = read().names.len();
+    if n < 2 {
+        return;
+    }
+    crate::config::log(&format!("desktops: putting the windows of {n} desktops on one"));
+    // From the last one, closing back towards the first: everything ends up there.
+    if !jump_to(n - 1) {
+        step_to(read().current, n - 1);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    for _ in 1..n {
+        let before = read().names.len();
+        ctrl_win(VK_F4, false, 1);
+        let start = std::time::Instant::now();
+        while read().names.len() >= before && start.elapsed() < std::time::Duration::from_millis(2000) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Goes from desktop `from` to `to` with the keys, a step at a time (blocking).
 fn step_to(from: usize, to: usize) {
     let (vk, steps) = if to > from { (VK_RIGHT, to - from) } else { (VK_LEFT, from - to) };
@@ -401,6 +441,10 @@ fn step_to(from: usize, to: usize) {
 /// to desktop number `stay` (0 is the first) rather than stepping back through
 /// the ones in between.
 pub fn create(stay: usize) {
+    if crate::shellmode::active() {
+        crate::vdesk::create(false);
+        return;
+    }
     std::thread::spawn(move || {
         let before = read().names.len();
         ctrl_win(VK_D, false, 1);
@@ -515,6 +559,9 @@ mod shell_api {
 /// one that has initialised COM. False if Windows wouldn't (a build whose
 /// desktop interfaces differ, a window it won't move, a desktop that's gone).
 pub fn move_window(window: HWND, to: usize) -> bool {
+    if crate::shellmode::active() {
+        return crate::vdesk::move_window(window, to);
+    }
     match unsafe { shell_api::try_move(window, to) } {
         Ok(()) => true,
         Err(e) => {

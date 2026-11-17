@@ -147,6 +147,11 @@ static OLD_ARRANGE: AtomicI32 = AtomicI32::new(-1);
 /// program behind the window, since Cascade's own hidden tray window (this
 /// copy's, or another's) has the same class.
 fn explorer_is_shell() -> bool {
+    explorer_shell().is_some()
+}
+
+/// Explorer's taskbar and the Explorer it belongs to, while Explorer is the shell.
+fn explorer_shell() -> Option<(HWND, u32)> {
     unsafe {
         let mut after: Option<HWND> = None;
         while let Ok(h) = FindWindowExW(None, after, w!("Shell_TrayWnd"), PCWSTR::null()) {
@@ -156,11 +161,11 @@ fn explorer_is_shell() -> bool {
             let explorer =
                 crate::dock::process_path(pid).is_some_and(|p| p.to_ascii_lowercase().ends_with("\\explorer.exe"));
             if explorer {
-                return true;
+                return Some((h, pid));
             }
         }
     }
-    false
+    None
 }
 
 /// Decides, once at startup, whether this copy is the shell: shell mode is
@@ -206,10 +211,21 @@ fn intent_path() -> PathBuf {
     config::dir().join("shell-exit")
 }
 
+/// The latest intent set in this copy (0: none; 1 quit, 2 restart, 3 session end).
+static INTENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub fn set_intent(intent: Intent) {
     if !active() {
         return;
     }
+    INTENT.store(
+        match intent {
+            Intent::Quit => 1,
+            Intent::Restart => 2,
+            Intent::SessionEnd => 3,
+        },
+        Ordering::Release,
+    );
     if intent == Intent::Quit {
         QUIT.store(true, Ordering::Release);
     }
@@ -403,6 +419,8 @@ pub fn guard() {
         if shutting_down() {
             return;
         }
+        // Nothing is carrying on with the windows Cascade hid on other desktops: show them.
+        crate::vdesk::restore_from_file();
         if !registered() {
             config::log("shell guard: shell mode was turned off; starting Explorer");
             start_explorer(false);
@@ -500,6 +518,7 @@ pub fn turn_off() {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+    crate::vdesk::restore_from_file();
     // No guard, no Cascade, or one that's stuck: start it from here.
     if !explorer_is_shell() {
         start_explorer(false);
@@ -562,12 +581,82 @@ fn trial() {
     });
 }
 
+/// Back to Explorer now was chosen: once it's up, Cascade starts again beside it.
+static BESIDE: AtomicBool = AtomicBool::new(false);
+
 /// Called once Cascade's windows are gone: after Quit, Explorer takes over.
 pub fn on_exit() {
     if active() && QUIT.load(Ordering::Acquire) {
         HANDING_OVER.store(true, Ordering::Release);
         start_explorer(true);
+        if BESIDE.load(Ordering::Acquire) {
+            // (It waits for this copy to have gone, as after an update.)
+            if let Ok(exe) = std::env::current_exe() {
+                let ok = std::process::Command::new(exe).arg("--updated").spawn().is_ok();
+                config::log(&format!("shell mode: back to Explorer; Cascade started again beside it: {ok}"));
+            }
+        }
     }
+}
+
+/// Back to Explorer for good, now: shell mode off, Explorer the shell, and a
+/// new Cascade beside it as usual. Call `close` on the main window after.
+pub fn leave_now() {
+    set_registered(false);
+    BESIDE.store(true, Ordering::Release);
+    set_intent(Intent::Quit);
+}
+
+/// Starts the helper that makes Cascade the shell now, without signing out
+/// (`take_over`). True if it started: close this Cascade next, as it waits
+/// for that.
+pub fn switch_now() -> bool {
+    if !registered() {
+        set_registered(true);
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let ok = std::process::Command::new(exe).arg("--shell-now").spawn().is_ok();
+    config::log(&format!("shell mode: switching now, without signing out (helper started: {ok})"));
+    ok
+}
+
+/// `cascade.exe --shell-now`: makes Cascade the shell without signing out.
+/// The Cascade that asked closes first (putting Explorer's taskbar back as it
+/// goes). Explorer's desktops are put together into one, since a window on
+/// another one would stay hidden without Explorer. Then Explorer is asked to
+/// exit, as its own *Exit Explorer* does, and this becomes the guard, which
+/// starts Cascade as the shell.
+pub fn take_over() {
+    let until = Instant::now() + Duration::from_secs(20);
+    while instance_exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if !registered() {
+        set_registered(true);
+    }
+    if let Some((tray, pid)) = explorer_shell() {
+        crate::desktops::merge_all();
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const TERMINATE: u32 = 0x0001;
+        unsafe {
+            let process = OpenProcess(PROCESS_ACCESS_RIGHTS(SYNCHRONIZE | TERMINATE), false, pid).ok();
+            // Explorer's own "Exit Explorer".
+            let _ = PostMessageW(Some(tray), 0x5B4, WPARAM(0), LPARAM(0));
+            let gone = process.is_some_and(|p| WaitForSingleObject(p, 15_000) == WAIT_OBJECT_0);
+            if !gone {
+                config::log("shell mode: Explorer didn't exit when asked; ending it");
+                if let Some(p) = process {
+                    let _ = windows::Win32::System::Threading::TerminateProcess(p, 1);
+                    let _ = WaitForSingleObject(p, 5_000);
+                }
+            }
+            if let Some(p) = process {
+                let _ = CloseHandle(p);
+            }
+        }
+        config::log("shell mode: Explorer has exited; Cascade is taking over as the shell");
+    }
+    guard();
 }
 
 // ------------------------------------------------------------ work area --
@@ -667,13 +756,40 @@ fn virtual_screen() -> RECT {
     }
 }
 
+/// The wallpaper window inside the desktop (see `create_desktop`).
+static WALLPAPER: AtomicIsize = AtomicIsize::new(0);
+
+fn wallpaper_window() -> Option<HWND> {
+    let h = WALLPAPER.load(Ordering::Acquire);
+    (h != 0).then_some(HWND(h as *mut c_void))
+}
+
+/// Loads the wallpaper again (the setting or the screens changed).
+fn reload_wallpaper() {
+    if let Some(w) = wallpaper_window() {
+        let r = virtual_screen();
+        crate::wallpaper::reload(w, (r.left, r.top));
+    }
+}
+
+/// Moves the desktop over every screen (they were added, removed or moved).
+unsafe fn cover_screens(desktop: HWND) {
+    let r = virtual_screen();
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let _ = SetWindowPos(desktop, None, r.left, r.top, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+    if let Some(wall) = wallpaper_window() {
+        let _ = SetWindowPos(wall, None, 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
+/// The desktop's own window (Explorer's is "Progman" too).
 unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
-        // The wallpaper, drawn by Windows itself.
-        WM_ERASEBKGND => {
-            let _ = PaintDesktop(HDC(wp.0 as *mut c_void));
-            LRESULT(1)
-        }
+        // Wallpaper apps (Wallpaper Engine, Lively) ask Explorer's desktop for
+        // a window behind its icons with this, then put their own in it.
+        // Cascade's is there from the start (see `create_desktop`).
+        0x052C => LRESULT(0),
+        WM_ERASEBKGND => LRESULT(1),
         // Always under every other window, whatever asks to move it.
         WM_WINDOWPOSCHANGING => {
             let pos = &mut *(lp.0 as *mut WINDOWPOS);
@@ -687,56 +803,127 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
             }
             LRESULT(0)
         }
-        // Cascade's menu (the main window shows it at the pointer).
-        WM_RBUTTONUP => {
-            msg::post(WM_RBUTTONUP, 0, 0);
-            LRESULT(0)
-        }
         WM_DISPLAYCHANGE => {
-            let r = virtual_screen();
-            let flags = SWP_NOACTIVATE | SWP_NOZORDER;
-            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            cover_screens(hwnd);
+            reload_wallpaper();
             LRESULT(0)
         }
-        WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETDESKWALLPAPER.0 => {
-            let _ = InvalidateRect(Some(hwnd), None, true);
+        WM_SETTINGCHANGE => {
+            // A new picture (SPI_SETDESKWALLPAPER), or Windows' desktop settings.
+            let section =
+                if lp.0 != 0 { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } else { String::new() };
+            if wp.0 as u32 == SPI_SETDESKWALLPAPER.0 || section.eq_ignore_ascii_case("Control Panel\\Desktop") {
+                reload_wallpaper();
+            }
             LRESULT(0)
         }
-        // Alt+F4 on the desktop doesn't close it.
+        WM_SYSCOLORCHANGE => {
+            reload_wallpaper();
+            LRESULT(0)
+        }
+        // Alt+F4 on the desktop shows the shut-down box, as on Explorer's (Cascade's power menu here).
         WM_CLOSE => LRESULT(0),
         _ => DefWindowProcW(hwnd, m, wp, lp),
     }
 }
 
-/// Makes the desktop window and tells Windows it's the shell's.
-unsafe fn create_desktop(instance: HINSTANCE) -> Option<HWND> {
-    let class = w!("CascadeDesktop");
+/// The window the wallpaper is drawn in, and where wallpaper apps put theirs.
+unsafe extern "system" fn wallpaper_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match m {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            crate::wallpaper::paint(hwnd);
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            desktop_menu(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, m, wp, lp),
+    }
+}
+
+/// A class of window for the desktop. Explorer's names are used, as programs
+/// look for those (FindWindow "Progman", a "SHELLDLL_DefView" in it, a
+/// "WorkerW" for the wallpaper).
+unsafe fn register(instance: HINSTANCE, name: PCWSTR, proc: WNDPROC) {
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(desktop_proc),
+        lpfnWndProc: proc,
         hInstance: instance,
         hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-        lpszClassName: class,
+        lpszClassName: name,
         ..Default::default()
     };
     RegisterClassExW(&wc);
+}
+
+unsafe extern "system" fn defview_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    DefWindowProcW(hwnd, m, wp, lp)
+}
+
+/// Makes the desktop and tells Windows it's the shell's. It's laid out as
+/// Windows 11's own (24H2 on): a "Progman" over every screen holding a
+/// "SHELLDLL_DefView" (where Explorer's icons go; empty and hidden here) and a
+/// "WorkerW" behind it that shows the wallpaper. Wallpaper Engine and Lively
+/// find that WorkerW and put their wallpaper in it, as they do on Explorer's.
+unsafe fn create_desktop(instance: HINSTANCE) -> Option<HWND> {
+    register(instance, w!("Progman"), Some(desktop_proc));
+    register(instance, w!("SHELLDLL_DefView"), Some(defview_proc));
+    register(instance, w!("WorkerW"), Some(wallpaper_proc));
     let r = virtual_screen();
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW,
-        class,
-        w!("Cascade Desktop"),
-        WS_POPUP | WS_CLIPCHILDREN,
+        w!("Progman"),
+        w!("Program Manager"),
+        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         r.left,
         r.top,
-        r.right - r.left,
-        r.bottom - r.top,
+        w,
+        h,
         None,
         None,
         Some(instance),
         None,
     )
     .ok()?;
+    let child = WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    let defview = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("SHELLDLL_DefView"),
+        w!(""),
+        child,
+        0,
+        0,
+        0,
+        0,
+        Some(hwnd),
+        None,
+        Some(instance),
+        None,
+    )
+    .ok();
+    // Behind the (empty) icon view, as Explorer's is.
+    if let Ok(wall) = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("WorkerW"),
+        w!(""),
+        child | WS_VISIBLE,
+        0,
+        0,
+        w,
+        h,
+        Some(hwnd),
+        None,
+        Some(instance),
+        None,
+    ) {
+        WALLPAPER.store(wall.0 as isize, Ordering::Release);
+        if let Some(d) = defview {
+            let _ = SetWindowPos(wall, Some(d), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
     // Not in the headers, but how a shell names its desktop: GetShellWindow
     // then answers with it, for every program that asks where the desktop is.
     type SetShellWindow = unsafe extern "system" fn(HWND) -> BOOL;
@@ -753,32 +940,43 @@ unsafe fn create_desktop(instance: HINSTANCE) -> Option<HWND> {
     Some(hwnd)
 }
 
-/// Has Windows load the wallpaper. At sign-in Explorer does that; without it
-/// the desktop is a plain colour until someone asks.
-fn load_wallpaper() {
-    let Some(path) =
-        reg_text(HKEY_CURRENT_USER, "Control Panel\\Desktop", "WallPaper").filter(|p| !p.trim().is_empty())
-    else {
-        return;
-    };
-    if !Path::new(&path).is_file() {
-        return;
+/// The desktop's right-click menu.
+unsafe fn desktop_menu(owner: HWND) {
+    use crate::wallpaper::{self, Fit};
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let Ok(fits) = CreatePopupMenu() else { return };
+    let now = wallpaper::fit();
+    for (i, (f, name)) in Fit::ALL.iter().enumerate() {
+        let flags = if *f == now { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let _ = AppendMenuW(fits, flags, 100 + i, &HSTRING::from(*name));
     }
-    let mut wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_SETDESKWALLPAPER,
-            0,
-            Some(wide.as_mut_ptr() as *mut c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .is_ok();
-    config::log(&format!("shell mode: wallpaper loaded: {ok}"));
-    if let Some(d) = desktop() {
-        unsafe {
-            let _ = InvalidateRect(Some(d), None, true);
+    let _ = AppendMenuW(menu, MF_STRING, 1, w!("Change wallpaper\u{2026}"));
+    let _ = AppendMenuW(menu, MF_POPUP, fits.0 as usize, w!("Wallpaper fit"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(menu, MF_STRING, 2, w!("Task Manager"));
+    let _ = AppendMenuW(menu, MF_STRING, 3, w!("Cascade settings\u{2026}"));
+    let mut p = POINT::default();
+    let _ = GetCursorPos(&mut p);
+    let _ = SetForegroundWindow(owner);
+    let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), owner, None);
+    let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+    let _ = DestroyMenu(menu);
+    match id.0 as usize {
+        1 => {
+            if let Some(path) = wallpaper::choose(owner) {
+                wallpaper::set_picture(&path);
+                reload_wallpaper();
+            }
         }
+        2 => shell::open("taskmgr.exe"),
+        3 => {
+            msg::post(msg::OPEN_SETTINGS, 0, 0);
+        }
+        n @ 100..=105 => {
+            wallpaper::set_fit(Fit::ALL[n - 100].0);
+            reload_wallpaper();
+        }
+        _ => {}
     }
 }
 
@@ -846,6 +1044,7 @@ pub fn init(instance: HINSTANCE, main: HWND) {
         }
     }
     hide_minimized(true);
+    crate::vdesk::load();
     if let Some(h) = unsafe { create_desktop(instance) } {
         DESKTOP.store(h.0 as isize, Ordering::Release);
     }
@@ -853,8 +1052,8 @@ pub fn init(instance: HINSTANCE, main: HWND) {
     signal_ready();
     ensure_guard();
     trial();
+    reload_wallpaper();
     std::thread::spawn(|| {
-        load_wallpaper();
         // Let Cascade's taskbar and tray settle first: programs add their tray icons as they start.
         std::thread::sleep(Duration::from_secs(2));
         run_startup();
@@ -867,12 +1066,18 @@ pub fn shutdown(main: HWND) {
         return;
     }
     unregister_hotkeys(main);
+    // Windows on other desktops come back, unless the next copy is on its way to carry on with them.
+    if INTENT.load(Ordering::Acquire) != 2 {
+        crate::vdesk::restore_all();
+    }
     let h = DESKTOP.swap(0, Ordering::AcqRel);
+    WALLPAPER.store(0, Ordering::Release);
     if h != 0 {
         unsafe {
             let _ = DestroyWindow(HWND(h as *mut c_void));
         }
     }
+    crate::wallpaper::release();
     hide_minimized(false);
     // Every screen gets its whole area back. Here and now (Cascade is about
     // to exit), and quietly: whoever is the shell next sets its own.
@@ -910,6 +1115,12 @@ pub enum Hotkey {
     Screen(bool),
     /// Win+1 to Win+9: the nth app on the taskbar.
     App(usize),
+    /// Ctrl+Win+Left / Right: the previous / next desktop.
+    DeskStep(bool),
+    /// Ctrl+Win+D: a new desktop, and go there.
+    DeskNew,
+    /// Ctrl+Win+F4: close this desktop.
+    DeskClose,
     Snip,
     Magnifier,
     TaskManager,
@@ -952,6 +1163,10 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
         (WIN, 0xBB, Hotkey::Magnifier),
         (WIN, 0x6B, Hotkey::Magnifier),
         (CTRL | SHIFT, ESCAPE, Hotkey::TaskManager),
+        (CTRL | WIN, LEFT, Hotkey::DeskStep(false)),
+        (CTRL | WIN, RIGHT, Hotkey::DeskStep(true)),
+        (CTRL | WIN, b'D' as u32, Hotkey::DeskNew),
+        (CTRL | WIN, 0x73, Hotkey::DeskClose),
     ];
     for n in 0..9u32 {
         keys.push((WIN, b'1' as u32 + n, Hotkey::App(n as usize)));
@@ -996,6 +1211,9 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::Snip => shell::open("ms-screenclip:"),
         Hotkey::Magnifier => shell::open("magnify.exe"),
         Hotkey::TaskManager => shell::open("taskmgr.exe"),
+        Hotkey::DeskStep(right) => crate::vdesk::step(right),
+        Hotkey::DeskNew => crate::vdesk::create(true),
+        Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
         Hotkey::Search | Hotkey::Start | Hotkey::App(_) => return Some(key),
     }
     None
@@ -1027,42 +1245,264 @@ fn classic_page(uri: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Whether Windows' Settings app has a window on screen.
-fn settings_window_up() -> bool {
-    let mut all: Vec<HWND> = Vec::new();
-    unsafe {
-        let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
+/// Opens a `ms-settings:` page. Windows' Settings is a Store-style app, and
+/// those are opened through Explorer (asking for one without it can hang the
+/// asker for a minute), so the nearest classic Control Panel page opens
+/// instead, straight away. Says so the first time.
+pub fn open_settings(uri: &str) {
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    let (file, args) = classic_page(uri);
+    config::log(&format!("shell mode: {uri} -> {file} {args}"));
+    let (file, args) = (file.to_string(), args.to_string());
+    std::thread::spawn(move || {
+        shell::launch(&file, &args, false);
+    });
+    if !TOLD.swap(true, Ordering::AcqRel) {
+        msg::note("Windows' Settings needs Explorer: opening Control Panel instead");
     }
-    all.into_iter().any(|h| unsafe {
-        IsWindowVisible(h).as_bool()
-            && crate::dock::app_user_model_id(h)
-                .is_some_and(|id| id.to_ascii_lowercase().contains("immersivecontrolpanel"))
-    })
 }
 
-/// Opens a `ms-settings:` page. Windows' Settings is a Store-style app, and
-/// those lean on Explorer being the shell: if no Settings window has come up
-/// a few seconds later, the nearest classic Control Panel page opens instead.
-pub fn open_settings(uri: &str) {
-    unsafe {
-        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL);
+// ------------------------------------------------------------- launching --
+
+/// Opens `target` as the shell: on a thread of its own, since asking Windows
+/// to open something can wait on Explorer, and without it that's a wait for
+/// nothing. Store-style apps go by the routes that don't need Explorer
+/// (`open_packaged`); links to Explorer's own pages go to what's left of them.
+pub fn open(target: &str, admin: bool) {
+    let lower = target.trim().to_ascii_lowercase();
+    if is_bare_explorer(target) {
+        open_files();
+        return;
     }
-    let uri = uri.to_string();
-    std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    if lower.starts_with("ms-settings:") {
+        open_settings(target);
+        return;
+    }
+    // Explorer's notification centre and quick settings: Cascade's widgets and Controls are those.
+    if lower.starts_with("ms-actioncenter:") {
+        config::log(&format!("shell mode: {target} is Explorer's; nothing to open"));
+        return;
+    }
+    // Explorer's network list: the classic Network Connections window is what's left.
+    if lower.starts_with("ms-availablenetworks:") {
+        shell::launch("ncpa.cpl", "", false);
+        return;
+    }
+    let target = target.to_string();
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Some(aumid) = packaged_id(&target) {
+            open_packaged(&aumid, admin);
+        } else if admin {
+            shell::open_as_admin_direct(&target);
+        } else {
+            shell::open_direct(&target);
         }
-        let until = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < until {
-            if settings_window_up() {
+    });
+}
+
+/// The app id of a Store-style (packaged) app in `shell:AppsFolder\<id>`:
+/// its package family (name, then `_` and 13 letters and digits), `!` and its id.
+fn packaged_id(target: &str) -> Option<String> {
+    let id = target.get(..17).filter(|p| p.eq_ignore_ascii_case("shell:AppsFolder\\")).map(|_| &target[17..])?;
+    let (family, app) = id.split_once('!')?;
+    let (_, publisher) = family.rsplit_once('_')?;
+    let ok = !app.is_empty()
+        && !id.contains('\\')
+        && publisher.len() == 13
+        && publisher.chars().all(|c| c.is_ascii_alphanumeric());
+    ok.then(|| id.to_string())
+}
+
+/// Opens a packaged app without Explorer, by the first of these that works:
+/// Windows' activation (as Explorer would; it may well need Explorer itself),
+/// the app's own command (its execution alias, as typed in a terminal), or
+/// for a desktop app in a package (Claude, Terminal and many more) its
+/// program, started directly. Says so when none does.
+fn open_packaged(aumid: &str, admin: bool) {
+    let Some((family, app)) = aumid.split_once('!') else { return };
+    if !admin {
+        match activate(aumid) {
+            Ok(pid) => {
+                config::log(&format!("shell mode: opened {aumid} through Windows (process {pid})"));
                 return;
             }
-            std::thread::sleep(Duration::from_millis(500));
+            Err(e) => config::log(&format!("shell mode: Windows wouldn't open {aumid} ({e}); trying its program")),
         }
-        let (file, args) = classic_page(&uri);
-        config::log(&format!("shell mode: Windows' Settings didn't open for {uri}; opening {file} {args} instead"));
-        shell::launch(file, args, false);
+    }
+    if let Some(alias) = execution_alias(family, app) {
+        let ok = start(&alias, admin);
+        config::log(&format!("shell mode: started {aumid} by its command {} ({ok})", alias.display()));
+        if ok {
+            return;
+        }
+    }
+    match package_program(family, app) {
+        Some((exe, true)) => {
+            let ok = start(&exe, admin);
+            config::log(&format!("shell mode: started {aumid} from its package, {} ({ok})", exe.display()));
+            if ok {
+                return;
+            }
+        }
+        Some((_, false)) => config::log(&format!("shell mode: {aumid} is a Store app, which only Explorer opens")),
+        None => config::log(&format!("shell mode: couldn't find {aumid}'s package")),
+    }
+    let name = app_name(aumid);
+    msg::note(format!("{name} needs Explorer to open. Right-click the taskbar > Quit to Explorer to use it."));
+}
+
+/// Windows' own way to open a packaged app. Waited on for a few seconds at
+/// most: without Explorer it can hang instead of failing.
+fn activate(aumid: &str) -> Result<u32, String> {
+    use windows::Win32::UI::Shell::{ApplicationActivationManager, IApplicationActivationManager, AO_NONE};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = aumid.to_string();
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let result = CoCreateInstance::<_, IApplicationActivationManager>(
+            &ApplicationActivationManager,
+            None,
+            windows::Win32::System::Com::CLSCTX_ALL,
+        )
+        .and_then(|m| m.ActivateApplication(&HSTRING::from(id.as_str()), &HSTRING::new(), AO_NONE))
+        .map_err(|e| e.to_string());
+        let _ = tx.send(result);
     });
+    rx.recv_timeout(Duration::from_secs(6)).unwrap_or_else(|_| Err("no answer in 6 s".into()))
+}
+
+/// The app's execution alias: the command a terminal knows it by (wt,
+/// winget, python...), which Windows keeps in WindowsApps under the family.
+fn execution_alias(family: &str, app: &str) -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Microsoft\\WindowsApps").join(family);
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+        .collect();
+    found.sort();
+    let named = found.iter().position(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(app)));
+    named.map(|i| found.swap_remove(i)).or_else(|| found.into_iter().next())
+}
+
+/// The program of app `app` in the installed package of `family`, and
+/// whether it's a desktop program (one that can be started directly).
+fn package_program(family: &str, app: &str) -> Option<(PathBuf, bool)> {
+    use windows::Win32::Storage::Packaging::Appx::{GetPackagePathByFullName, GetPackagesByPackageFamily};
+    unsafe {
+        let family = HSTRING::from(family);
+        let (mut count, mut len) = (0u32, 0u32);
+        let _ = GetPackagesByPackageFamily(&family, &mut count, None, &mut len, None);
+        if count == 0 || len == 0 {
+            return None;
+        }
+        let mut names = vec![PWSTR::null(); count as usize];
+        let mut buf = vec![0u16; len as usize];
+        if GetPackagesByPackageFamily(
+            &family,
+            &mut count,
+            Some(names.as_mut_ptr()),
+            &mut len,
+            Some(PWSTR(buf.as_mut_ptr())),
+        ) != ERROR_SUCCESS
+        {
+            return None;
+        }
+        for name in names.into_iter().take(count as usize) {
+            let mut plen = 0u32;
+            let _ = GetPackagePathByFullName(PCWSTR(name.0), &mut plen, None);
+            if plen == 0 {
+                continue;
+            }
+            let mut path = vec![0u16; plen as usize];
+            if GetPackagePathByFullName(PCWSTR(name.0), &mut plen, Some(PWSTR(path.as_mut_ptr()))) != ERROR_SUCCESS {
+                continue;
+            }
+            let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+            let root = PathBuf::from(String::from_utf16_lossy(&path[..end]));
+            let Ok(xml) = std::fs::read_to_string(root.join("AppxManifest.xml")) else { continue };
+            if let Some((exe, desktop)) = manifest_app(&xml, app) {
+                return Some((root.join(exe.replace('/', "\\")), desktop));
+            }
+        }
+        None
+    }
+}
+
+/// Attribute `name` of the XML start tag `tag` (`name="value"`).
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    while let Some(i) = rest.find(name) {
+        let before = rest[..i].chars().last();
+        let after = &rest[i + name.len()..];
+        let after = after.trim_start();
+        if before.is_some_and(|c| c.is_whitespace()) {
+            if let Some(v) = after.strip_prefix('=') {
+                let v = v.trim_start();
+                let quote = v.chars().next()?;
+                if quote == '"' || quote == '\'' {
+                    let v = &v[1..];
+                    return v.find(quote).map(|end| v[..end].to_string());
+                }
+            }
+        }
+        rest = &rest[i + name.len()..];
+    }
+    None
+}
+
+/// In a package's AppxManifest.xml: the program of the <Application> with
+/// id `app`, and whether it's a desktop program (full trust) rather than a
+/// Store app.
+fn manifest_app(xml: &str, app: &str) -> Option<(String, bool)> {
+    let mut rest = xml;
+    while let Some(i) = rest.find("<Application") {
+        let after = &rest[i + "<Application".len()..];
+        // Not <Applications>, nor an <ApplicationContentUriRules> and the like.
+        if !after.starts_with(|c: char| c.is_whitespace()) {
+            rest = after;
+            continue;
+        }
+        let end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..end];
+        if attribute(tag, "Id").is_some_and(|id| id.eq_ignore_ascii_case(app)) {
+            let exe = attribute(tag, "Executable")?;
+            let entry = attribute(tag, "EntryPoint").unwrap_or_default();
+            let behaviour = attribute(tag, "uap10:RuntimeBehavior").unwrap_or_default();
+            let desktop = entry.eq_ignore_ascii_case("Windows.FullTrustApplication")
+                || behaviour.eq_ignore_ascii_case("packagedClassicApp")
+                || behaviour.eq_ignore_ascii_case("win32App");
+            return Some((exe, desktop));
+        }
+        rest = &after[end..];
+    }
+    None
+}
+
+/// Starts a program, as administrator if `admin` (Windows asks first).
+fn start(exe: &Path, admin: bool) -> bool {
+    if admin {
+        return shell::launch(&exe.to_string_lossy(), "", true);
+    }
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(dir) = exe.parent() {
+        cmd.current_dir(dir);
+    }
+    cmd.spawn().is_ok()
+}
+
+/// What to call a packaged app in a message: its name in the Start menu's list, else its id.
+fn app_name(aumid: &str) -> String {
+    let (family, app) = aumid.split_once('!').unwrap_or((aumid, ""));
+    let name = family.split('_').next().unwrap_or(family);
+    let name = name.rsplit('.').next().unwrap_or(name);
+    if name.is_empty() {
+        app.to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Whether `target` is Explorer itself with nothing to open.
@@ -1712,6 +2152,45 @@ mod tests {
         assert!(is_bare_explorer("\"C:\\WINDOWS\\Explorer.EXE\""));
         assert!(!is_bare_explorer("C:\\Tools\\fileexplorer.exe "));
         assert!(!is_bare_explorer("shell:AppsFolder\\Some.App"));
+    }
+
+    #[test]
+    fn tells_packaged_apps_apart() {
+        assert_eq!(
+            packaged_id("shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude"),
+            Some("Claude_pzs8sxrjxfjjc!Claude".into())
+        );
+        assert_eq!(
+            packaged_id("shell:appsfolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+            Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into())
+        );
+        // Desktop apps' ids: an AppUserModelID, or a known folder and a path.
+        assert_eq!(packaged_id("shell:AppsFolder\\com.squirrel.Discord.Discord"), None);
+        assert_eq!(packaged_id("shell:AppsFolder\\{6D809377-6AF0-444B-8957-A3773F02200E}\\App\\app.exe"), None);
+        assert_eq!(packaged_id("shell:AppsFolder\\Weird!Name"), None);
+        assert_eq!(packaged_id("C:\\Tools\\app.exe"), None);
+        assert_eq!(app_name("Claude_pzs8sxrjxfjjc!Claude"), "Claude");
+        assert_eq!(app_name("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), "WindowsCalculator");
+    }
+
+    #[test]
+    fn reads_a_package_manifest() {
+        let xml = r#"<?xml version="1.0"?>
+<Package xmlns="x" xmlns:uap10="y">
+  <Applications>
+    <Application Id="Tool" Executable="tools\tool.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Tool"/>
+    </Application>
+    <Application Id='App' Executable='Calc.exe' EntryPoint='Calc.App'/>
+    <Application Id="Claude" Executable="app/claude.exe" uap10:RuntimeBehavior="packagedClassicApp"
+        uap10:TrustLevel="mediumIL"/>
+  </Applications>
+</Package>"#;
+        assert_eq!(manifest_app(xml, "Tool"), Some(("tools\\tool.exe".into(), true)));
+        assert_eq!(manifest_app(xml, "app"), Some(("Calc.exe".into(), false)));
+        assert_eq!(manifest_app(xml, "Claude"), Some(("app/claude.exe".into(), true)));
+        assert_eq!(manifest_app(xml, "Missing"), None);
+        assert_eq!(attribute(r#" AppId="a" Id="b""#, "Id"), Some("b".into()));
     }
 
     #[test]

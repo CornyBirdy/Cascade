@@ -760,6 +760,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.on_desktop_focus());
             return LRESULT(0);
         }
+        msg::NOTE => {
+            let text = Box::from_raw(lp.0 as *mut String);
+            with_app(move |a| a.notify(*text, theme::accent(), true));
+            return LRESULT(0);
+        }
+        msg::SHELL_SWITCH => {
+            let go = match wp.0 {
+                1 => shellmode::switch_now(),
+                2 => {
+                    shellmode::leave_now();
+                    true
+                }
+                _ => false,
+            };
+            // Closed from here, outside any other message: shutdown runs as usual.
+            if go {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+            return LRESULT(0);
+        }
         msg::APPS => {
             let list = Box::from_raw(lp.0 as *mut Vec<AppEntry>);
             with_app(move |a| a.launcher.set_apps(*list));
@@ -3455,7 +3475,33 @@ impl App {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
             Change::Set("shell_mode", v) => {
-                shellmode::set_registered(v == "true");
+                let on = v == "true";
+                shellmode::set_registered(on);
+                // Now, or from the next sign-in? (Asked off this thread: the box waits for an answer.)
+                let ask = match (on, shellmode::active()) {
+                    (true, false) => Some((
+                        1usize,
+                        "Switch to Cascade as the Windows shell now, without signing out?\n\n\
+                         Yes: Explorer closes now (any File Explorer windows close with it) and Cascade takes over.\n\
+                         No: from your next sign-in.",
+                    )),
+                    (false, true) => Some((
+                        2usize,
+                        "Go back to Explorer now?\n\nYes: Explorer comes back now, and Cascade starts again beside it.\n\
+                         No: from your next sign-in.",
+                    )),
+                    _ => None,
+                };
+                if let Some((code, text)) = ask {
+                    std::thread::spawn(move || unsafe {
+                        let style = MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND;
+                        let answer =
+                            MessageBoxW(None, &windows::core::HSTRING::from(text), w!("Cascade shell mode"), style);
+                        if answer == IDYES {
+                            msg::post(msg::SHELL_SWITCH, code, 0);
+                        }
+                    });
+                }
             }
             Change::Many(values) => {
                 if values.iter().any(|(k, v)| self.cfg.get(k) != *v) {
@@ -4180,6 +4226,13 @@ impl App {
             self.desks = desks;
             self.dock.dirty = true;
             self.switcher.set_desktops(self.desks.clone());
+        }
+        // Cascade's own desktops hide and show windows: the taskbars look again once that has happened.
+        if shellmode::active() && self.cfg.dock {
+            unsafe {
+                SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 80, None);
+                SetTimer(Some(self.dock.hwnd), TIMER_SCAN2, 700, None);
+            }
         }
     }
 

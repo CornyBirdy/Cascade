@@ -940,17 +940,15 @@ pub fn signal_running_instance() {
 }
 
 pub fn open(target: &str) {
-    // Shell mode: Explorer asked for nothing in particular might set itself
-    // up as the shell, so it's always given a folder to show.
-    if crate::shellmode::active() && crate::shellmode::is_bare_explorer(target) {
-        crate::shellmode::open_files();
+    if crate::shellmode::active() {
+        crate::shellmode::open(target, false);
         return;
     }
-    // Windows' Settings may not open without Explorer: that's watched for (see `open_settings`).
-    if crate::shellmode::active() && target.to_ascii_lowercase().starts_with("ms-settings:") {
-        crate::shellmode::open_settings(target);
-        return;
-    }
+    open_direct(target);
+}
+
+/// Opens `target` here and now (`open` hands it to shell mode first, when that's on).
+pub(crate) fn open_direct(target: &str) {
     unsafe {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }
@@ -1006,6 +1004,15 @@ pub fn uri_escape(text: &str) -> String {
 /// `shell:AppsFolder\<id>` entry, which is run through its own "runas" verb.
 /// Store apps have none, so those start as usual.
 pub fn open_as_admin(target: &str) {
+    if crate::shellmode::active() {
+        crate::shellmode::open(target, true);
+        return;
+    }
+    open_as_admin_direct(target);
+}
+
+/// `open_as_admin`, here and now.
+pub(crate) fn open_as_admin_direct(target: &str) {
     if !target.starts_with("shell:") {
         launch(target, "", true);
         return;
@@ -1031,7 +1038,7 @@ pub fn open_as_admin(target: &str) {
             }
         }
     }
-    open(target);
+    open_direct(target);
 }
 
 /// Starts `file` with `args`, as admin if `admin` (Windows asks first).

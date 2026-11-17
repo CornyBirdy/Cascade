@@ -49,6 +49,8 @@ mod theme;
 mod ui;
 mod update;
 mod usage;
+mod vdesk;
+mod wallpaper;
 mod weather;
 mod widgets;
 mod wifi;
@@ -107,6 +109,10 @@ pub mod msg {
     pub const DESK_APPS: u32 = WM_APP + 33;
     /// Shell mode: Cascade's desktop window was clicked and has the focus.
     pub const DESKTOP: u32 = WM_APP + 34;
+    /// A line for the notch from a worker thread (a boxed `String`).
+    pub const NOTE: u32 = WM_APP + 35;
+    /// Shell mode, switching now (wParam 1: to Cascade as the shell; 2: back to Explorer).
+    pub const SHELL_SWITCH: u32 = WM_APP + 36;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -117,6 +123,14 @@ pub mod msg {
     pub fn post(msg: u32, w: usize, l: isize) -> bool {
         let h = TARGET.load(Ordering::Acquire);
         h != 0 && unsafe { PostMessageW(Some(HWND(h as *mut _)), msg, WPARAM(w), LPARAM(l)).is_ok() }
+    }
+
+    /// Says `text` in the notch (or a message box with the notch off), from any thread.
+    pub fn note(text: impl Into<String>) {
+        let ptr = Box::into_raw(Box::new(text.into()));
+        if !post(NOTE, 0, ptr as isize) {
+            drop(unsafe { Box::from_raw(ptr) });
+        }
     }
 }
 
@@ -135,6 +149,11 @@ fn main() {
     // proper and keeps it running (see `shellmode`).
     if std::env::args().any(|a| a == "--shell") {
         shellmode::guard();
+        return;
+    }
+    // Shell mode, switching now (see `shellmode::take_over`).
+    if std::env::args().any(|a| a == "--shell-now") {
+        shellmode::take_over();
         return;
     }
     // The way out of shell mode from Task Manager's Run box.
