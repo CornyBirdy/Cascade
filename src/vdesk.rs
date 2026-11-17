@@ -34,6 +34,12 @@ struct Hidden {
     min: bool,
     /// It belongs to another window in the list (a dialog, a palette).
     owned: bool,
+    /// When it was hidden (Windows' tick count in ms; 0 if read back from the file).
+    at: u64,
+}
+
+fn now_ms() -> u64 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
 }
 
 #[derive(Debug, PartialEq)]
@@ -143,7 +149,7 @@ fn parse(text: &str) -> Option<State> {
             continue;
         };
         if d < count && d != current {
-            hidden[d].push(Hidden { hwnd: h, pid, min: w[3] == "1", owned: w[4] == "1" });
+            hidden[d].push(Hidden { hwnd: h, pid, min: w[3] == "1", owned: w[4] == "1", at: 0 });
         }
     }
     Some(State { current, hidden })
@@ -217,23 +223,33 @@ fn on_screen() -> Vec<Hidden> {
             && apps.contains(&root_owner(h))
             && root_owner(h) != h;
         if app || owned {
-            out.push(Hidden { hwnd: h.0 as isize, pid: pid_of(h), min: unsafe { IsIconic(h).as_bool() }, owned });
+            out.push(Hidden {
+                hwnd: h.0 as isize,
+                pid: pid_of(h),
+                min: unsafe { IsIconic(h).as_bool() },
+                owned,
+                at: 0,
+            });
         }
     }
     out
 }
 
-/// Hides the windows in `list`; returns the ones that went (Windows won't
-/// let Cascade hide an admin app's windows: those stay, on every desktop).
+/// Hides the windows in `list`; returns the ones that went. Some stay, on
+/// every desktop: an admin app's (Windows won't let Cascade hide them), and
+/// a program's that isn't responding (it would only hide once it answers,
+/// by when it might be listed nowhere).
 fn hide(list: Vec<Hidden>) -> Vec<Hidden> {
+    let at = now_ms();
     list.into_iter()
         .filter(|h| {
             let w = hwnd(h.hwnd);
-            if crate::helper::window_above_us(w) {
+            if crate::helper::window_above_us(w) || unsafe { IsHungAppWindow(w).as_bool() } {
                 return false;
             }
             unsafe { ShowWindowAsync(w, SW_HIDE).as_bool() }
         })
+        .map(|h| Hidden { at, ..h })
         .collect()
 }
 
@@ -264,9 +280,15 @@ fn show_all(state: &State) -> usize {
 
 /// Drops windows that have closed, and ones that came back on screen by
 /// themselves (an app showed its window: it's on the desktop you're on now).
+/// A window hidden a moment ago may not have gone yet (hiding is asked of
+/// the program, which does it when it gets to it): those are left listed.
 fn prune(state: &mut State) {
+    let now = now_ms();
     for list in &mut state.hidden {
-        list.retain(|h| same(h) && !unsafe { IsWindowVisible(hwnd(h.hwnd)).as_bool() });
+        list.retain(|h| {
+            let settled = h.at == 0 || now.saturating_sub(h.at) > 1500;
+            same(h) && !(settled && unsafe { IsWindowVisible(hwnd(h.hwnd)).as_bool() })
+        });
     }
     if state.current >= state.hidden.len() {
         state.current = 0;
@@ -388,6 +410,7 @@ pub fn move_window(window: HWND, to: usize) -> bool {
                 pid: pid_of(window),
                 min: unsafe { IsIconic(window).as_bool() },
                 owned: false,
+                at: 0,
             });
         }
         let gone = hide(list);
@@ -465,11 +488,11 @@ mod tests {
             current: 1,
             hidden: vec![
                 vec![
-                    Hidden { hwnd: 0x1234, pid: 40, min: false, owned: false },
-                    Hidden { hwnd: 0x5678, pid: 40, min: true, owned: true },
+                    Hidden { hwnd: 0x1234, pid: 40, min: false, owned: false, at: 0 },
+                    Hidden { hwnd: 0x5678, pid: 40, min: true, owned: true, at: 0 },
                 ],
                 vec![],
-                vec![Hidden { hwnd: 99, pid: 7, min: true, owned: false }],
+                vec![Hidden { hwnd: 99, pid: 7, min: true, owned: false, at: 0 }],
             ],
         };
         let mut text = format!("{}\ndesktops 3 current 1\n", session_tag());
