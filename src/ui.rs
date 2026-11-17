@@ -1679,10 +1679,31 @@ impl App {
         }
     }
 
+    /// Shell mode: if Explorer has come up as the shell under Cascade
+    /// (something started it with nothing to open, and it took the job),
+    /// start over: the next copy runs beside Explorer, as usual.
+    fn yield_to_explorer(&mut self) {
+        if !shellmode::explorer_took_over() {
+            return;
+        }
+        config::log("shell mode: Explorer has made itself the shell; restarting to run beside it");
+        if shell::spawn_restart() {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_SHELLPOLL);
+                let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
     /// Explorer made its taskbar: at sign-in, or after it restarted.
     fn on_shell_ready(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_SHELL);
+        }
+        if shellmode::active() {
+            // As the shell, Cascade hears its own tray announcements here.
+            self.yield_to_explorer();
+            return;
         }
         config::log(&format!("Explorer's taskbar is up, {} s after Windows started", shell::uptime_secs()));
         if let Some(t) = &self.tray {
@@ -2832,6 +2853,9 @@ impl App {
                 // Windows' notification pop-ups are Explorer's: read the list
                 // every few seconds and show what's new in the notch.
                 self.shell_ticks = self.shell_ticks.wrapping_add(1);
+                if self.shell_ticks.is_multiple_of(5) {
+                    self.yield_to_explorer();
+                }
                 if self.shell_ticks.is_multiple_of(2)
                     && self.cfg.widgets_notifications
                     && self.shown

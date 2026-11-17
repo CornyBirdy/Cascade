@@ -175,6 +175,12 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+/// Whether Explorer has made itself the shell under a Cascade that was one
+/// (something started it with nothing to open, and it took the job).
+pub fn explorer_took_over() -> bool {
+    active() && explorer_is_shell()
+}
+
 /// Cascade's desktop window (shell mode only).
 pub fn desktop() -> Option<HWND> {
     let h = DESKTOP.load(Ordering::Acquire);
@@ -361,6 +367,12 @@ pub fn guard() {
         }
         if shutting_down() {
             return;
+        }
+        // Explorer is the shell now (it took over, or was handed over to): the guard's work is done.
+        if explorer_is_shell() {
+            let _ = take_intent();
+            config::log("shell guard: Explorer is the shell; nothing left to guard");
+            leave();
         }
         let intent = take_intent();
         match intent {
