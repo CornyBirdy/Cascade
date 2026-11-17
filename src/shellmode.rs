@@ -297,6 +297,30 @@ fn find_instance(patience: Duration) -> Option<HWND> {
     }
 }
 
+/// Waits for the Cascade the guard started to exit. One that has made no
+/// window most of a minute on is stuck starting: it's ended, which counts as
+/// a failed start.
+fn wait_child(child: &mut std::process::Child) {
+    let began = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        if crate::helper::main_window().is_some() {
+            let _ = child.wait();
+            return;
+        }
+        if began.elapsed() > Duration::from_secs(45) {
+            config::log("shell guard: Cascade made no window in 45 s; ending it");
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// Ends the guard once Explorer has the shell. With the exit code of a
 /// program that was ended on purpose: Windows starts a shell again when it
 /// goes away unexpectedly, and Explorer is already on its way.
@@ -331,9 +355,7 @@ pub fn guard() {
         match find_instance(Duration::ZERO) {
             Some(h) => wait_gone(h),
             None => match std::process::Command::new(&exe).arg("--shell-ui").spawn() {
-                Ok(mut child) => {
-                    let _ = child.wait();
-                }
+                Ok(mut child) => wait_child(&mut child),
                 Err(e) => config::log(&format!("shell guard: Cascade wouldn't start: {e}")),
             },
         }
@@ -518,20 +540,46 @@ fn reserved() -> std::sync::MutexGuard<'static, Vec<(isize, RECT, i32)>> {
     RESERVED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Sets `screen`'s work area (where maximised windows go) to the screen less
-/// the tallest strip reserved on it.
-fn apply_work_area(screen: RECT) {
+/// The work area `screen` should have: all of it, less the tallest strip
+/// reserved on it.
+fn wanted_work_area(screen: RECT) -> RECT {
     let px = reserved().iter().filter(|e| e.1 == screen).map(|e| e.2).max().unwrap_or(0);
-    let mut want = RECT { bottom: screen.bottom - px, ..screen };
+    RECT { bottom: screen.bottom - px, ..screen }
+}
+
+/// Sets a screen's work area (where maximised windows go). `tell`: Windows
+/// tells every program, so they move out of the taskbar's way.
+fn set_work_area(screen: RECT, mut want: RECT, tell: bool) {
     if shell::work_area_of(screen) == want {
         return;
     }
+    let flags = if tell { SPIF_SENDCHANGE } else { SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0) };
     unsafe {
-        let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut want as *mut RECT as *mut c_void), SPIF_SENDCHANGE);
+        let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut want as *mut RECT as *mut c_void), flags);
     }
-    // Windows tells every window; Cascade's own are told again once it's
-    // free to listen (this is often called from inside one of its handlers).
+    // Cascade's own windows hear it from here as well, whatever Windows told them.
     msg::post(WM_SETTINGCHANGE, SPI_SETWORKAREA.0 as usize, 0);
+}
+
+/// Brings `screen`'s work area up to date with what's reserved on it. On a
+/// thread of its own, one change after another: telling every program can
+/// wait on one that's stuck, and the taskbar mustn't wait with it.
+fn apply_work_area(screen: RECT) {
+    use std::sync::mpsc::{channel, Sender};
+    static TX: Mutex<Option<Sender<RECT>>> = Mutex::new(None);
+    let mut tx = TX.lock().unwrap_or_else(|e| e.into_inner());
+    if tx.is_none() {
+        let (sender, receiver) = channel::<RECT>();
+        std::thread::spawn(move || {
+            for screen in receiver {
+                set_work_area(screen, wanted_work_area(screen), true);
+            }
+        });
+        *tx = Some(sender);
+    }
+    if let Some(sender) = tx.as_ref() {
+        let _ = sender.send(screen);
+    }
 }
 
 /// Keeps `px` along the bottom of `screen` free for taskbar `hwnd`, as
@@ -786,9 +834,11 @@ pub fn shutdown(main: HWND) {
         }
     }
     hide_minimized(false);
-    let screens: Vec<RECT> = reserved().drain(..).map(|e| e.1).collect();
-    for s in screens {
-        apply_work_area(s);
+    // Every screen gets its whole area back. Here and now (Cascade is about
+    // to exit), and quietly: whoever is the shell next sets its own.
+    reserved().clear();
+    for s in screens() {
+        set_work_area(s.all, s.all, false);
     }
 }
 
@@ -826,7 +876,6 @@ pub enum Hotkey {
 }
 
 const HOTKEY_BASE: i32 = 0x5C00;
-const ALT_NONE: u32 = 0;
 const CTRL: u32 = 0x2;
 const SHIFT: u32 = 0x4;
 const WIN: u32 = 0x8;
@@ -873,7 +922,7 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
 fn register_hotkeys(main: HWND) {
     let mut refused = Vec::new();
     for (i, (mods, vk, _)) in hotkeys().into_iter().enumerate() {
-        let mods = HOT_KEY_MODIFIERS(mods | ALT_NONE | NO_REPEAT);
+        let mods = HOT_KEY_MODIFIERS(mods | NO_REPEAT);
         if unsafe { RegisterHotKey(Some(main), HOTKEY_BASE + i as i32, mods, vk) }.is_err() {
             refused.push(i);
         }
@@ -1203,6 +1252,10 @@ fn front_window(style: WINDOW_STYLE) -> Option<HWND> {
     unsafe {
         let h = GetForegroundWindow();
         if h.is_invalid() || !crate::dock::is_app_window(h, GetCurrentProcessId()) {
+            return None;
+        }
+        // Moving a window waits for its program to answer: one that's stuck is left alone.
+        if IsHungAppWindow(h).as_bool() {
             return None;
         }
         (GetWindowLongW(h, GWL_STYLE) as u32 & style.0 != 0).then_some(h)
