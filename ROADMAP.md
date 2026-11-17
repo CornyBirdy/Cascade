@@ -28,11 +28,10 @@ Features agreed on but not built yet. Tick them off (and move the notes to `CHAN
 
 ## Shell mode (Cascade in Explorer's place)
 
-Built, but untested on a real PC. To do once it has been tried:
+Tried once on a real PC (taskbar, Start, shortcuts and tray worked). Fixed since: wallpaper, Win+I freezing, packaged apps not opening, virtual desktops, switching without signing out, snips. Still to do:
 
-- [ ] **Try it**: sign in with it on, and note what breaks. The guesses to check first: whether Store-style apps and Windows' Settings open; whether the wallpaper shows; whether startup apps come up once (not twice, not zero times); whether File Explorer windows open without Explorer taking the shell back.
-- [ ] **Settings without Explorer**: if Windows' Settings won't open, send Cascade's own links (Wi-Fi, Bluetooth, display…) to the classic Control Panel pages that still exist.
+- [ ] **Check the fixes on a real PC**: the wallpaper (and Wallpaper Engine on it), the Claude app opening, switching now both ways, desktops (windows hide and come back, nothing lost after a restart of Cascade).
 - [ ] **Desktop icons** on Cascade's desktop window.
-- [ ] **Virtual desktops of Cascade's own** (hiding and showing groups of windows), since Explorer's are gone.
 - [ ] **Win+P, Win+K, Win+. and Win+Space** stand-ins.
 - [ ] **Store apps' startup tasks** (the ones on Task Manager's Startup page that aren't in the registry or the Startup folder).
+- [ ] **Per-screen and slideshow wallpapers** (Cascade shows Windows' one picture on every screen).

@@ -1684,6 +1684,7 @@ impl App {
         use shellmode::Hotkey;
         match shellmode::on_hotkey(id) {
             Some(Hotkey::Search | Hotkey::Start) if self.cfg.launcher => self.toggle_launcher(),
+            Some(Hotkey::Snip) => crate::snip::start(self.instance),
             Some(Hotkey::App(n)) if self.cfg.dock => {
                 // The nth app on the taskbar the pointer is on, as Windows counts them.
                 let di = self.dock_under_cursor();

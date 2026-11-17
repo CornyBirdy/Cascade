@@ -810,8 +810,10 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
         }
         WM_SETTINGCHANGE => {
             // A new picture (SPI_SETDESKWALLPAPER), or Windows' desktop settings.
+            // (The section name is a string Windows copies across; checked
+            // for being a pointer at all, in case a program sent a number.)
             let section =
-                if lp.0 != 0 { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } else { String::new() };
+                if lp.0 > 0xFFFF { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } else { String::new() };
             if wp.0 as u32 == SPI_SETDESKWALLPAPER.0 || section.eq_ignore_ascii_case("Control Panel\\Desktop") {
                 reload_wallpaper();
             }
@@ -836,7 +838,7 @@ unsafe extern "system" fn wallpaper_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPA
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            desktop_menu(hwnd);
+            desktop_menu(GetAncestor(hwnd, GA_ROOT));
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, m, wp, lp),
@@ -1098,7 +1100,7 @@ pub enum Snap {
 }
 
 /// What a shortcut does. The ones that need Cascade's own windows (`Search`,
-/// `Start`, `App`) are handed back by `on_hotkey`; the rest are done here.
+/// `Start`, `App`, `Snip`) are handed back by `on_hotkey`; the rest are done here.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Hotkey {
     Files,
@@ -1208,13 +1210,14 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::Lock => shell::power(shell::Power::Lock),
         Hotkey::Snap(dir) => snap(dir),
         Hotkey::Screen(right) => move_screen(right),
-        Hotkey::Snip => shell::open("ms-screenclip:"),
+
         Hotkey::Magnifier => shell::open("magnify.exe"),
         Hotkey::TaskManager => shell::open("taskmgr.exe"),
         Hotkey::DeskStep(right) => crate::vdesk::step(right),
         Hotkey::DeskNew => crate::vdesk::create(true),
         Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
-        Hotkey::Search | Hotkey::Start | Hotkey::App(_) => return Some(key),
+        // Windows' Snipping Tool is a Store app: Cascade's own snip instead.
+        Hotkey::Search | Hotkey::Start | Hotkey::App(_) | Hotkey::Snip => return Some(key),
     }
     None
 }
@@ -1298,6 +1301,8 @@ pub fn open(target: &str, admin: bool) {
         } else {
             shell::open_direct(&target);
         }
+        // Some ways of opening things finish on the thread that asked, after it has returned.
+        std::thread::sleep(Duration::from_secs(5));
     });
 }
 

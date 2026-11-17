@@ -110,35 +110,40 @@ It doesn't watch the mouse at all: thin invisible strips along the shared edges 
 
 ## Shell mode (experimental)
 
-Normally Cascade runs beside Explorer: it hides the Windows taskbar and keeps the Win key from Windows' Start menu. Turn on **Run as the Windows shell** (Settings → General) and Windows starts Cascade *instead of* Explorer the next time you sign in. Explorer's taskbar and Start menu are then never made: there's nothing to hide and nothing to beat to the Win key. File Explorer windows open as usual; only Explorer's part as the shell is gone.
+Normally Cascade runs beside Explorer: it hides the Windows taskbar and keeps the Win key from Windows' Start menu. Turn on **Run as the Windows shell** (Settings → General) and Windows starts Cascade *instead of* Explorer. Explorer's taskbar and Start menu are then never made: there's nothing to hide and nothing to beat to the Win key. File Explorer windows open as usual; only Explorer's part as the shell is gone.
+
+**Switching without signing out.** Turning the setting on asks whether to switch now: say yes and Explorer closes (any File Explorer windows with it; its virtual desktops are put together into one first, so no window is left hidden) and Cascade takes over on the spot. Say no and it happens at your next sign-in. Turning it off while Cascade is the shell asks the same the other way round: Explorer comes back now and Cascade starts again beside it.
 
 As the shell, Cascade takes on the jobs Explorer had:
 
-- **The desktop:** your wallpaper, a click on it takes the focus off the window in front, and a right-click opens Cascade's menu. There are no desktop icons.
+- **The desktop and wallpaper:** Cascade draws Windows' own wallpaper setting (the picture and how it fits each screen; Span across them too). Right-click the desktop to **change the wallpaper** or how it **fits**, or for Task Manager and Cascade's settings. The desktop is laid out the way Explorer's is, so **Wallpaper Engine** and **Lively Wallpaper** find it and put their wallpaper on it as usual. There are no desktop icons.
+- **Virtual desktops of Cascade's own:** Task View (Win+Tab) with its strip of desktops (+ for a new one, × to close one, drag a window onto one to move it), the taskbar's desktops widget, Ctrl+Win+Left / Right to switch, Ctrl+Win+D for a new desktop and Ctrl+Win+F4 to close this one. Going to another desktop hides the windows of the one you leave and shows those of the one you go to (Windows' own desktops are part of Explorer). Hidden windows are kept in a list: when Cascade closes they all come back, and if it ever stops without closing, the guard shows them.
 - **Screen space:** maximised windows stop above Cascade's taskbar, and minimised windows go to it.
 - **The tray:** apps' notification-area icons go straight to Cascade's taskbar.
-- **Shortcuts Explorer answered:** Win+E (File Explorer), Win+R (Run), Win+D (show desktop, and back), Win+M and Win+Shift+M (minimise all, restore), Win+I (Settings), Win+L (lock), Win+S and Win+Q (search), Ctrl+Esc (Start), Win+Left / Right (snap to that half; again to go on to the next screen), Win+Up (maximise), Win+Down (restore, un-snap or minimise), Win+Shift+Left / Right (move to the next screen), Win+1 to Win+9 (the first to ninth app on the taskbar), Win+Shift+S (snip), Win++ (Magnifier). Win+X, Win+V, Win+N, Win+A, Win+Tab, Alt+Tab and the Win key are Cascade's already.
+- **Shortcuts Explorer answered:** Win+E (File Explorer), Win+R (Run), Win+D (show desktop, and back), Win+M and Win+Shift+M (minimise all, restore), Win+I (Control Panel; see below), Win+L (lock), Win+S and Win+Q (search), Ctrl+Esc (Start), Win+Left / Right (snap to that half; again to go on to the next screen), Win+Up (maximise), Win+Down (restore, un-snap or minimise), Win+Shift+Left / Right (move to the next screen), Win+1 to Win+9 (the first to ninth app on the taskbar), Win++ (Magnifier). Win+X, Win+V, Win+N, Win+A, Win+Tab, Alt+Tab and the Win key are Cascade's already.
+- **Snips (Win+Shift+S):** Windows' Snipping Tool is a Store app (see below), so Cascade snips itself: the screens freeze and dim; drag over what you want, click for the whole screen under the pointer, Enter for every screen, Esc to leave it. The snip goes on the clipboard and into Pictures\Screenshots.
 - **Startup apps:** the programs set to start with Windows (the registry's Run entries and the Startup folders) are started a moment after you sign in, less those turned off on Task Manager's Startup page.
-- **Notifications:** a new one shows in the notch for a moment (Windows' own pop-ups are Explorer's); the list is in the widgets panel as before.
 - **Volume and media keys:** the keyboard's volume up, down and mute, and play / pause, next and previous, which Windows hands to the shell when no program takes them.
+- **Notifications:** a new one shows in the notch for a moment (Windows' own pop-ups are Explorer's); the list is in the widgets panel as before.
 - **Fullscreen apps:** Cascade watches for a window covering a whole screen itself, and gets out of its way.
 
-**The safety net.** What Windows starts is a tiny second copy of Cascade (the guard) with no windows. It starts Cascade proper and starts it again if it ever goes away. If Cascade fails three times in a row, the guard turns shell mode off and starts Explorer, and Cascade says so the next time it runs. The first sign-in with shell mode on is also a trial: a box asks whether to keep it, and if nobody says yes within two minutes (because nothing can be seen or clicked, say), shell mode turns itself off and Explorer comes back.
+**Apps from the Microsoft Store, and Windows' Settings.** Windows opens Store-style apps through Explorer, so as the shell Cascade tries the other ways in, in turn: Windows' activation itself (in case it answers), the app's own command (its execution alias, as a terminal would), and for desktop programs that come in a package (the Claude app, Windows Terminal and many others) the program itself, straight from its package. Apps that are Store apps through and through (Calculator, Photos, Windows' own **Settings**) can only be opened by Explorer: the notch says so. Settings links (Win+I, the Start menu, Controls' Wi-Fi and Bluetooth links) open the nearest classic Control Panel page instead.
+
+**The safety net.** What Windows starts is a tiny second copy of Cascade (the guard) with no windows. It starts Cascade proper and starts it again if it ever goes away. If Cascade fails three times in a row, the guard turns shell mode off and starts Explorer, and Cascade says so the next time it runs. The first sign-in (or switch) with shell mode on is also a trial: a box asks whether to keep it, and if nobody says yes within two minutes (because nothing can be seen or clicked, say), shell mode turns itself off and Explorer comes back.
 
 If you're ever left with a blank screen anyway: **Ctrl+Shift+Esc** opens Task Manager → *Run new task* → type `%LOCALAPPDATA%\Programs\Cascade\cascade.exe --shell-off` → OK. That turns shell mode off and starts Explorer. (By hand, it's the `Shell` value under `HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Winlogon`: delete it and sign in again.) Shell mode is set for your account only, so another account on the PC always has Explorer.
 
-**Getting Explorer back.** Right-click the taskbar, notch or desktop → **Quit to Explorer** hands over for the rest of the session (shell mode stays on for the next sign-in). Turning the setting off takes effect at the next sign-in.
+**Getting Explorer back.** Right-click the taskbar or notch → **Quit to Explorer** hands over for the rest of the session (shell mode stays on for the next sign-in). Or turn the setting off, and say yes to going back now.
 
 **What doesn't work without Explorer.** These are parts of Explorer itself, not things Cascade hides:
 
-- **Store-style apps may not open**, Windows' own **Settings** among them. Classic programs (browsers, games, Steam, Discord, most things) are unaffected. When Cascade opens a Settings page (Win+I, the Start menu's Settings, the Wi-Fi and Bluetooth links) and no Settings window has come up five seconds later, it opens the nearest classic Control Panel page instead.
+- **Store apps through and through**, and Windows' **Settings**, as above.
 - **The Win key over admin apps** (Task Manager, installers) does nothing unless *Work over admin apps* is on (Settings → Start menu): beside Explorer, Windows' own Start menu at least opened there.
-- **Virtual desktops**: there is one desktop, and Task View shows only its windows.
 - **Windows' quick settings, notification centre, Win+. emoji panel, Win+P and Win+K**. Cascade's Controls and widgets panel stand in for the first two.
 - **Snap layouts** (the grid on the maximise button) and Win+Z.
 - **Desktop icons**, and apps that start with Windows through the Store's own startup list.
 
-It's experimental: none of this has been through the testing the rest of Cascade has. `cascade.log` (Settings → About → Data folder) records what shell mode did at each start, in lines beginning *shell mode:* and *shell guard:*.
+It's experimental: `cascade.log` (Settings → About → Data folder) records what shell mode did, in lines beginning *shell mode:*, *shell guard:*, *desktops:*, *wallpaper:* and *snip:*.
 
 ## Settings
 

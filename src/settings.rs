@@ -444,7 +444,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "shell_mode",
                 "Run as the Windows shell",
-                "Windows starts Cascade in Explorer's place when you sign in, so the Windows taskbar and Start menu never exist. From your next sign-in.",
+                "Cascade in Explorer's place, so the Windows taskbar and Start menu never exist. Turning it on offers to switch now, without signing out.",
                 Toggle,
             ),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
@@ -1089,15 +1089,15 @@ fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, b
             true,
         ),
         "shell_mode" if on("shell_active") && !on("shell_mode") => (
-            "Off from your next sign-in. Cascade is still the shell until you sign out; for Explorer now, right-click the taskbar > Quit to Explorer.",
+            "Off from your next sign-in. For Explorer now: turn this on and off again and say yes, or right-click the taskbar > Quit to Explorer.",
             false,
         ),
         "shell_mode" if on("shell_active") => (
-            "Cascade is the shell this session: Explorer's taskbar and Start menu don't exist. Store apps and Windows' Settings may not open. For Explorer now: right-click the taskbar > Quit to Explorer.",
+            "Cascade is the shell: Explorer's taskbar and Start menu don't exist. Store apps and Windows' Settings need Explorer. Turning this off offers to bring Explorer back now.",
             false,
         ),
         "shell_mode" if on("shell_mode") => (
-            "On from your next sign-in. Store apps, Windows' Settings and virtual desktops need Explorer and may not work. If Cascade fails to start, Explorer comes back by itself.",
+            "On from your next sign-in. Store apps and Windows' Settings need Explorer. If Cascade fails to start, Explorer comes back by itself.",
             true,
         ),
         "shell_mode" if !on("dock") || !on("launcher") => (
