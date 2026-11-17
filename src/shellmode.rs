@@ -137,6 +137,8 @@ pub fn set_registered(on: bool) -> bool {
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Quit was chosen: Explorer takes over once Cascade's windows are gone.
 static QUIT: AtomicBool = AtomicBool::new(false);
+/// Cascade's windows are gone and Explorer is being started (see `on_exit`).
+static HANDING_OVER: AtomicBool = AtomicBool::new(false);
 static DESKTOP: AtomicIsize = AtomicIsize::new(0);
 /// How minimised windows were arranged before Cascade hid them (-1: not changed).
 static OLD_ARRANGE: AtomicI32 = AtomicI32::new(-1);
@@ -378,7 +380,12 @@ pub fn guard() {
         match intent {
             Some(Intent::SessionEnd) => return,
             Some(Intent::Quit) => {
-                // Cascade starts Explorer itself on its way out; this is in case it couldn't.
+                // Cascade starts Explorer itself on its way out: give its
+                // taskbar a while to come up, and start it from here if it doesn't.
+                let until = Instant::now() + Duration::from_secs(20);
+                while Instant::now() < until && !explorer_is_shell() {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
                 if !explorer_is_shell() {
                     start_explorer(true);
                 }
@@ -417,16 +424,24 @@ pub fn guard() {
     }
 }
 
+fn guard_running() -> bool {
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    unsafe {
+        match OpenMutexW(SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE), false, GUARD_MUTEX) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 /// Starts the guard if this shell-mode Cascade has none (it was started some
 /// other way: Setup, a full restart). The guard finds this copy and waits on it.
 fn ensure_guard() {
-    unsafe {
-        let Ok(mutex) = CreateMutexW(None, false, GUARD_MUTEX) else { return };
-        let running = GetLastError() == ERROR_ALREADY_EXISTS;
-        let _ = CloseHandle(mutex);
-        if running {
-            return;
-        }
+    if guard_running() {
+        return;
     }
     if let Ok(exe) = std::env::current_exe() {
         let ok = std::process::Command::new(exe).arg("--shell").spawn().is_ok();
@@ -532,12 +547,25 @@ fn trial() {
         // Quit, as from the menu: Explorer takes over once Cascade's windows are gone.
         set_intent(Intent::Quit);
         msg::post(WM_CLOSE, 0, 0);
+        // If Cascade is too stuck even to close, end it from here: the guard
+        // (or, with none, a copy started for the purpose) brings Explorer back.
+        std::thread::sleep(Duration::from_secs(10));
+        if !HANDING_OVER.load(Ordering::Acquire) {
+            config::log("shell mode: Cascade didn't close when asked; ending it");
+            if !guard_running() {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--shell-off").spawn();
+                }
+            }
+            std::process::exit(0);
+        }
     });
 }
 
 /// Called once Cascade's windows are gone: after Quit, Explorer takes over.
 pub fn on_exit() {
     if active() && QUIT.load(Ordering::Acquire) {
+        HANDING_OVER.store(true, Ordering::Release);
         start_explorer(true);
     }
 }
