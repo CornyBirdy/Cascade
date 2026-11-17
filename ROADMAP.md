@@ -5,7 +5,7 @@ Features agreed on but not built yet. Tick them off (and move the notes to `CHAN
 ## Quick fixes
 
 - [ ] **Flashing app buttons:** when an app asks for attention, its taskbar button flashes, as on Windows' own taskbar. The shell hook is already there for windows opening and closing (`HSHELL_FLASH` is the missing message).
-- [ ] **Win+1 … Win+9:** open or switch to the 1st … 9th app on Cascade's taskbar. Also Win+T (step through the taskbar's apps) and Win+B (the tray).
+- [ ] **Win+1 … Win+9:** open or switch to the 1st … 9th app on Cascade's taskbar. Also Win+T (step through the taskbar's apps) and Win+B (the tray). (Win+1 … 9 already work in shell mode, where the keys are Cascade's own; beside Explorer they still go to the hidden Windows taskbar.)
 - [ ] **Installed apps entry:** Setup writes an uninstall entry, so Cascade shows in Settings → Apps → Installed apps and can be removed from there.
 
 ## What the real taskbar has
@@ -25,3 +25,14 @@ Features agreed on but not built yet. Tick them off (and move the notes to `CHAN
 ## Not possible as things stand
 
 - **Progress bars, overlay icons and badge counts on app buttons.** Apps hand these to Explorer directly; another program can't read them without running code inside Explorer.
+
+## Shell mode (Cascade in Explorer's place)
+
+Built, but untested on a real PC. To do once it has been tried:
+
+- [ ] **Try it**: sign in with it on, and note what breaks. The guesses to check first: whether Store-style apps and Windows' Settings open; whether the wallpaper shows; whether startup apps come up once (not twice, not zero times); whether File Explorer windows open without Explorer taking the shell back.
+- [ ] **Settings without Explorer**: if Windows' Settings won't open, send Cascade's own links (Wi-Fi, Bluetooth, display…) to the classic Control Panel pages that still exist.
+- [ ] **Desktop icons** on Cascade's desktop window.
+- [ ] **Virtual desktops of Cascade's own** (hiding and showing groups of windows), since Explorer's are gone.
+- [ ] **Win+P, Win+K, Win+. and Win+Space** stand-ins.
+- [ ] **Store apps' startup tasks** (the ones on Task Manager's Startup page that aren't in the registry or the Startup folder).

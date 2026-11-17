@@ -38,6 +38,7 @@ mod quickmenu;
 mod radios;
 mod settings;
 mod shell;
+mod shellmode;
 mod smart;
 mod spring;
 mod superdrag;
@@ -104,6 +105,8 @@ pub mod msg {
     pub const WINDOW_MOVED: u32 = WM_APP + 32;
     /// The windows on each virtual desktop (a boxed `Vec<Vec<desktops::DeskWindow>>`).
     pub const DESK_APPS: u32 = WM_APP + 33;
+    /// Shell mode: Cascade's desktop window was clicked and has the focus.
+    pub const DESKTOP: u32 = WM_APP + 34;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -128,6 +131,12 @@ fn main() {
         helper::run();
         return;
     }
+    // What Windows starts in shell mode: the guard, which starts Cascade
+    // proper and keeps it running (see `shellmode`).
+    if std::env::args().any(|a| a == "--shell") {
+        shellmode::guard();
+        return;
+    }
     // After an update the new copy starts while the old one is still
     // shutting down, so give it a few seconds to let go.
     let updated = std::env::args().any(|a| a == "--updated");
@@ -135,14 +144,22 @@ fn main() {
     while !shell::claim_single_instance() {
         tries -= 1;
         if tries == 0 {
+            // In shell mode a second copy at sign-in is routine (the guard's
+            // and the sign-in task's both start): only one asked for by name
+            // opens the settings.
+            shellmode::detect();
+            let quiet = shellmode::active() && !std::env::args().any(|a| a == "--settings");
             // Already running (e.g. "Cascade Settings" from the Start menu):
             // ask that copy to show its settings.
-            shell::signal_running_instance();
+            if !quiet {
+                shell::signal_running_instance();
+            }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     update::cleanup();
+    shellmode::detect();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         // For dropping files on the taskbar (see `drop`).
@@ -155,4 +172,6 @@ fn main() {
             MessageBoxW(None, &HSTRING::from(format!("Cascade could not start:\n{e}")), w!("Cascade"), MB_ICONERROR);
         }
     }
+    // Shell mode, after Quit: Explorer takes over now that Cascade's windows are gone.
+    shellmode::on_exit();
 }

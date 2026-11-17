@@ -441,6 +441,12 @@ fn rows(section: usize) -> Vec<Row> {
     match section {
         0 => vec![
             row("autostart", "Start with Windows", "Launch Cascade when you sign in.", Toggle),
+            row(
+                "shell_mode",
+                "Run as the Windows shell",
+                "Windows starts Cascade in Explorer's place when you sign in, so the Windows taskbar and Start menu never exist. From your next sign-in.",
+                Toggle,
+            ),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
             row(
                 "super_drag",
@@ -983,6 +989,8 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
         }
         (0, "alt_tab_style") => on("alt_tab"),
+        // As the shell, Windows starts Cascade itself.
+        (0, "autostart") => !on("shell_active"),
         (0, "battery_saver") => on("battery"),
         // Notch.
         (2, "notch") => true,
@@ -1080,6 +1088,18 @@ fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, b
             "Windows' startup list runs Cascade late. Turn this off and on again to start it as you sign in instead (Windows asks for permission once).",
             true,
         ),
+        "shell_mode" if on("shell_active") => (
+            "Cascade is the shell: Explorer's taskbar and Start menu don't exist this session. Store apps and Windows' own Settings may not open without Explorer. Turn off to get Explorer back from your next sign-in, or right-click the taskbar > Quit to Explorer for now.",
+            false,
+        ),
+        "shell_mode" if on("shell_mode") => (
+            "On from your next sign-in. Store apps, Windows' own Settings, virtual desktops and Windows' notification pop-ups need Explorer and may not work; if Cascade fails to start, Explorer comes back by itself.",
+            true,
+        ),
+        "shell_mode" if !on("dock") || !on("launcher") => (
+            "Windows starts Cascade in Explorer's place when you sign in. Turn on Cascade's taskbar and Start menu first: as the shell they are the only ones there are.",
+            true,
+        ),
         "shortcut_win_n" if !on("dock") => (taskbar_off, true),
         "shortcut_win_a" if !on("notch") => {
             ("The notch's Controls instead of Windows' quick settings. The notch is off, so they come down on their own.", false)
@@ -1123,7 +1143,7 @@ enum Hit {
 
 /// The default for `key`, if the row should offer a reset button.
 fn default_of(key: &str) -> Option<String> {
-    if matches!(key, "autostart" | "github_token" | "admin_helper") {
+    if matches!(key, "autostart" | "shell_mode" | "github_token" | "admin_helper") {
         return None;
     }
     let d = Config::default().get(key);

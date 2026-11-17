@@ -108,6 +108,34 @@ Turn on **Match the pointer across screens** (Settings → Screens) if you have 
 
 It doesn't watch the mouse at all: thin invisible strips along the shared edges let every click through, and Windows only asks them anything while the pointer is inside one. There's nothing running in between, even with a very fast mouse. If the pointer is blocked where your screens really do overlap, drag them so they overlap more in Windows' display settings.
 
+## Shell mode (experimental)
+
+Normally Cascade runs beside Explorer: it hides the Windows taskbar and keeps the Win key from Windows' Start menu. Turn on **Run as the Windows shell** (Settings → General) and Windows starts Cascade *instead of* Explorer the next time you sign in. Explorer's taskbar and Start menu are then never made: there's nothing to hide and nothing to beat to the Win key. File Explorer windows open as usual; only Explorer's part as the shell is gone.
+
+As the shell, Cascade takes on the jobs Explorer had:
+
+- **The desktop:** your wallpaper, a click on it takes the focus off the window in front, and a right-click opens Cascade's menu. There are no desktop icons.
+- **Screen space:** maximised windows stop above Cascade's taskbar, and minimised windows go to it.
+- **The tray:** apps' notification-area icons go straight to Cascade's taskbar.
+- **Shortcuts Explorer answered:** Win+E (File Explorer), Win+R (Run), Win+D (show desktop, and back), Win+M and Win+Shift+M (minimise all, restore), Win+I (Settings), Win+L (lock), Win+S and Win+Q (search), Ctrl+Esc (Start), Win+Left / Right (snap to that half; again to go on to the next screen), Win+Up (maximise), Win+Down (restore, un-snap or minimise), Win+Shift+Left / Right (move to the next screen), Win+1 to Win+9 (the first to ninth app on the taskbar), Win+Shift+S (snip), Win++ (Magnifier). Win+X, Win+V, Win+N, Win+A, Win+Tab, Alt+Tab and the Win key are Cascade's already.
+- **Startup apps:** the programs set to start with Windows (the registry's Run entries and the Startup folders) are started a moment after you sign in, less those turned off on Task Manager's Startup page.
+- **Notifications:** a new one shows in the notch for a moment (Windows' own pop-ups are Explorer's); the list is in the widgets panel as before.
+- **Fullscreen apps:** Cascade watches for a window covering a whole screen itself, and gets out of its way.
+
+**The safety net.** What Windows starts is a tiny second copy of Cascade (the guard) with no windows. It starts Cascade proper and starts it again if it ever goes away. If Cascade fails three times in a row, the guard turns shell mode off and starts Explorer, and Cascade says so the next time it runs. If you're ever left with a blank screen anyway: **Ctrl+Shift+Esc** opens Task Manager → *Run new task* → `explorer.exe`. Shell mode is set for your account only, so another account, or Safe Mode, always has Explorer.
+
+**Getting Explorer back.** Right-click the taskbar, notch or desktop → **Quit to Explorer** hands over for the rest of the session (shell mode stays on for the next sign-in). Turning the setting off takes effect at the next sign-in.
+
+**What doesn't work without Explorer.** These are parts of Explorer itself, not things Cascade hides:
+
+- **Store-style apps may not open**, Windows' own **Settings** among them. Classic programs (browsers, games, Steam, Discord, most things) are unaffected.
+- **Virtual desktops**: there is one desktop, and Task View shows only its windows.
+- **Windows' quick settings, notification centre, Win+. emoji panel, Win+P and Win+K**. Cascade's Controls and widgets panel stand in for the first two.
+- **Snap layouts** (the grid on the maximise button) and Win+Z.
+- **Desktop icons**, and apps that start with Windows through the Store's own startup list.
+
+It's experimental: none of this has been through the testing the rest of Cascade has. `cascade.log` (Settings → About → Data folder) records what shell mode did at each start, in lines beginning *shell mode:* and *shell guard:*.
+
 ## Settings
 
 Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. The box at the top of the sidebar searches every page by a setting's name, description or page; a result works just like the setting on its own page. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Settings that wouldn't do anything as things are set up stay out of the way: the lip's length shows only in Lip style, the notch's width only in Notch style, the custom colour only with Custom picked, the Start menu's parts only with Cascade's Start menu on, and so on. They come back as soon as they'd make a difference. When one needs something on another page (Win+N needs Cascade's taskbar), its description says so, in amber. Starting Cascade again while it's already running also opens Settings.

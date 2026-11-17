@@ -109,6 +109,11 @@ fn session_key() -> HSTRING {
 
 /// The desktops as they are now (one, if Windows has never had more).
 pub fn read() -> Desktops {
+    // Virtual desktops are Explorer's: as the shell (see `shellmode`) there
+    // is one desktop, and the registry only remembers the last Explorer session's.
+    if crate::shellmode::active() {
+        return Desktops::default();
+    }
     let key = HSTRING::from(KEY);
     let Some(ids) = binary(&key, w!("VirtualDesktopIDs")).filter(|b| b.len() >= 16) else {
         return Desktops::default();

@@ -59,6 +59,7 @@ use crate::quickmenu::{self, QuickMenu};
 use crate::radios::{self, Kind, RadioCmd, Radios};
 use crate::settings::{Change, Settings};
 use crate::shell::{self, AppCmd, MenuCmd, MenuState, PinCmd, Tray};
+use crate::shellmode;
 use crate::spring::Spring;
 use crate::switcher::Switcher;
 use crate::sysmon::{self, Readings, StatsCmd};
@@ -113,6 +114,9 @@ const TIMER_WAKE2: usize = 25;
 /// While the notch is hidden for a fullscreen app: checks one is still there
 /// (see `check_fullscreen`).
 const TIMER_FULLSCREEN: usize = 26;
+/// Shell mode: looks now and then whether a fullscreen app is in front (one
+/// that went fullscreen without any window changing hands says nothing).
+const TIMER_SHELLPOLL: usize = 27;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -381,6 +385,11 @@ struct App {
     notif_tx: Sender<NotifCmd>,
     /// Windows' notifications, for the widgets panel.
     notifs: notifications::Snapshot,
+    /// Shell mode: the notifications in the list at the last reading (None
+    /// before the first), to tell which are new (see `announce_notifs`).
+    notif_ids: Option<Vec<u32>>,
+    /// Shell mode: counts `TIMER_SHELLPOLL`'s ticks.
+    shell_ticks: u32,
     volume: Option<Volume>,
     vol: (f32, bool),
     brightness: u32,
@@ -662,6 +671,10 @@ fn right_click(hwnd: HWND) {
         RightClick::General => {
             let Some(state) = with_app(|a| a.menu_state()) else { return };
             let cmd = shell::show_menu(hwnd, state);
+            if cmd == MenuCmd::Quit {
+                // Shell mode: Explorer takes over once Cascade has gone.
+                shellmode::set_intent(shellmode::Intent::Quit);
+            }
             if cmd == MenuCmd::Quit || (cmd == MenuCmd::Restart && shell::spawn_restart()) {
                 if let Some(main) = with_app(|a| a.hwnd) {
                     unsafe {
@@ -737,6 +750,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::AUTOSTART => {
             with_app(|a| a.on_late_autostart());
+            return LRESULT(0);
+        }
+        WM_HOTKEY => {
+            with_app(|a| a.on_hotkey(wp.0 as i32));
+            return LRESULT(0);
+        }
+        msg::DESKTOP => {
+            with_app(|a| a.on_desktop_focus());
             return LRESULT(0);
         }
         msg::APPS => {
@@ -854,6 +875,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         msg::NOTIFS => {
             let n = Box::from_raw(lp.0 as *mut notifications::Snapshot);
             with_app(move |a| {
+                a.announce_notifs(&n);
                 a.notifs = *n;
                 a.widgets.dirty = true;
             });
@@ -894,6 +916,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         WM_ENDSESSION => {
             if wp.0 != 0 {
+                shellmode::set_intent(shellmode::Intent::SessionEnd);
                 with_app(|a| a.shutdown());
             }
             return LRESULT(0);
@@ -911,6 +934,9 @@ fn setting_value(cfg: &Config, key: &str) -> String {
     match key {
         "autostart" => shell::autostart_enabled().to_string(),
         "autostart_late" => shell::autostart_late().to_string(),
+        // Kept in Windows' own settings, not Cascade's (see `shellmode`).
+        "shell_mode" => shellmode::registered().to_string(),
+        "shell_active" => shellmode::active().to_string(),
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
         _ => cfg.get(key),
@@ -1164,6 +1190,8 @@ impl App {
             media_tx,
             notif_tx: notifications::spawn(),
             notifs: notifications::Snapshot::default(),
+            notif_ids: None,
+            shell_ticks: 0,
             volume,
             vol,
             brightness: 0,
@@ -1253,7 +1281,13 @@ impl App {
             shell::autostart_kind()
         ));
         shell::hint_late_autostart();
-        if !ready {
+        if shellmode::active() {
+            // Cascade is the shell: there's no Explorer taskbar to wait for.
+            shellmode::init(self.instance, self.hwnd);
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_SHELLPOLL, 2000, None);
+            }
+        } else if !ready {
             // Signed in a moment ago: Explorer is still on its way. Its
             // TaskbarCreated says when it's up; this is in case that's missed.
             unsafe {
@@ -1288,6 +1322,13 @@ impl App {
             } else {
                 helper::start();
             }
+        }
+        // The guard turned shell mode off (Cascade kept failing as the shell): say so.
+        if let Some(note) = shellmode::take_note() {
+            config::log(&format!("shell mode: {note}"));
+            std::thread::spawn(move || unsafe {
+                MessageBoxW(None, &windows::core::HSTRING::from(note), w!("Cascade"), MB_OK | MB_ICONWARNING);
+            });
         }
     }
 
@@ -1328,6 +1369,7 @@ impl App {
             shell::restore_taskbar();
             self.taskbar_hidden = false;
         }
+        shellmode::shutdown(self.hwnd);
     }
 
     fn update_display(&mut self) {
@@ -1472,7 +1514,8 @@ impl App {
     /// sign-in can stop Explorer starting as the desktop, and it would have
     /// nothing to pass the icons on to anyway. TaskbarCreated tries again.
     fn start_systray(&mut self) {
-        if self.systray.hwnd.is_some() || !shell::shell_ready() {
+        // (As the shell, Cascade's tray window is the only one there is.)
+        if self.systray.hwnd.is_some() || !(shell::shell_ready() || shellmode::active()) {
             return;
         }
         self.systray.hwnd = systray::start(self.instance);
@@ -1522,6 +1565,79 @@ impl App {
         if self.fullscreen_misses >= 2 {
             config::log("fullscreen: no fullscreen app is in front any more; showing the notch again");
             self.set_fullscreen(false);
+        }
+    }
+
+    /// Shell mode: nobody says when a fullscreen app comes or goes (Explorer
+    /// tells its app bars), so Cascade looks at the window in front itself,
+    /// when windows change and every couple of seconds.
+    fn sync_fullscreen(&mut self) {
+        if !shellmode::active() {
+            return;
+        }
+        let screen = shell::fullscreen_screen();
+        let mut changed = false;
+        for d in &mut self.screens {
+            let on = screen == Some(d.monitor());
+            changed |= d.fullscreen != on;
+            d.fullscreen = on;
+        }
+        if changed {
+            self.show_docks();
+        }
+        let main = screen == Some(self.monitor);
+        if main != self.fullscreen {
+            self.set_fullscreen(main);
+        }
+    }
+
+    /// Shell mode: a notification that wasn't in the list last time shows in
+    /// the notch, where Windows would have popped it up (the newest, if a few
+    /// came at once). The first reading only notes what's already there.
+    fn announce_notifs(&mut self, n: &notifications::Snapshot) {
+        if !shellmode::active() || n.access != notifications::Access::Allowed {
+            return;
+        }
+        let ids: Vec<u32> = n.items.iter().map(|i| i.id).collect();
+        if let Some(known) = self.notif_ids.replace(ids) {
+            if let Some(new) = n.items.iter().find(|i| !known.contains(&i.id)) {
+                let from =
+                    if new.app.is_empty() || new.app == new.title { String::new() } else { format!("{}: ", new.app) };
+                let body = if new.body.is_empty() { String::new() } else { format!(" \u{2014} {}", new.body) };
+                let text: String = format!("{from}{}{body}", new.title).chars().take(90).collect();
+                self.notify(text, theme::accent(), false);
+            }
+        }
+    }
+
+    /// Shell mode: the desktop was clicked and has the focus now. Nothing
+    /// else says so (the window is Cascade's own), so the taskbars look again.
+    fn on_desktop_focus(&mut self) {
+        self.sync_fullscreen();
+        if self.cfg.dock {
+            unsafe {
+                SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 60, None);
+            }
+        }
+    }
+
+    /// A shortcut Cascade answers as the shell (see `shellmode::on_hotkey`).
+    fn on_hotkey(&mut self, id: i32) {
+        use shellmode::Hotkey;
+        match shellmode::on_hotkey(id) {
+            Some(Hotkey::Search | Hotkey::Start) if self.cfg.launcher => self.toggle_launcher(),
+            Some(Hotkey::App(n)) if self.cfg.dock => {
+                // The nth app on the taskbar the pointer is on, as Windows counts them.
+                let di = self.dock_under_cursor();
+                let shown: Vec<usize> = {
+                    let d = self.dock_mut(di);
+                    (0..d.apps.len()).filter(|&i| d.apps[i].pinned || !d.apps[i].windows.is_empty()).collect()
+                };
+                if let Some(&i) = shown.get(n) {
+                    self.dock_mut(di).activate(i);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2673,6 +2789,19 @@ impl App {
             TIMER_TICK => self.dirty = true,
             TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
             TIMER_FULLSCREEN => self.check_fullscreen(),
+            TIMER_SHELLPOLL => {
+                self.sync_fullscreen();
+                // Windows' notification pop-ups are Explorer's: read the list
+                // every few seconds and show what's new in the notch.
+                self.shell_ticks = self.shell_ticks.wrapping_add(1);
+                if self.shell_ticks.is_multiple_of(2)
+                    && self.cfg.widgets_notifications
+                    && self.shown
+                    && !self.widgets.open
+                {
+                    let _ = self.notif_tx.send(NotifCmd::Refresh);
+                }
+            }
             TIMER_PASTE => shell::paste(),
             TIMER_CAL => {
                 self.announce_events();
@@ -2746,6 +2875,9 @@ impl App {
         }
         if event == EVENT_OBJECT_SHOW {
             return; // only watched for the taskbar above
+        }
+        if event == EVENT_SYSTEM_FOREGROUND || event == EVENT_SYSTEM_MOVESIZEEND || event == EVENT_SYSTEM_MINIMIZEEND {
+            self.sync_fullscreen();
         }
         // Windows opened its own Start menu: the Win key reached it without
         // passing our hook (an elevated app such as Task Manager was in
@@ -2835,6 +2967,7 @@ impl App {
     fn on_shell(&mut self, code: u32, hwnd: HWND) {
         const HSHELL_WINDOWCREATED: u32 = 1;
         const HSHELL_WINDOWDESTROYED: u32 = 2;
+        self.sync_fullscreen();
         if !self.cfg.dock {
             return;
         }
@@ -2964,6 +3097,7 @@ impl App {
             autostart: shell::autostart_enabled(),
             autostart_late: shell::autostart_late(),
             flyout_hidden: self.cfg.hide_windows_flyout,
+            shell: shellmode::active(),
         }
     }
 
@@ -3249,6 +3383,9 @@ impl App {
     fn apply_change(&mut self, change: Change) {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Set("shell_mode", v) => {
+                shellmode::set_registered(v == "true");
+            }
             Change::Many(values) => {
                 if values.iter().any(|(k, v)| self.cfg.get(k) != *v) {
                     for (k, v) in &values {
@@ -3747,7 +3884,9 @@ impl App {
         if self.just_closed() {
             return; // that click already closed the notch
         }
-        if self.cfg.status_click != "notch" || !self.open_controls() {
+        // (As the shell there are no Windows quick settings to open instead.)
+        let windows = self.cfg.status_click != "notch" && !shellmode::active();
+        if windows || !self.open_controls() {
             shell::open("ms-actioncenter:controlcenter/&showFooter=true");
         }
     }
@@ -4384,6 +4523,9 @@ impl App {
             }
             Action::Search if self.cfg.launcher => self.open_launcher(),
             Action::Search => shell::win_combo(b'S' as u16),
+            // As the shell, these two are Cascade's own to do.
+            Action::Run if shellmode::active() => shellmode::run_dialog(),
+            Action::Desktop if shellmode::active() => shellmode::show_desktop(),
             Action::Run => shell::open("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}"),
             Action::Desktop => shell::win_combo(b'D' as u16),
             Action::Power(p) => shell::power(p),

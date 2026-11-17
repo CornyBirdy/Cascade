@@ -36,6 +36,10 @@ pub fn claim_single_instance() -> bool {
 /// tells us (ABN_FULLSCREENAPP) whenever a fullscreen app opens or closes,
 /// which is exactly how the taskbar knows to get out of the way.
 pub fn register_appbar(hwnd: HWND) {
+    // Explorer keeps the app bars; as the shell, Cascade looks for fullscreen apps itself.
+    if crate::shellmode::active() {
+        return;
+    }
     let mut abd = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
@@ -46,6 +50,10 @@ pub fn register_appbar(hwnd: HWND) {
 }
 
 pub fn unregister_appbar(hwnd: HWND) {
+    if crate::shellmode::active() {
+        crate::shellmode::release(hwnd);
+        return;
+    }
     let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
     unsafe { SHAppBarMessage(ABM_REMOVE, &mut abd) };
 }
@@ -55,6 +63,9 @@ pub fn unregister_appbar(hwnd: HWND) {
 /// would keep Cascade hidden until the next fullscreen change (that can be
 /// minutes, or never): so a window in front has to cover its screen too.
 pub fn fullscreen_now() -> bool {
+    if crate::shellmode::active() {
+        return fullscreen_screen().is_some();
+    }
     match unsafe { SHQueryUserNotificationState() } {
         Ok(QUNS_PRESENTATION_MODE) => true,
         Ok(QUNS_BUSY) | Ok(QUNS_RUNNING_D3D_FULL_SCREEN) => foreground_covers_screen(),
@@ -62,8 +73,42 @@ pub fn fullscreen_now() -> bool {
     }
 }
 
+/// The screen a fullscreen app in front fills, if one does: a window (not the
+/// desktop, not one of Cascade's) that reaches every edge of its screen. A
+/// maximised window with its frame on doesn't count, even where it reaches
+/// every edge too (an auto-hidden taskbar leaves it the whole screen). In
+/// shell mode this is how Cascade knows; otherwise Explorer says.
+pub fn fullscreen_screen() -> Option<RECT> {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() || is_desktop(fg) {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+            return None;
+        }
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        if IsZoomed(fg).as_bool() && style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetWindowRect(fg, &mut r).ok()?;
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return None;
+        }
+        let m = mi.rcMonitor;
+        (r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom).then_some(m)
+    }
+}
+
 /// Whether the window in front (not the desktop) covers its whole screen.
 pub fn foreground_covers_screen() -> bool {
+    if crate::shellmode::active() {
+        return fullscreen_screen().is_some();
+    }
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || fg == GetShellWindow() {
@@ -387,7 +432,8 @@ unsafe fn class_is(h: HWND, name: &str) -> bool {
 
 /// The desktop itself (what Show desktop, Win+D, puts in front).
 pub fn is_desktop(hwnd: HWND) -> bool {
-    unsafe { hwnd == GetShellWindow() || class_is(hwnd, "Progman") || class_is(hwnd, "WorkerW") }
+    crate::shellmode::desktop() == Some(hwnd)
+        || unsafe { hwnd == GetShellWindow() || class_is(hwnd, "Progman") || class_is(hwnd, "WorkerW") }
 }
 
 pub fn is_taskbar(hwnd: HWND) -> bool {
@@ -532,6 +578,11 @@ pub fn restore_taskbar() {
 /// `current` is the rect granted last time; if nothing changed the shell is
 /// left alone, so position-change notifications can't feed back into a loop.
 pub fn reserve_bottom(hwnd: HWND, monitor: RECT, height: i32, registered: &mut bool, current: Option<RECT>) -> RECT {
+    // As the shell there's no Explorer to ask: Cascade keeps the space free itself.
+    if crate::shellmode::active() {
+        *registered = true;
+        return crate::shellmode::reserve(hwnd, monitor, height);
+    }
     let mut abd = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
@@ -642,6 +693,8 @@ pub struct MenuState {
     /// Starting with Windows the late way (see `autostart_late`).
     pub autostart_late: bool,
     pub flyout_hidden: bool,
+    /// Cascade is the shell (see `shellmode`): Quit hands over to Explorer.
+    pub shell: bool,
 }
 
 fn check(on: bool) -> MENU_ITEM_FLAGS {
@@ -655,6 +708,7 @@ fn check(on: bool) -> MENU_ITEM_FLAGS {
 /// Starts another copy of Cascade, which waits for this one to exit (as after
 /// an update) and brings the admin key helper up afresh. False if it couldn't.
 pub fn spawn_restart() -> bool {
+    crate::shellmode::set_intent(crate::shellmode::Intent::Restart);
     std::env::current_exe().is_ok_and(|exe| std::process::Command::new(exe).arg("--updated").spawn().is_ok())
 }
 
@@ -669,8 +723,11 @@ pub fn spawn_full_restart() -> bool {
     let Some(name) = exe.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
     restore_taskbar();
     crate::helper::stop();
+    // In shell mode the guard is ended too (it's the same program), so it's
+    // the guard that's started again: it brings Cascade up.
+    let arg = if crate::shellmode::active() { "--shell" } else { "--updated" };
     let script = format!(
-        "ping -n 3 127.0.0.1 >nul & taskkill /F /IM \"{name}\" >nul 2>&1 & ping -n 2 127.0.0.1 >nul & start \"\" \"{}\" --updated",
+        "ping -n 3 127.0.0.1 >nul & taskkill /F /IM \"{name}\" >nul 2>&1 & ping -n 2 127.0.0.1 >nul & start \"\" \"{}\" {arg}",
         exe.display()
     );
     std::process::Command::new("cmd.exe")
@@ -724,15 +781,21 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, check(state.dock), 2, w!("Show taskbar"));
         let flags = if state.dock { check(state.dock_autohide) } else { check(state.dock_autohide) | MF_GRAYED };
         let _ = AppendMenuW(menu, flags, 3, w!("Auto-hide taskbar"));
-        let flags =
-            if state.hide_taskbar_allowed { check(state.hide_taskbar) } else { check(state.hide_taskbar) | MF_GRAYED };
-        let _ = AppendMenuW(menu, flags, 4, w!("Replace the Windows taskbar"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
-        if state.autostart_late {
-            let _ = AppendMenuW(menu, MF_STRING, 13, w!("Start with Windows sooner\u{2026}"));
+        // As the shell there's no Windows taskbar or flyout to hide, and Windows starts Cascade itself.
+        if !state.shell {
+            let flags = if state.hide_taskbar_allowed {
+                check(state.hide_taskbar)
+            } else {
+                check(state.hide_taskbar) | MF_GRAYED
+            };
+            let _ = AppendMenuW(menu, flags, 4, w!("Replace the Windows taskbar"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, check(state.autostart), 5, w!("Start with Windows"));
+            if state.autostart_late {
+                let _ = AppendMenuW(menu, MF_STRING, 13, w!("Start with Windows sooner\u{2026}"));
+            }
+            let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
         }
-        let _ = AppendMenuW(menu, check(state.flyout_hidden), 6, w!("Hide Windows volume flyout"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 7, w!("Open config file"));
         let _ = AppendMenuW(menu, MF_STRING, 8, w!("Reload config"));
@@ -740,7 +803,8 @@ pub fn show_menu(hwnd: HWND, state: MenuState) -> MenuCmd {
         let _ = AppendMenuW(menu, MF_STRING, 10, &HSTRING::from(state.update_label.as_str()));
         let _ = AppendMenuW(menu, MF_STRING, 14, w!("Restart Cascade"));
         let _ = AppendMenuW(menu, MF_STRING, 15, w!("Full restart (force)"));
-        let _ = AppendMenuW(menu, MF_STRING, 9, w!("Quit Cascade"));
+        let quit = if state.shell { w!("Quit to Explorer") } else { w!("Quit Cascade") };
+        let _ = AppendMenuW(menu, MF_STRING, 9, quit);
         IDS.get(track(hwnd, menu)).copied().unwrap_or(MenuCmd::None)
     }
 }
@@ -876,6 +940,12 @@ pub fn signal_running_instance() {
 }
 
 pub fn open(target: &str) {
+    // Shell mode: Explorer asked for nothing in particular might set itself
+    // up as the shell, so it's always given a folder to show.
+    if crate::shellmode::active() && crate::shellmode::is_bare_explorer(target) {
+        crate::shellmode::open_files();
+        return;
+    }
     unsafe {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }

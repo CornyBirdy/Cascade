@@ -117,6 +117,7 @@ fn swap_and_relaunch(bytes: &[u8]) -> bool {
         return false;
     }
     // The new copy waits for this one to exit (single-instance lock).
+    crate::shellmode::set_intent(crate::shellmode::Intent::Restart);
     std::process::Command::new(&exe).arg("--updated").spawn().is_ok()
 }
 
