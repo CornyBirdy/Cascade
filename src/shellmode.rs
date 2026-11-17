@@ -1489,10 +1489,14 @@ fn run_entries(root: HKEY, key: &str, wow: bool) -> Vec<(String, String)> {
                 Some(data.as_mut_ptr() as *mut u8),
                 Some(&mut size),
             );
-            if r == ERROR_NO_MORE_ITEMS {
+            // A value too long for the buffer is skipped; anything else wrong ends the list.
+            if r == ERROR_MORE_DATA {
+                continue;
+            }
+            if r != ERROR_SUCCESS {
                 break;
             }
-            if r != ERROR_SUCCESS || (kind != REG_SZ && kind != REG_EXPAND_SZ) {
+            if kind != REG_SZ && kind != REG_EXPAND_SZ {
                 continue;
             }
             let chars = &data[..(size as usize / 2).min(data.len())];
