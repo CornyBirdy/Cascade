@@ -1419,7 +1419,8 @@ impl App {
     fn apply_dock(&mut self) {
         // The launcher also watches the foreground window, to take over when
         // Windows opens its own Start menu (see `on_win_event`).
-        let hooks_wanted = self.cfg.dock || (self.cfg.launcher && self.cfg.launcher_win_key);
+        // (As the shell, always: the volume keys and fullscreen apps are heard through them.)
+        let hooks_wanted = self.cfg.dock || (self.cfg.launcher && self.cfg.launcher_win_key) || shellmode::active();
         if hooks_wanted && self.hooks.is_empty() {
             let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
             let ranges = [
@@ -1618,6 +1619,43 @@ impl App {
             unsafe {
                 SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 60, None);
             }
+        }
+    }
+
+    /// Shell mode: the keyboard's volume and media keys. Windows hands a key
+    /// no program took to the shell, and it's Explorer that turns the volume
+    /// up and down for them; without it they'd do nothing.
+    fn on_app_command(&mut self, cmd: u32) {
+        const VOLUME_MUTE: u32 = 8;
+        const VOLUME_DOWN: u32 = 9;
+        const VOLUME_UP: u32 = 10;
+        const MEDIA_NEXT: u32 = 11;
+        const MEDIA_PREVIOUS: u32 = 12;
+        const MEDIA_PLAY_PAUSE: u32 = 14;
+        const MEDIA_PLAY: u32 = 46;
+        const MEDIA_PAUSE: u32 = 47;
+        match cmd {
+            VOLUME_MUTE => {
+                if let Some(v) = &self.volume {
+                    v.toggle_mute();
+                }
+            }
+            // Two in a hundred a press, as Windows steps it.
+            VOLUME_DOWN | VOLUME_UP => {
+                if let Some(v) = &self.volume {
+                    v.nudge(if cmd == VOLUME_UP { 0.02 } else { -0.02 });
+                }
+            }
+            MEDIA_NEXT => {
+                let _ = self.media_tx.send(MediaCmd::Next);
+            }
+            MEDIA_PREVIOUS => {
+                let _ = self.media_tx.send(MediaCmd::Previous);
+            }
+            MEDIA_PLAY_PAUSE | MEDIA_PLAY | MEDIA_PAUSE => {
+                let _ = self.media_tx.send(MediaCmd::PlayPause);
+            }
+            _ => {}
         }
     }
 
@@ -2967,6 +3005,15 @@ impl App {
     fn on_shell(&mut self, code: u32, hwnd: HWND) {
         const HSHELL_WINDOWCREATED: u32 = 1;
         const HSHELL_WINDOWDESTROYED: u32 = 2;
+        const HSHELL_APPCOMMAND: u32 = 12;
+        if code == HSHELL_APPCOMMAND {
+            // A volume or media key that no program took: the shell's to act
+            // on. The command is in the high word, less the device bits.
+            if shellmode::active() {
+                self.on_app_command(((hwnd.0 as usize >> 16) & 0x0FFF) as u32);
+            }
+            return;
+        }
         self.sync_fullscreen();
         if !self.cfg.dock {
             return;

@@ -115,6 +115,16 @@ impl Volume {
         }
     }
 
+    /// Mutes or unmutes, as the keyboard's mute key does.
+    pub fn toggle_mute(&self) {
+        let Some(ep) = &self.endpoint else { return };
+        unsafe {
+            if let Ok(muted) = ep.GetMute() {
+                let _ = ep.SetMute(!muted.as_bool(), std::ptr::null());
+            }
+        }
+    }
+
     pub fn nudge(&self, delta: f32) {
         let Some(ep) = &self.endpoint else { return };
         let Some((v, muted)) = self.get() else { return };
