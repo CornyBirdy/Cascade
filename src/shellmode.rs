@@ -1326,6 +1326,11 @@ fn packaged_id(target: &str) -> Option<String> {
 /// program, started directly. Says so when none does.
 fn open_packaged(aumid: &str, admin: bool) {
     let Some((family, app)) = aumid.split_once('!') else { return };
+    // Windows' Settings, from the Start menu's list: as its links do.
+    if family.to_ascii_lowercase().starts_with("windows.immersivecontrolpanel_") {
+        open_settings("ms-settings:");
+        return;
+    }
     if !admin {
         match activate(aumid) {
             Ok(pid) => {
@@ -1374,7 +1379,7 @@ fn activate(aumid: &str) -> Result<u32, String> {
         .map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
-    rx.recv_timeout(Duration::from_secs(6)).unwrap_or_else(|_| Err("no answer in 6 s".into()))
+    rx.recv_timeout(Duration::from_secs(4)).unwrap_or_else(|_| Err("no answer in 4 s".into()))
 }
 
 /// The app's execution alias: the command a terminal knows it by (wt,
