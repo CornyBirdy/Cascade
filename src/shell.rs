@@ -946,6 +946,11 @@ pub fn open(target: &str) {
         crate::shellmode::open_files();
         return;
     }
+    // Windows' Settings may not open without Explorer: that's watched for (see `open_settings`).
+    if crate::shellmode::active() && target.to_ascii_lowercase().starts_with("ms-settings:") {
+        crate::shellmode::open_settings(target);
+        return;
+    }
     unsafe {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
     }

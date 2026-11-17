@@ -122,13 +122,16 @@ As the shell, Cascade takes on the jobs Explorer had:
 - **Notifications:** a new one shows in the notch for a moment (Windows' own pop-ups are Explorer's); the list is in the widgets panel as before.
 - **Fullscreen apps:** Cascade watches for a window covering a whole screen itself, and gets out of its way.
 
-**The safety net.** What Windows starts is a tiny second copy of Cascade (the guard) with no windows. It starts Cascade proper and starts it again if it ever goes away. If Cascade fails three times in a row, the guard turns shell mode off and starts Explorer, and Cascade says so the next time it runs. If you're ever left with a blank screen anyway: **Ctrl+Shift+Esc** opens Task Manager → *Run new task* → `explorer.exe`. Shell mode is set for your account only, so another account, or Safe Mode, always has Explorer.
+**The safety net.** What Windows starts is a tiny second copy of Cascade (the guard) with no windows. It starts Cascade proper and starts it again if it ever goes away. If Cascade fails three times in a row, the guard turns shell mode off and starts Explorer, and Cascade says so the next time it runs. The first sign-in with shell mode on is also a trial: a box asks whether to keep it, and if nobody says yes within two minutes (because nothing can be seen or clicked, say), shell mode turns itself off and Explorer comes back.
+
+If you're ever left with a blank screen anyway: **Ctrl+Shift+Esc** opens Task Manager → *Run new task* → type `%LOCALAPPDATA%\Programs\Cascade\cascade.exe --shell-off` → OK. That turns shell mode off and starts Explorer. (By hand, it's the `Shell` value under `HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Winlogon`: delete it and sign in again.) Shell mode is set for your account only, so another account on the PC always has Explorer.
 
 **Getting Explorer back.** Right-click the taskbar, notch or desktop → **Quit to Explorer** hands over for the rest of the session (shell mode stays on for the next sign-in). Turning the setting off takes effect at the next sign-in.
 
 **What doesn't work without Explorer.** These are parts of Explorer itself, not things Cascade hides:
 
-- **Store-style apps may not open**, Windows' own **Settings** among them. Classic programs (browsers, games, Steam, Discord, most things) are unaffected.
+- **Store-style apps may not open**, Windows' own **Settings** among them. Classic programs (browsers, games, Steam, Discord, most things) are unaffected. When Cascade opens a Settings page (Win+I, the Start menu's Settings, the Wi-Fi and Bluetooth links) and no Settings window has come up five seconds later, it opens the nearest classic Control Panel page instead.
+- **The Win key over admin apps** (Task Manager, installers) does nothing unless *Work over admin apps* is on (Settings → Start menu): beside Explorer, Windows' own Start menu at least opened there.
 - **Virtual desktops**: there is one desktop, and Task View shows only its windows.
 - **Windows' quick settings, notification centre, Win+. emoji panel, Win+P and Win+K**. Cascade's Controls and widgets panel stand in for the first two.
 - **Snap layouts** (the grid on the maximise button) and Win+Z.

@@ -137,6 +137,11 @@ fn main() {
         shellmode::guard();
         return;
     }
+    // The way out of shell mode from Task Manager's Run box.
+    if std::env::args().any(|a| a == "--shell-off") {
+        shellmode::turn_off();
+        return;
+    }
     // After an update the new copy starts while the old one is still
     // shutting down, so give it a few seconds to let go.
     let updated = std::env::args().any(|a| a == "--updated");

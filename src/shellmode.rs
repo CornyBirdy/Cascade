@@ -120,6 +120,8 @@ pub fn registered() -> bool {
 /// setting is touched, so other accounts (and Safe Mode) keep Explorer.
 pub fn set_registered(on: bool) -> bool {
     let ok = if on {
+        // Turned on afresh: the first sign-in asks whether to keep it (see `trial`).
+        let _ = std::fs::remove_file(confirmed_path());
         command().is_some_and(|c| set_reg_text(HKEY_CURRENT_USER, WINLOGON, "Shell", &c))
     } else {
         // Someone else's shell isn't Cascade's to remove.
@@ -429,6 +431,76 @@ pub fn start_explorer(keep: bool) -> bool {
     up
 }
 
+/// `cascade.exe --shell-off`: the way out when something is wrong. Turns
+/// shell mode off and brings Explorer back now, whatever state Cascade is in.
+/// Typed into Task Manager's *Run new task* box (Ctrl+Shift+Esc), which is
+/// there even with no shell at all.
+pub fn turn_off() {
+    set_registered(false);
+    config::log("shell mode: turned off from the command line; bringing Explorer back");
+    if explorer_is_shell() {
+        return;
+    }
+    // A running Cascade closes; its guard, seeing shell mode off, starts Explorer.
+    if let Some(main) = crate::helper::main_window() {
+        unsafe {
+            let _ = PostMessageW(Some(main), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        let until = Instant::now() + Duration::from_secs(25);
+        while Instant::now() < until && !explorer_is_shell() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    // No guard, no Cascade, or one that's stuck: start it from here.
+    if !explorer_is_shell() {
+        start_explorer(false);
+    }
+}
+
+fn confirmed_path() -> PathBuf {
+    config::dir().join("shell-confirmed")
+}
+
+/// The first sign-in after shell mode is turned on is a trial, the way
+/// Windows asks whether to keep a new screen resolution: a box asks whether
+/// to keep Cascade as the shell, and if nobody says yes within two minutes
+/// (the screen is blank, the mouse or keys don't work, the box can't be
+/// reached) shell mode goes off and Explorer comes back by itself.
+fn trial() {
+    if confirmed_path().exists() {
+        return;
+    }
+    std::thread::spawn(|| unsafe {
+        // Let the taskbar and the startup apps come up first.
+        std::thread::sleep(Duration::from_secs(8));
+        // A message box that answers itself after a while. Not in the headers; in Windows since XP.
+        type MessageBoxTimeout = unsafe extern "system" fn(HWND, PCWSTR, PCWSTR, u32, u16, u32) -> i32;
+        const TIMED_OUT: i32 = 32000;
+        let Ok(user32) = GetModuleHandleW(w!("user32.dll")) else { return };
+        let Some(f) = GetProcAddress(user32, PCSTR(c"MessageBoxTimeoutW".as_ptr() as *const u8)) else { return };
+        let f = std::mem::transmute::<unsafe extern "system" fn() -> isize, MessageBoxTimeout>(f);
+        let text = w!(
+            "Cascade is running as the Windows shell, in Explorer's place.\n\nKeep it this way?\n\nYes: Cascade stays the shell.\nNo, or no answer within 2 minutes: shell mode is turned off and Explorer comes back.\n\n(You can change this any time in Cascade's Settings > General.)"
+        );
+        let style = MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND;
+        let answer = f(HWND::default(), text, w!("Cascade shell mode"), style.0, 0, 120_000);
+        if answer == IDYES.0 {
+            let _ = std::fs::write(confirmed_path(), "");
+            config::log("shell mode: kept (the first-run question was answered yes)");
+            return;
+        }
+        config::log(if answer == TIMED_OUT {
+            "shell mode: nobody answered the first-run question; turning it off and bringing Explorer back"
+        } else {
+            "shell mode: turned down at the first-run question; bringing Explorer back"
+        });
+        set_registered(false);
+        // Quit, as from the menu: Explorer takes over once Cascade's windows are gone.
+        set_intent(Intent::Quit);
+        msg::post(WM_CLOSE, 0, 0);
+    });
+}
+
 /// Called once Cascade's windows are gone: after Quit, Explorer takes over.
 pub fn on_exit() {
     if active() && QUIT.load(Ordering::Acquire) {
@@ -692,6 +764,7 @@ pub fn init(instance: HINSTANCE, main: HWND) {
     register_hotkeys(main);
     signal_ready();
     ensure_guard();
+    trial();
     std::thread::spawn(|| {
         load_wallpaper();
         // Let Cascade's taskbar and tray settle first: programs add their tray icons as they start.
@@ -827,7 +900,7 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::Desktop => show_desktop(),
         Hotkey::MinimizeAll => minimize_all(),
         Hotkey::RestoreAll => restore_all(),
-        Hotkey::Settings => shell::open("ms-settings:"),
+        Hotkey::Settings => open_settings("ms-settings:"),
         Hotkey::Lock => shell::power(shell::Power::Lock),
         Hotkey::Snap(dir) => snap(dir),
         Hotkey::Screen(right) => move_screen(right),
@@ -837,6 +910,70 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::Search | Hotkey::Start | Hotkey::App(_) => return Some(key),
     }
     None
+}
+
+/// The classic Control Panel page nearest to a `ms-settings:` link, for when
+/// Windows' Settings app won't open.
+fn classic_page(uri: &str) -> (&'static str, &'static str) {
+    let page = uri.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| page.contains(w));
+    if has(&["network", "wifi", "ethernet", "vpn", "proxy"]) {
+        ("ncpa.cpl", "")
+    } else if has(&["sound", "volume"]) {
+        ("mmsys.cpl", "")
+    } else if has(&["appsfeatures", "installed-apps", "optionalfeatures"]) {
+        ("appwiz.cpl", "")
+    } else if has(&["power", "battery"]) {
+        ("powercfg.cpl", "")
+    } else if has(&["dateandtime", "regionformatting"]) {
+        ("timedate.cpl", "")
+    } else if has(&["about", "system"]) {
+        ("sysdm.cpl", "")
+    } else if has(&["mouse"]) {
+        ("main.cpl", "")
+    } else if has(&["printers", "bluetooth", "connecteddevices"]) {
+        ("control.exe", "printers")
+    } else {
+        ("control.exe", "")
+    }
+}
+
+/// Whether Windows' Settings app has a window on screen.
+fn settings_window_up() -> bool {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
+    }
+    all.into_iter().any(|h| unsafe {
+        IsWindowVisible(h).as_bool()
+            && crate::dock::app_user_model_id(h)
+                .is_some_and(|id| id.to_ascii_lowercase().contains("immersivecontrolpanel"))
+    })
+}
+
+/// Opens a `ms-settings:` page. Windows' Settings is a Store-style app, and
+/// those lean on Explorer being the shell: if no Settings window has come up
+/// a few seconds later, the nearest classic Control Panel page opens instead.
+pub fn open_settings(uri: &str) {
+    unsafe {
+        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL);
+    }
+    let uri = uri.to_string();
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if settings_window_up() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let (file, args) = classic_page(&uri);
+        config::log(&format!("shell mode: Windows' Settings didn't open for {uri}; opening {file} {args} instead"));
+        shell::launch(file, args, false);
+    });
 }
 
 /// Whether `target` is Explorer itself with nothing to open.
@@ -1478,6 +1615,16 @@ mod tests {
         assert!(is_bare_explorer("\"C:\\WINDOWS\\Explorer.EXE\""));
         assert!(!is_bare_explorer("C:\\Tools\\fileexplorer.exe "));
         assert!(!is_bare_explorer("shell:AppsFolder\\Some.App"));
+    }
+
+    #[test]
+    fn finds_the_classic_page_for_a_settings_link() {
+        assert_eq!(classic_page("ms-settings:network-wifi"), ("ncpa.cpl", ""));
+        assert_eq!(classic_page("ms-settings:bluetooth"), ("control.exe", "printers"));
+        assert_eq!(classic_page("ms-settings:appsfeatures"), ("appwiz.cpl", ""));
+        assert_eq!(classic_page("ms-settings:about"), ("sysdm.cpl", ""));
+        assert_eq!(classic_page("ms-settings:"), ("control.exe", ""));
+        assert_eq!(classic_page("ms-settings:clipboard"), ("control.exe", ""));
     }
 
     #[test]
