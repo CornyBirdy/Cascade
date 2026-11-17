@@ -1088,16 +1088,20 @@ fn live_desc(key: &str, get: &dyn Fn(&str) -> String) -> Option<(&'static str, b
             "Windows' startup list runs Cascade late. Turn this off and on again to start it as you sign in instead (Windows asks for permission once).",
             true,
         ),
+        "shell_mode" if on("shell_active") && !on("shell_mode") => (
+            "Off from your next sign-in. Cascade is still the shell until you sign out; for Explorer now, right-click the taskbar > Quit to Explorer.",
+            false,
+        ),
         "shell_mode" if on("shell_active") => (
-            "Cascade is the shell: Explorer's taskbar and Start menu don't exist this session. Store apps and Windows' own Settings may not open without Explorer. Turn off to get Explorer back from your next sign-in, or right-click the taskbar > Quit to Explorer for now.",
+            "Cascade is the shell this session: Explorer's taskbar and Start menu don't exist. Store apps and Windows' Settings may not open. For Explorer now: right-click the taskbar > Quit to Explorer.",
             false,
         ),
         "shell_mode" if on("shell_mode") => (
-            "On from your next sign-in. Store apps, Windows' own Settings, virtual desktops and Windows' notification pop-ups need Explorer and may not work; if Cascade fails to start, Explorer comes back by itself.",
+            "On from your next sign-in. Store apps, Windows' Settings and virtual desktops need Explorer and may not work. If Cascade fails to start, Explorer comes back by itself.",
             true,
         ),
         "shell_mode" if !on("dock") || !on("launcher") => (
-            "Windows starts Cascade in Explorer's place when you sign in. Turn on Cascade's taskbar and Start menu first: as the shell they are the only ones there are.",
+            "Turn on Cascade's taskbar and Start menu first: as the shell, they are the only ones there are.",
             true,
         ),
         "shortcut_win_n" if !on("dock") => (taskbar_off, true),
