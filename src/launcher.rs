@@ -155,6 +155,53 @@ unsafe fn scan() -> Result<Vec<AppEntry>> {
     Ok(out)
 }
 
+/// What a Start-menu answer opens to show a page of Cascade's settings: this, then the page's number.
+pub const SETTINGS_PAGE: &str = "cascade-settings:";
+
+/// Asks Windows' search index for files and folders matching `query` in
+/// your user folder, on a thread of its own; posts `msg::FILES` with the
+/// first few. Windows' search (the indexer) runs without Explorer.
+pub fn spawn_files(query: String, generation: u32) {
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // A moment to let typing settle: a newer search makes this one moot.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let found = search_files(&query);
+        let ptr = Box::into_raw(Box::new((generation, found)));
+        if !msg::post(msg::FILES, 0, ptr as isize) {
+            drop(Box::from_raw(ptr));
+        }
+    });
+}
+
+unsafe fn search_files(query: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(home) = std::env::var_os("USERPROFILE") else { return out };
+    let target = format!(
+        "search-ms:query={}&crumb=location:{}",
+        crate::shell::uri_escape(query),
+        crate::shell::uri_escape(&home.to_string_lossy())
+    );
+    let item: Result<IShellItem> = SHCreateItemFromParsingName(&windows::core::HSTRING::from(target), None);
+    let Ok(folder) = item else { return out };
+    let Ok(items) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
+    let start = Instant::now();
+    while out.len() < 6 && start.elapsed() < std::time::Duration::from_millis(2500) {
+        let mut batch = [None; 1];
+        let mut fetched = 0u32;
+        if items.Next(&mut batch, Some(&mut fetched)).is_err() || fetched == 0 {
+            break;
+        }
+        let Some(it) = batch[0].take() else { break };
+        let (Ok(name), Ok(path)) = (it.GetDisplayName(SIGDN_NORMALDISPLAY), it.GetDisplayName(SIGDN_FILESYSPATH))
+        else {
+            continue;
+        };
+        out.push((take(name), take(path)));
+    }
+    out
+}
+
 /// Reads the recent files on a worker thread; posts `msg::RECENT`. The menu
 /// shows the last list it got, so opening it never waits on the folder.
 pub fn spawn_recent() {
@@ -424,6 +471,11 @@ pub struct Launcher {
     /// above the apps, the rest below them.
     answers: Vec<Answer>,
     answers_top: usize,
+    /// Files Windows' search index found for `files_for` (see `spawn_files`).
+    files: Vec<Answer>,
+    files_for: String,
+    /// Bumped for every file search, so a late one's answer is dropped.
+    files_gen: u32,
     /// The web search engine (`start_web_search`).
     web: String,
     selected: usize,
@@ -496,6 +548,9 @@ impl Launcher {
             results: Vec::new(),
             answers: Vec::new(),
             answers_top: 0,
+            files: Vec::new(),
+            files_for: String::new(),
+            files_gen: 0,
             web: "google".into(),
             selected: 0,
             scroll: 0.0,
@@ -648,14 +703,63 @@ impl Launcher {
             .collect();
         scored.sort();
         self.results = scored.into_iter().map(|(.., i)| i).collect();
-        let (top, bottom) = if self.searching() { smart::answers(&self.query, &self.web) } else { Default::default() };
-        self.answers_top = top.len();
-        self.answers = top.into_iter().chain(bottom).collect();
+        // Files are looked for once the query has settled a little (3 letters on).
+        let q = self.query.trim().to_string();
+        if q != self.files_for {
+            self.files_for = q.clone();
+            self.files.clear();
+            self.files_gen = self.files_gen.wrapping_add(1);
+            if q.chars().count() >= 3 {
+                spawn_files(q, self.files_gen);
+            }
+        }
+        self.rebuild_answers();
         self.selected = 0;
         self.reset_scroll();
         // Results ripple in again.
         self.list_anim.snap(0.0);
         self.list_anim.set(1.0);
+    }
+
+    /// The answers: sums and conversions first, then (below the apps)
+    /// settings, files, commands and the web.
+    fn rebuild_answers(&mut self) {
+        let (top, bottom) = if self.searching() { smart::answers(&self.query, &self.web) } else { Default::default() };
+        let settings: Vec<Answer> = if self.searching() {
+            crate::settings::find(&self.query)
+                .into_iter()
+                .map(|(title, page_name, page)| Answer {
+                    kind: smart::Kind::Setting,
+                    title,
+                    detail: format!("Settings \u{203a} {page_name}"),
+                    run: smart::Run::Open(format!("{SETTINGS_PAGE}{page}")),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.answers_top = top.len();
+        self.answers = top.into_iter().chain(settings).chain(self.files.iter().cloned()).chain(bottom).collect();
+    }
+
+    /// Files found for `generation`'s search (`msg::FILES`).
+    pub fn set_files(&mut self, generation: u32, found: Vec<(String, String)>) {
+        if generation != self.files_gen || !self.searching() {
+            return;
+        }
+        self.files = found
+            .into_iter()
+            .map(|(name, path)| Answer {
+                kind: smart::Kind::File,
+                title: name,
+                detail: path.clone(),
+                run: smart::Run::Open(path),
+            })
+            .collect();
+        let selected = self.selected;
+        self.rebuild_answers();
+        self.selected = selected.min(self.result_rows().saturating_sub(1));
+        self.dirty = true;
     }
 
     fn reset_scroll(&mut self) {
@@ -1563,6 +1667,19 @@ fn answer_glyph(p: &Painter, kind: smart::Kind, cx: f32, cy: f32, c: Color) {
             p.line(cx - 8.0, cy - 5.0, cx - 3.0, cy, c, 1.6);
             p.line(cx - 3.0, cy, cx - 8.0, cy + 5.0, c, 1.6);
             p.line(cx, cy + 5.0, cx + 8.0, cy + 5.0, c, 1.6);
+        }
+        smart::Kind::File => {
+            // A page with its corner turned.
+            p.line(cx - 6.0, cy - 9.0, cx + 2.0, cy - 9.0, c, 1.4);
+            p.line(cx + 2.0, cy - 9.0, cx + 7.0, cy - 4.0, c, 1.4);
+            p.line(cx + 7.0, cy - 4.0, cx + 7.0, cy + 9.0, c, 1.4);
+            p.line(cx + 7.0, cy + 9.0, cx - 6.0, cy + 9.0, c, 1.4);
+            p.line(cx - 6.0, cy + 9.0, cx - 6.0, cy - 9.0, c, 1.4);
+            p.line(cx + 2.0, cy - 9.0, cx + 2.0, cy - 4.0, c, 1.2);
+            p.line(cx + 2.0, cy - 4.0, cx + 7.0, cy - 4.0, c, 1.2);
+        }
+        smart::Kind::Setting => {
+            draw_glyph(p, Glyph::Gear, cx, cy, c);
         }
         smart::Kind::Web => {
             // A globe.

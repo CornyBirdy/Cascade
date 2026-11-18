@@ -136,6 +136,33 @@ fn search(query: &str) {
     FOUND.with(|f| *f.borrow_mut() = Found { rows: out, from });
 }
 
+/// Settings whose name holds every word of `query`, for the Start menu's
+/// search: (the setting's name, its page's name, its page), the best few.
+pub fn find(query: &str) -> Vec<(String, &'static str, usize)> {
+    let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+    if words.is_empty() || query.trim().len() < 3 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (s, name) in SECTIONS.iter().enumerate() {
+        for r in rows(s) {
+            if matches!(r.ctl, Ctl::Heading | Ctl::Note) {
+                continue;
+            }
+            let text = format!("{} {}", r.title, name).to_lowercase();
+            if words.iter().all(|w| text.contains(w.as_str())) {
+                out.push((r.title.to_string(), *name, s));
+            }
+        }
+    }
+    // Page names that match come first ("display" finds the Display page).
+    out.sort_by_key(|(t, page, _)| {
+        (!page.to_lowercase().starts_with(&words[0]), !t.to_lowercase().starts_with(&words[0]))
+    });
+    out.truncate(3);
+    out
+}
+
 #[derive(Clone, Copy)]
 enum Unit {
     Fps,

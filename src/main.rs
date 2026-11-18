@@ -124,6 +124,8 @@ pub mod msg {
     pub const WIN_ACTION: u32 = WM_APP + 38;
     /// Open the settings window (wParam: the page, plus one; 0 for where it was).
     pub const OPEN_SETTINGS_AT: u32 = WM_APP + 39;
+    /// Files the Start menu's search found (a boxed `(u32, Vec<(String, String)>)`).
+    pub const FILES: u32 = WM_APP + 40;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

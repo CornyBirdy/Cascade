@@ -20,6 +20,10 @@ pub enum Kind {
     Unit,
     Command,
     Web,
+    /// A file or folder Windows' search index found.
+    File,
+    /// One of Cascade's settings pages (Windows' settings among them).
+    Setting,
 }
 
 #[derive(Clone, Debug, PartialEq)]

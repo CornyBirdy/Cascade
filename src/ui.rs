@@ -895,6 +895,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::FILES => {
+            let found = Box::from_raw(lp.0 as *mut (u32, Vec<(String, String)>));
+            with_app(move |a| a.launcher.set_files(found.0, found.1));
+            return LRESULT(0);
+        }
         msg::RECENT => {
             let list = Box::from_raw(lp.0 as *mut Vec<launcher::RecentFile>);
             with_app(move |a| a.launcher.set_recent(*list));
@@ -3527,8 +3532,17 @@ impl App {
     fn launcher_action(&mut self, action: launcher::Action) {
         match action {
             launcher::Action::Launch(target) => {
-                shell::open(&target);
                 self.launcher.hide();
+                // One of Cascade's settings pages (a settings answer in the search).
+                match target.strip_prefix(launcher::SETTINGS_PAGE).and_then(|p| p.parse::<usize>().ok()) {
+                    Some(page) => {
+                        self.open_settings();
+                        if let Some(s) = &mut self.settings {
+                            s.show_section(page);
+                        }
+                    }
+                    None => shell::open(&target),
+                }
             }
             launcher::Action::Close => self.launcher.hide(),
             launcher::Action::Copy(text) => {
