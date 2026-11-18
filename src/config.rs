@@ -8,23 +8,17 @@ const DEFAULT: &str = "\
 
 # ---- Look ----
 # One look for the notch's lip, taskbar, Start menu, panels and Alt+Tab:
-# acrylic, liquid_glass, windows_glass, frosted, tinted (your Windows accent
-# colour), translucent, rose_pine, neon, obsidian (no blur) or clean_slate
-# (no blur).
+# acrylic or liquid_glass.
 theme = acrylic
-# What the theme's colours are based on: theme (its own), accent (your Windows
-# accent colour), neutral (no colour) or custom (theme_hue, in degrees round
-# the colour wheel: 0 red, 120 green, 210 blue, 280 purple).
-theme_color = theme
-theme_hue = 210
-# How colourful the theme is: 0 = grey, 1 = as designed, 2 = twice as strong.
-theme_intensity = 1
+# The accent colour (the app in front, toggles, progress, today): windows (your
+# Windows accent colour, followed when it changes) or one of your own, #RRGGBB.
+accent = windows
+# Tint the glass with the accent colour too, as Windows' Show accent colour
+# on Start and taskbar setting does.
+accent_glass = false
 # How strongly the glass's edge catches the light (its outline, and the light
-# gathered and glowing along it): 0 = none, 1 = as designed, 2 = twice as strong.
+# gathered along it): 0 = none, 1 = as designed, 2 = twice as strong.
 theme_edge = 1
-# Clear glass (Liquid Glass, Translucent) bends what's behind it round its
-# edge, like real thick glass. Reads the screen behind it a few times a second.
-refraction = true
 
 # ---- Notch ----
 notch = true
@@ -42,7 +36,10 @@ notch_edge = top
 notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
-# On battery (laptops), go easy on it: no refraction, no visualizer bars, and
+# Keep the notch on top of fullscreen apps and games anyway (the taskbar still
+# gets out of the way).
+notch_fullscreen = false
+# On battery (laptops), go easy on it: no visualizer bars, and
 # the PC's stats read less often. Back to normal once it's plugged in.
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
@@ -61,6 +58,9 @@ ducker_targets =
 ducker_level = 0.25
 # How long after it stops they come back, in milliseconds.
 ducker_release = 1500
+# How loud it has to be to count as making sound, in dB (-60 hears a whisper,
+# -10 only loud sound).
+ducker_threshold = -34
 # While music or a focus timer plays, show it on the closed notch: the notch
 # style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
@@ -299,11 +299,9 @@ perf_log = false
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
-    pub theme_color: String,
-    pub theme_hue: f32,
-    pub theme_intensity: f32,
+    pub accent: String,
+    pub accent_glass: bool,
     pub theme_edge: f32,
-    pub refraction: bool,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -311,6 +309,7 @@ pub struct Config {
     pub notch_edge: String,
     pub notch_position: f32,
     pub hide_in_fullscreen: bool,
+    pub notch_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
     pub snap_drag: bool,
@@ -319,6 +318,7 @@ pub struct Config {
     pub ducker_targets: String,
     pub ducker_level: f32,
     pub ducker_release: u32,
+    pub ducker_threshold: f32,
     pub live_activity: bool,
     pub visualizer: bool,
     pub lip_visualizer: bool,
@@ -423,11 +423,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "acrylic".into(),
-            theme_color: "theme".into(),
-            theme_hue: 210.0,
-            theme_intensity: 1.0,
+            accent: "windows".into(),
+            accent_glass: false,
             theme_edge: 1.0,
-            refraction: true,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -435,6 +433,7 @@ impl Default for Config {
             notch_edge: "top".into(),
             notch_position: 0.5,
             hide_in_fullscreen: true,
+            notch_fullscreen: false,
             battery_saver: false,
             super_drag: true,
             snap_drag: true,
@@ -443,6 +442,7 @@ impl Default for Config {
             ducker_targets: String::new(),
             ducker_level: 0.25,
             ducker_release: 1500,
+            ducker_threshold: -34.0,
             live_activity: true,
             visualizer: true,
             lip_visualizer: true,
@@ -596,6 +596,7 @@ impl Config {
             targets: crate::ducker::parse_list(&self.ducker_targets),
             level: self.ducker_level,
             release: std::time::Duration::from_millis(self.ducker_release as u64),
+            loud: 10f32.powf(self.ducker_threshold / 20.0),
         })
     }
 
@@ -604,7 +605,6 @@ impl Config {
     /// are off. Applied to the loaded settings only; the file is untouched.
     pub fn save_battery(&mut self, power: Option<(u8, bool)>) {
         if self.battery_saver && power.is_some_and(|(_, plugged)| !plugged) {
-            self.refraction = false;
             self.visualizer = false;
             self.lip_visualizer = false;
             self.widget_visualizer = false;
@@ -692,11 +692,9 @@ impl Config {
             };
             match k {
                 "theme" if crate::theme::is_known(v) => c.theme = v.into(),
-                "theme_color" if crate::theme::SOURCES.contains(&v) => c.theme_color = v.into(),
-                "theme_hue" => set_f(&mut c.theme_hue, 0.0, 360.0),
-                "theme_intensity" => set_f(&mut c.theme_intensity, 0.0, 2.0),
+                "accent" if v == "windows" || crate::theme::parse_accent(v).is_some() => c.accent = v.into(),
+                "accent_glass" => set_b(&mut c.accent_glass),
                 "theme_edge" => set_f(&mut c.theme_edge, 0.0, 2.0),
-                "refraction" => set_b(&mut c.refraction),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -704,6 +702,7 @@ impl Config {
                 "notch_edge" if matches!(v, "top" | "bottom" | "left" | "right") => c.notch_edge = v.into(),
                 "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
+                "notch_fullscreen" => set_b(&mut c.notch_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
                 "snap_drag" => set_b(&mut c.snap_drag),
@@ -712,6 +711,7 @@ impl Config {
                 "ducker_targets" => c.ducker_targets = v.trim_matches('"').to_string(),
                 "ducker_level" => set_f(&mut c.ducker_level, 0.0, 1.0),
                 "ducker_release" => set_u(&mut c.ducker_release, 200.0, 10000.0),
+                "ducker_threshold" => set_f(&mut c.ducker_threshold, -60.0, -6.0),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
                 "lip_visualizer" => set_b(&mut c.lip_visualizer),
@@ -854,11 +854,9 @@ impl Config {
         let b = |v: bool| v.to_string();
         match key {
             "theme" => self.theme.clone(),
-            "theme_color" => self.theme_color.clone(),
-            "theme_hue" => self.theme_hue.to_string(),
-            "theme_intensity" => self.theme_intensity.to_string(),
+            "accent" => self.accent.clone(),
+            "accent_glass" => b(self.accent_glass),
             "theme_edge" => self.theme_edge.to_string(),
-            "refraction" => b(self.refraction),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),
@@ -866,6 +864,7 @@ impl Config {
             "notch_edge" => self.notch_edge.clone(),
             "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
+            "notch_fullscreen" => b(self.notch_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
             "snap_drag" => b(self.snap_drag),
@@ -874,6 +873,7 @@ impl Config {
             "ducker_targets" => self.ducker_targets.clone(),
             "ducker_level" => self.ducker_level.to_string(),
             "ducker_release" => self.ducker_release.to_string(),
+            "ducker_threshold" => self.ducker_threshold.to_string(),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
             "lip_visualizer" => b(self.lip_visualizer),

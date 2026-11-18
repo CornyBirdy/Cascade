@@ -1,14 +1,10 @@
-//! Acrylic (or clear) blur behind panels (taskbar islands, Start menu, the
+//! Acrylic (or plain) blur behind panels (taskbar islands, Start menu, the
 //! notch's lip).
 //!
 //! A plain window the size of the panel sits just under the drawn content
 //! and asks DWM to blur what's behind it. The blur runs on the GPU inside
 //! DWM, the same way the Windows taskbar does it, and keeps working while the
 //! window is inactive (unlike the newer system backdrops).
-//!
-//! A theme that bends light (Liquid Glass, Translucent; see `lens`) gets a
-//! second window between the two: a click-through layered ring holding the
-//! bent light along the panel's edge, over the blur (or the clear glass).
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -23,7 +19,6 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::lens::{self, Lens};
 use crate::theme::Glass;
 
 #[repr(C)]
@@ -57,7 +52,6 @@ fn set_composition() -> Option<SetWindowCompositionAttribute> {
 
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
-const ACCENT_ENABLE_TRANSPARENTGRADIENT: u32 = 2;
 const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
@@ -94,11 +88,7 @@ pub struct Backdrop {
     last: Option<RECT>,
     /// Radius of DWM's rounded corners at 100% scaling (0 = square).
     corner: Cell<f32>,
-    /// Bent light along the panel's edge, over the blur (see `lens`).
-    lens: Cell<Option<Lens>>,
-    /// The layered window that ring is drawn in, made when first needed.
-    ring: Cell<Option<HWND>>,
-    /// The panel's own window, which the blur and the ring sit under.
+    /// The panel's own window, which the blur sits under.
     content: Cell<HWND>,
 }
 
@@ -133,82 +123,8 @@ impl Backdrop {
                 shape: None,
                 last: None,
                 corner: Cell::new(0.0),
-                lens: Cell::new(None),
-                ring: Cell::new(None),
                 content: Cell::new(HWND::default()),
             })
-        }
-    }
-
-    /// Adds a ring of light bent round the panel's edge (see `lens`) over
-    /// the blur, or (`None`) takes it away. Call before `style`.
-    pub fn set_lens(&self, lens: Option<Lens>) {
-        if lens == self.lens.get() {
-            return;
-        }
-        self.lens.set(lens);
-        if lens.is_none() {
-            self.hide_ring();
-        }
-        // Drawn again at the next `place`.
-        self.rect_changed();
-    }
-
-    /// The ring's window: layered (per-pixel alpha), click-through, and
-    /// never activated. Made the first time a theme bends light.
-    fn ring_hwnd(&self) -> Option<HWND> {
-        if let Some(h) = self.ring.get() {
-            return Some(h);
-        }
-        let h = unsafe {
-            CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                w!("CascadeBackdrop"),
-                w!(""),
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                None,
-                None,
-                GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0)),
-                None,
-            )
-        }
-        .ok()?;
-        self.ring.set(Some(h));
-        Some(h)
-    }
-
-    fn hide_ring(&self) {
-        if let Some(h) = self.ring.get() {
-            lens::hide(h);
-            unsafe {
-                let _ = ShowWindow(h, SW_HIDE);
-            }
-        }
-    }
-
-    fn rect_changed(&self) {
-        // `place` skips a rect it already holds; a new lens must be drawn.
-        if let (Some(l), true) = (self.lens.get(), self.shown) {
-            if let Some(ring) = self.ring_hwnd() {
-                // Over the blur, under the panel's content.
-                unsafe {
-                    let r = self.rect;
-                    let _ = SetWindowPos(
-                        ring,
-                        Some(self.content.get()),
-                        r.left,
-                        r.top,
-                        (r.right - r.left).max(1),
-                        (r.bottom - r.top).max(1),
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                    );
-                }
-                lens::show(ring, self.rect, self.corner_px(), l);
-            }
         }
     }
 
@@ -229,12 +145,9 @@ impl Backdrop {
             state: match glass {
                 Glass::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
                 Glass::Blur => ACCENT_ENABLE_BLURBEHIND,
-                // Fully see-through: the gradient colour, with its alpha of 0.
-                Glass::Clear => ACCENT_ENABLE_TRANSPARENTGRADIENT,
                 Glass::Solid => ACCENT_DISABLED,
             },
-            // Use the gradient colour (only the transparent gradient reads it).
-            flags: if glass == Glass::Clear { 2 } else { 0 },
+            flags: 0,
             // ABGR, as the API wants it.
             gradient: (a << 24) | (b << 16) | (g << 8) | r,
             animation: 0,
@@ -265,6 +178,17 @@ impl Backdrop {
         }
     }
 
+    /// Puts the blur back directly under `content` (after `content` was
+    /// brought to the top), where it is.
+    pub fn restack(&self, content: HWND) {
+        if !self.shown {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(content), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
     /// Puts the blur at `r` (screen px), directly under `content`.
     pub fn place(&mut self, r: RECT, content: HWND) {
         if r == self.rect && self.shown {
@@ -284,7 +208,6 @@ impl Backdrop {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
-        self.rect_changed();
     }
 
     /// Like `place`, but cut to a rounded rect `shape` (window-relative px,
@@ -361,7 +284,6 @@ impl Backdrop {
     fn hide_blur(&mut self) {
         if self.shown {
             self.shown = false;
-            self.hide_ring();
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }

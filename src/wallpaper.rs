@@ -351,6 +351,40 @@ impl Picture {
     }
 }
 
+/// What the wallpaper is now (its file and when it changed), to tell
+/// whether a `thumbnail` made earlier is still it.
+pub fn picture_key() -> String {
+    match picture() {
+        Some(p) => {
+            let at = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            format!("{}|{at:?}", p.display())
+        }
+        None => format!("colour {:08X}", background()),
+    }
+}
+
+/// The wallpaper as a small `w`×`h` picture filling it (cropped, not
+/// squashed), premultiplied BGRA: Task View's pictures of the desktops sit
+/// on it. A plain colour for "Solid colour". Decodes the file, so keep it
+/// (see `picture_key`) rather than asking each time.
+pub fn thumbnail(w: i32, h: i32) -> Option<Vec<u8>> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let mut out = vec![background(); (w * h) as usize];
+    unsafe {
+        if let Some(mut pic) = picture().and_then(|p| Picture::open(&p, false)) {
+            let s = (w as f32 / pic.w as f32).max(h as f32 / pic.h as f32);
+            let (sw, sh) = ((pic.w as f32 * s).ceil() as i32, (pic.h as f32 * s).ceil() as i32);
+            pic.draw(&mut out, w, h, (sw, sh, (w - sw) / 2, (h - sh) / 2));
+        }
+    }
+    for px in &mut out {
+        *px |= 0xFF00_0000;
+    }
+    Some(out.iter().flat_map(|p| p.to_le_bytes()).collect())
+}
+
 /// Every screen's picture, in desktop-window coordinates (`origin` is the
 /// window's top left on the screen).
 unsafe fn render(origin: (i32, i32)) -> Vec<Painted> {

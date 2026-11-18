@@ -95,8 +95,6 @@ const TIMER_CLOCK: usize = 14;
 const TIMER_SCAN2: usize = 16;
 const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
-/// Refreshes clear glass's bent edges (see `lens`).
-const TIMER_LENS: usize = 19;
 /// Pastes a clipboard item once the app it's for is in front again.
 const TIMER_PASTE: usize = 20;
 /// The next moment the calendar needs a look: a countdown to show or step,
@@ -515,9 +513,6 @@ struct App {
     /// its list of outputs is open.
     mixer: Mixer,
     outputs_open: bool,
-    /// Whether the theme bends light, and whether its refresh timer runs.
-    lens_wanted: bool,
-    lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
     /// Files being dragged over a taskbar app: (taskbar, app, since when,
@@ -1070,6 +1065,7 @@ fn setting_value(cfg: &Config, key: &str) -> String {
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
         "update_branch" => update::channel_label(&cfg.update_branch),
+        "ducker_targets" if cfg.ducker_targets.trim().is_empty() => "Every other app".into(),
         _ => cfg.get(key),
     }
 }
@@ -1247,9 +1243,8 @@ impl App {
         let mut cfg = Config::load();
         cfg.save_battery(battery());
         theme::set(&cfg.theme);
-        theme::set_colour(&cfg.theme_color, cfg.theme_hue, cfg.theme_intensity);
+        theme::set_accent(&cfg.accent, cfg.accent_glass);
         theme::set_edge(cfg.theme_edge);
-        theme::set_refraction(cfg.refraction);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
@@ -1264,6 +1259,10 @@ impl App {
             );
         }
         devices::listen(hwnd);
+        // Cascade's own clipboard history, for when Windows won't share its own.
+        unsafe {
+            let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
+        }
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
         if cfg.weather {
@@ -1403,8 +1402,6 @@ impl App {
             perf: Perf::new(cfg.perf_log),
             mixer: Mixer::default(),
             outputs_open: false,
-            lens_wanted: false,
-            lens_on: false,
             update_available: None,
             updating: false,
             power: battery(),
@@ -1457,7 +1454,6 @@ impl App {
         self.apply_flyout();
         self.apply_dock();
         self.retarget();
-        self.arm_lens();
         if std::env::args().any(|a| a == "--settings") {
             self.open_settings();
         }
@@ -1701,10 +1697,24 @@ impl App {
         self.sync_visualizer();
         if self.fullscreen {
             self.preview.hide();
+            self.raise_notch();
         }
         mouseedge::pause(self.fullscreen);
         mouseedge::raise();
         self.arm_stats();
+    }
+
+    /// With *Notch over fullscreen apps*, puts the notch (and its glass) on
+    /// top of everything, the fullscreen app included.
+    fn raise_notch(&mut self) {
+        if !(self.fullscreen && self.cfg.notch_fullscreen && self.shown) {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        self.notch_backdrop.restack(self.hwnd);
+        self.dirty = true;
     }
 
     /// Windows says when a fullscreen app closes, but a missed word (a game
@@ -1715,6 +1725,8 @@ impl App {
     fn check_fullscreen(&mut self) {
         if !self.fullscreen || shell::foreground_covers_screen() || shell::fullscreen_now() {
             self.fullscreen_misses = 0;
+            // A fullscreen app that's always on top may have come back over it.
+            self.raise_notch();
             return;
         }
         self.fullscreen_misses += 1;
@@ -2190,7 +2202,8 @@ impl App {
             self.wifi_open = false;
             self.bt_open = false;
         }
-        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen);
+        let visible = (self.cfg.notch || self.summoned)
+            && !(self.cfg.hide_in_fullscreen && self.fullscreen && !self.cfg.notch_fullscreen);
         if visible != self.shown {
             self.shown = visible;
             unsafe {
@@ -2385,7 +2398,7 @@ impl App {
                 // Another screen's taskbar: only that screen is affected.
                 match wp.0 as u32 {
                     ABN_FULLSCREENAPP => {
-                        self.screens[i].fullscreen = lp.0 != 0;
+                        self.screens[i].fullscreen = lp.0 != 0 && !shell::overlay_in_front();
                         self.show_docks();
                     }
                     ABN_POSCHANGED => self.screens[i].reposition(),
@@ -2394,7 +2407,18 @@ impl App {
                 return Some(LRESULT(0));
             }
             match wp.0 as u32 {
-                ABN_FULLSCREENAPP => self.set_fullscreen(lp.0 != 0),
+                ABN_FULLSCREENAPP => {
+                    // A see-through, click-through overlay over the whole
+                    // screen (Claude's computer-use frame, a screen recorder's
+                    // border) isn't a fullscreen app: stay.
+                    let on = lp.0 != 0 && !shell::overlay_in_front();
+                    if lp.0 != 0 && !on {
+                        config::log("fullscreen: Windows says a fullscreen app came up, but it's an overlay; staying");
+                    }
+                    if on != self.fullscreen {
+                        self.set_fullscreen(on);
+                    }
+                }
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => {
                     self.dock.reposition();
                     mouseedge::raise();
@@ -2420,6 +2444,24 @@ impl App {
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
+            // A window is being minimised (or brought back): Windows asks
+            // the shell where its taskbar button is, to animate it into (or
+            // out of) that button.
+            const HSHELL_GETMINRECT: u32 = 5;
+            if wp.0 as u32 == HSHELL_GETMINRECT && lp.0 != 0 {
+                #[repr(C)]
+                struct ShellHookInfo {
+                    hwnd: HWND,
+                    rc: RECT,
+                }
+                let info = unsafe { &mut *(lp.0 as *mut ShellHookInfo) };
+                let rect = std::iter::once(&self.dock).chain(self.screens.iter()).find_map(|d| d.min_rect(info.hwnd));
+                if let Some(r) = rect {
+                    info.rc = r;
+                    return Some(LRESULT(1));
+                }
+                return Some(LRESULT(0));
+            }
             self.on_shell(wp.0 as u32, HWND(lp.0 as *mut _));
             return Some(LRESULT(0));
         }
@@ -2441,7 +2483,7 @@ impl App {
             }
             WM_DWMCOLORIZATIONCOLORCHANGED if hwnd == self.hwnd => {
                 theme::refresh_accent();
-                if theme::follows_accent(&self.cfg.theme) {
+                if theme::follows_accent() {
                     self.apply_dock();
                     self.restyle();
                 }
@@ -2555,6 +2597,24 @@ impl App {
                 self.dirty = true;
             }
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
+            WM_CLIPBOARDUPDATE => {
+                let _ = self.clip_tx.send(ClipCmd::Record);
+            }
+            msg::RELOAD => {
+                self.reload_config();
+                if let Some(s) = &mut self.settings {
+                    let cfg = &self.cfg;
+                    s.sync_edits(&|k: &str| setting_value(cfg, k));
+                    s.invalidate();
+                }
+            }
+            msg::CLIP_FRONT => {
+                if let Some(c) = self.clips.as_ref().filter(|c| c.open) {
+                    crate::launcher::force_foreground(c.hwnd);
+                } else if self.widgets.open {
+                    crate::launcher::force_foreground(self.widgets.hwnd);
+                }
+            }
             msg::CLIP_PASTE => {
                 // The item is on the clipboard: back to the app, then paste.
                 if wp.0 == 1 && !self.clip_target.is_invalid() {
@@ -2852,6 +2912,13 @@ impl App {
                 self.reload_config();
                 if build == 1 {
                     self.on_menu(MenuCmd::Update);
+                } else {
+                    let from = update::channel_label(&self.cfg.update_branch);
+                    self.notify(
+                        format!("Updates now come from {from} \u{2014} Update now installs it"),
+                        theme::accent(),
+                        true,
+                    );
                 }
             }
             update::AVAILABLE => {
@@ -3227,7 +3294,7 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         unsafe {
-            if ![TIMER_TICK, TIMER_POMODORO, TIMER_SWITCH, TIMER_LENS].contains(&id) {
+            if ![TIMER_TICK, TIMER_POMODORO, TIMER_SWITCH].contains(&id) {
                 let _ = KillTimer(Some(self.hwnd), id);
             }
         }
@@ -3287,15 +3354,6 @@ impl App {
                 self.announce_events();
                 self.retarget();
                 self.arm_calendar();
-            }
-            TIMER_LENS => {
-                // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
-                if !crate::lens::refresh() {
-                    self.lens_on = false;
-                    unsafe {
-                        let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
-                    }
-                }
             }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_SHELL => {
@@ -3363,6 +3421,14 @@ impl App {
         if event == EVENT_SYSTEM_MOVESIZESTART {
             crate::snapdrag::on_start(hwnd);
             return;
+        }
+        // Its taskbar button takes it in (or lets it out).
+        if event == EVENT_SYSTEM_MINIMIZESTART || event == EVENT_SYSTEM_MINIMIZEEND {
+            let into = event == EVENT_SYSTEM_MINIMIZESTART;
+            self.dock.on_minimize(hwnd, into);
+            for d in &mut self.screens {
+                d.on_minimize(hwnd, into);
+            }
         }
         // A window was minimised: Windows may leave a stub of it on the screen; once it has, move it off.
         if event == EVENT_SYSTEM_MINIMIZESTART && shellmode::active() {
@@ -3668,9 +3734,8 @@ impl App {
         update::configure(&self.cfg.update_branch, &self.cfg.github_token);
         self.cfg.save_battery(self.power);
         theme::set(&self.cfg.theme);
-        theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
+        theme::set_accent(&self.cfg.accent, self.cfg.accent_glass);
         theme::set_edge(self.cfg.theme_edge);
-        theme::set_refraction(self.cfg.refraction);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -3699,28 +3764,9 @@ impl App {
         }
     }
 
-    /// Keeps clear glass's bent edges up to date with what's behind them, a
-    /// few times a second, while the theme bends light and a ring is on
-    /// screen (`frame` starts it again when one comes back).
-    fn arm_lens(&mut self) {
-        self.lens_wanted = theme::refracts(self.cfg.acrylic);
-        let on = self.lens_wanted && crate::lens::active();
-        if on != self.lens_on {
-            self.lens_on = on;
-            unsafe {
-                if on {
-                    SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
-                } else {
-                    let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
-                }
-            }
-        }
-    }
-
     /// Redraws every surface, e.g. after the theme changed.
     fn restyle(&mut self) {
         self.gfx.clear_cache();
-        self.arm_lens();
         self.dirty = true;
         self.dock.dirty = true;
         self.launcher.dirty = true;
@@ -3802,6 +3848,8 @@ impl App {
         self.pd_mut().set_visible(true);
         self.dock_held = true;
         self.pd_mut().set_held(true);
+        // Over a fullscreen app, whether or not Windows said there was one.
+        self.pd_mut().raise();
         let k = self.pd().k();
         self.launcher.show(k, self.dock.pinned_apps());
     }
@@ -3905,7 +3953,11 @@ impl App {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
             Change::Set(key, v) if key.starts_with("win_") => crate::winset::set(key, &v),
             // Run once this handler has returned: pickers and some buttons wait for an answer.
-            Change::Action(key) if key.starts_with("win_") || key == "update_branch" => crate::winset::queue(key),
+            Change::Action(key)
+                if key.starts_with("win_") || matches!(key, "update_branch" | "ducker_trigger" | "ducker_targets") =>
+            {
+                crate::winset::queue(key)
+            }
             Change::Set("shell_mode", v) => {
                 let on = v == "true";
                 shellmode::set_registered(on);
@@ -4757,6 +4809,15 @@ impl App {
                 self.widgets.on_move(x, y);
             }
             WM_MOUSELEAVE => self.widgets.on_leave(),
+            WM_MOUSEWHEEL => {
+                // Screen coordinates: the panel's own, for the card under it.
+                let (x, y) = lparam_xy(lp);
+                let mut at = POINT { x, y };
+                unsafe {
+                    let _ = ScreenToClient(self.widgets.hwnd, &mut at);
+                }
+                self.widgets.on_wheel(at.x, at.y, ((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+            }
             WM_LBUTTONDOWN => {
                 // A card may be picked up here and carried to a new place.
                 let (x, y) = lparam_xy(lp);
@@ -5259,6 +5320,7 @@ impl App {
         unsafe {
             match m {
                 WM_TIMER if wp.0 == preview::TIMER_PEEK => self.preview.on_timer(),
+                WM_TIMER if wp.0 == preview::TIMER_MOVE => self.preview.on_move_timer(),
                 WM_MOUSEMOVE => {
                     let _ = KillTimer(Some(dock), TIMER_PREVIEW_HIDE);
                     let _ = KillTimer(Some(dock), TIMER_DOCK_HIDE);
@@ -5539,10 +5601,6 @@ impl App {
             self.perf.end(Surface::Launcher, t);
         }
         self.perf.flush();
-        // A ring of bent light came on screen (or went): refresh it, or stop.
-        if self.lens_wanted && crate::lens::active() != self.lens_on {
-            self.arm_lens();
-        }
 
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.

@@ -8,7 +8,8 @@
 //! Every other branch gets one pre-release, `branch-<name>`, replaced on each
 //! push and named `<branch> (build N)`. Settings > Updates > Update from picks
 //! the branch (`update_branch`; empty for the default branch's releases), and
-//! switching installs that branch's newest build even when its number is lower.
+//! picking one only keeps the choice: the next update (Update now) installs that
+//! branch's newest build, even when its number is lower.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -161,7 +162,7 @@ fn wanted(r: &Release, channel: &str) -> bool {
 }
 
 /// Settings > Updates > Update from: lists Stable and every branch with a
-/// build, and keeps the choice (offering to install from it straight away).
+/// build, and keeps the choice without installing anything.
 pub fn pick_channel(owner: HWND) {
     let (channel, token) = setup();
     // A short wait on the network, on a thread so a slow answer can be left.
@@ -189,13 +190,10 @@ pub fn pick_channel(owner: HWND) {
     let current = keys.iter().position(|k| *k == channel);
     let Some(i) = crate::winset::pick(owner, &options, current) else { return };
     let chosen = keys.swap_remove(i);
+    // Only the choice is kept: nothing is installed until Update now (or the
+    // automatic check's notice) is clicked.
     crate::config::Config::set("update_branch", &chosen);
-    let install = chosen != running_channel()
-        && crate::winset::confirm(
-            owner,
-            &format!("Install the newest build from {} now? Cascade restarts.", channel_label(&chosen)),
-        );
-    msg::post(msg::UPDATE, PICKED, install as isize);
+    msg::post(msg::UPDATE, PICKED, 0);
 }
 
 /// The API url of the asset named `cascade.exe` (a release may carry other
