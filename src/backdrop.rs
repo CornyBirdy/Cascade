@@ -265,6 +265,17 @@ impl Backdrop {
         }
     }
 
+    /// Puts the blur back directly under `content` (after `content` was
+    /// brought to the top), where it is.
+    pub fn restack(&self, content: HWND) {
+        if !self.shown {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(content), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
     /// Puts the blur at `r` (screen px), directly under `content`.
     pub fn place(&mut self, r: RECT, content: HWND) {
         if r == self.rect && self.shown {

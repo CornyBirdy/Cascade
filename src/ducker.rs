@@ -4,7 +4,7 @@
 //!
 //! A thread of its own looks at Windows' audio sessions a few times a second.
 //! An app counts as speaking when its session is active and its meter is above
-//! a small threshold for a moment; others fade down to `level` of what they were
+//! the threshold (`ducker_threshold`) for a moment; others fade down to `level` of what they were
 //! and back up again. Volumes you change by hand while they're down are taken
 //! as the new "normal". Everything is put back when the ducker is turned off or
 //! Cascade closes.
@@ -22,8 +22,6 @@ use windows::Win32::System::Com::*;
 
 /// How often the sessions are looked at.
 const TICK: Duration = Duration::from_millis(80);
-/// A meter reading above this is sound (about -34 dB).
-const LOUD: f32 = 0.02;
 /// How long the trigger has to be loud before the others go down, so a single
 /// notification ping doesn't.
 const ATTACK: Duration = Duration::from_millis(150);
@@ -43,6 +41,9 @@ pub struct Params {
     pub level: f32,
     /// How long after the trigger goes quiet the others come back.
     pub release: Duration,
+    /// A meter reading above this is sound (`ducker_threshold`, in dB, as a
+    /// share of full scale: -34 dB is 0.02).
+    pub loud: f32,
 }
 
 /// "Discord, Spotify.exe" as lower-case process names: ["discord", "spotify"].
@@ -186,7 +187,7 @@ fn sessions(names: &mut HashMap<u32, String>) -> Result<Vec<Sess>> {
 fn tick(st: &mut State, p: &Params, dt: Duration, names: &mut HashMap<u32, String>) -> Result<()> {
     let list = sessions(names)?;
     let now = Instant::now();
-    let speaking = list.iter().any(|s| s.active && s.peak > LOUD && listed(&s.name, &p.trigger));
+    let speaking = list.iter().any(|s| s.active && s.peak > p.loud && listed(&s.name, &p.trigger));
     if speaking {
         st.last_loud = Some(now);
         let since = *st.loud_since.get_or_insert(now);
@@ -277,6 +278,114 @@ fn run(stop: Arc<AtomicBool>) {
     unsafe {
         CoUninitialize();
     }
+}
+
+// -------------------------------------------------------------- picking --
+
+/// The apps with an audio session now (playing, or ready to: Discord in a
+/// call), as (process name, what to call it), by name.
+pub fn audio_apps() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    // Called on the UI thread, where COM is already set up.
+    unsafe {
+        let mut go = || -> Result<()> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let devices = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
+            for d in 0..devices.GetCount()? {
+                let Ok(device) = devices.Item(d) else { continue };
+                let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+                let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+                for i in 0..sessions.GetCount()? {
+                    let Ok(session) = sessions.GetSession(i) else { continue };
+                    let Ok(s2) = session.cast::<IAudioSessionControl2>() else { continue };
+                    let pid = s2.GetProcessId().unwrap_or(0);
+                    if pid == 0 {
+                        continue;
+                    }
+                    let Some(path) = crate::dock::process_path(pid) else { continue };
+                    let file = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_lowercase();
+                    let name = file.strip_suffix(".exe").unwrap_or(&file).to_string();
+                    if name.is_empty() || out.iter().any(|(n, _)| *n == name) {
+                        continue;
+                    }
+                    let shown = crate::icons::exe_description(&path).unwrap_or_else(|| name.clone());
+                    out.push((name, shown));
+                }
+            }
+            Ok(())
+        };
+        let _ = go();
+    }
+    out.sort_by_key(|(_, shown)| shown.to_lowercase());
+    out
+}
+
+/// The apps in a list setting (`ducker_trigger`, `ducker_targets`), joined back.
+fn join(list: &[String]) -> String {
+    list.join(", ")
+}
+
+/// Settings > General: picks the apps for `key` (`ducker_trigger` or
+/// `ducker_targets`) from the ones with sound, a tick on each chosen one.
+/// The list stays up so several can be ticked; Done or a click elsewhere
+/// closes it.
+pub fn pick_apps(owner: windows::Win32::Foundation::HWND, key: &str) {
+    use crate::menu::{Entry, Item};
+    let targets = key == "ducker_targets";
+    let apps = audio_apps();
+    let mut chosen = parse_list(&crate::config::Config::load().get(key));
+    const DONE: usize = 1;
+    const EVERY: usize = 2;
+    loop {
+        let mut entries = Vec::new();
+        if targets {
+            entries.push(crate::menu::check(EVERY, "Every other app", chosen.is_empty()));
+            entries.push(Entry::Separator);
+        }
+        entries.push(Entry::Header("Apps with sound".into()));
+        let mut names: Vec<(String, String)> = apps.clone();
+        // Chosen apps that aren't making sound now stay on the list.
+        for c in &chosen {
+            if !names.iter().any(|(n, _)| n == c) {
+                names.push((c.clone(), c.clone()));
+            }
+        }
+        if names.is_empty() {
+            entries.push(Entry::Item(Item { id: 0, text: "No app has sound right now".into(), ..Default::default() }));
+        }
+        for (i, (name, shown)) in names.iter().enumerate() {
+            entries.push(Entry::Item(Item {
+                id: 10 + i,
+                text: shown.clone(),
+                hint: if shown.to_lowercase() == *name { String::new() } else { name.clone() },
+                checked: chosen.contains(name),
+                enabled: true,
+                ..Default::default()
+            }));
+        }
+        entries.push(Entry::Separator);
+        entries.push(crate::menu::check(DONE, "Done", false));
+        let picked = crate::menu::show(owner, entries, crate::menu::Place::Cursor);
+        match picked {
+            0 | DONE => break,
+            EVERY => {
+                chosen.clear();
+                crate::config::Config::set(key, "");
+                break;
+            }
+            n => {
+                let Some((name, _)) = names.get(n - 10) else { break };
+                match chosen.iter().position(|c| c == name) {
+                    Some(at) => {
+                        chosen.remove(at);
+                    }
+                    None => chosen.push(name.clone()),
+                }
+                crate::config::Config::set(key, &join(&chosen));
+            }
+        }
+    }
+    crate::msg::post(crate::msg::RELOAD, 0, 0);
 }
 
 #[cfg(test)]

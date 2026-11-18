@@ -349,6 +349,7 @@ pub fn action(key: &str, owner: HWND) {
         "win_update" => system::check_updates(),
         "win_taskmgr" => open("taskmgr.exe"),
         "update_branch" => crate::update::pick_channel(owner),
+        "ducker_trigger" | "ducker_targets" => crate::ducker::pick_apps(owner, key),
         _ => {}
     }
 }

@@ -81,7 +81,7 @@ pub fn fullscreen_now() -> bool {
 pub fn fullscreen_screen() -> Option<RECT> {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() || is_desktop(fg) {
+        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() || is_desktop(fg) || is_overlay(fg) {
             return None;
         }
         let mut pid = 0u32;
@@ -104,6 +104,70 @@ pub fn fullscreen_screen() -> Option<RECT> {
     }
 }
 
+/// Whether `h` is an overlay rather than an app: a window you click
+/// through (Claude's computer-use frame, a screen recorder's border, a
+/// game overlay) or a see-through one that can't be activated.
+pub fn is_overlay(h: HWND) -> bool {
+    let ex = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+    ex & WS_EX_TRANSPARENT.0 != 0 || (ex & WS_EX_LAYERED.0 != 0 && ex & WS_EX_NOACTIVATE.0 != 0)
+}
+
+/// Whether `h` reaches every edge of its screen.
+unsafe fn covers_its_screen(h: HWND) -> bool {
+    let mut r = RECT::default();
+    if GetWindowRect(h, &mut r).is_err() {
+        return false;
+    }
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+        return false;
+    }
+    let m = mi.rcMonitor;
+    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+}
+
+unsafe extern "system" fn collect_top(h: HWND, out: LPARAM) -> windows::core::BOOL {
+    (*(out.0 as *mut Vec<HWND>)).push(h);
+    true.into()
+}
+
+/// When Windows says a fullscreen app came up: whether it's only an overlay
+/// over the screen, with no fullscreen app under it. The window in front
+/// decides if it covers its screen; otherwise the topmost window that does.
+pub fn overlay_in_front() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if !fg.is_invalid() && IsWindowVisible(fg).as_bool() && covers_its_screen(fg) {
+            return is_overlay(fg);
+        }
+        let own = windows::Win32::System::Threading::GetCurrentProcessId();
+        let mut all: Vec<HWND> = Vec::new();
+        let _ = EnumWindows(Some(collect_top), LPARAM(&mut all as *mut _ as isize));
+        for h in all {
+            if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() || is_desktop(h) {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == own || !covers_its_screen(h) {
+                continue;
+            }
+            let mut cloaked = 0u32;
+            let _ = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                h,
+                windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                &mut cloaked as *mut u32 as *mut std::ffi::c_void,
+                4,
+            );
+            if cloaked != 0 {
+                continue;
+            }
+            return is_overlay(h);
+        }
+        false
+    }
+}
+
 /// Whether the window in front (not the desktop) covers its whole screen.
 pub fn foreground_covers_screen() -> bool {
     if crate::shellmode::active() {
@@ -114,19 +178,10 @@ pub fn foreground_covers_screen() -> bool {
         if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || fg == GetShellWindow() {
             return false;
         }
-        if class_is(fg, "Progman") || class_is(fg, "WorkerW") {
+        if class_is(fg, "Progman") || class_is(fg, "WorkerW") || is_overlay(fg) {
             return false;
         }
-        let mut r = RECT::default();
-        if GetWindowRect(fg, &mut r).is_err() {
-            return false;
-        }
-        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
-            return false;
-        }
-        let m = mi.rcMonitor;
-        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+        covers_its_screen(fg)
     }
 }
 

@@ -1153,6 +1153,30 @@ impl Dock {
 
     /// Keeps the taskbar in view while a pop-up is open. Returns true when
     /// the last one closed and auto-hide should be armed again.
+    /// Brings the taskbar to the very top of the always-on-top windows, over
+    /// a fullscreen app that is always on top itself (or that went
+    /// fullscreen without Windows saying so, leaving the taskbar under it).
+    pub fn raise(&mut self) {
+        if !self.shown {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        for b in &self.backdrops {
+            b.restack(self.hwnd);
+        }
+        self.dirty = true;
+    }
+
     pub fn set_held(&mut self, held: bool) -> bool {
         let was = self.held;
         self.held = held;

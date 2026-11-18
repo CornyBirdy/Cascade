@@ -231,6 +231,7 @@ enum Unit {
     Count,
     Seconds,
     Degrees,
+    Db,
 }
 
 #[derive(Clone)]
@@ -572,6 +573,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("hide_in_fullscreen", "Hide in fullscreen", "Get out of the way of games and videos.", Toggle),
             row(
+                "notch_fullscreen",
+                "Notch over fullscreen apps",
+                "Keep the notch on top of fullscreen apps and games (the taskbar still hides).",
+                Toggle,
+            ),
+            row(
                 "super_drag",
                 "Super drag",
                 "Hold the Win key and drag a window by any part of it, not only its title bar.",
@@ -595,17 +602,13 @@ fn rows(section: usize) -> Vec<Row> {
                 "While one app is making sound (Discord, with friends talking), turn the others down. They come back when it stops.",
                 Toggle,
             ),
+            row("ducker_trigger", "When this app makes sound", "Pick from the apps with sound (several if you like).", Pick),
+            row("ducker_targets", "Turn these apps down", "Pick the apps, or every other app.", Pick),
             row(
-                "ducker_trigger",
-                "When this app makes sound",
-                "Its name as in Task Manager's Details tab, without .exe. Several: separate with commas.",
-                Text { secret: false },
-            ),
-            row(
-                "ducker_targets",
-                "Turn these apps down",
-                "Names, separated by commas, like Spotify, game. Empty: every other app.",
-                Text { secret: false },
+                "ducker_threshold",
+                "Counts as sound above",
+                "Lower hears quiet voices too; higher only loud sound.",
+                slider(-60.0, -10.0, 1.0, Unit::Db),
             ),
             row(
                 "ducker_level",
@@ -1280,7 +1283,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
         (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
-        (0, "ducker_trigger" | "ducker_targets" | "ducker_level" | "ducker_release") => on("ducker"),
+        (0, "ducker_trigger" | "ducker_targets" | "ducker_threshold" | "ducker_level" | "ducker_release") => on("ducker"),
         // Taskbar.
         (3, "dock") => true,
         (3, _) if !on("dock") => false,
@@ -1407,6 +1410,7 @@ fn fmt(v: f32, unit: Unit) -> String {
         Unit::Count => format!("{v:.0}"),
         Unit::Seconds => format!("{v:.0} s"),
         Unit::Degrees => format!("{v:.0}\u{b0}"),
+        Unit::Db => format!("{v:.0} dB"),
     }
 }
 

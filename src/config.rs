@@ -42,6 +42,9 @@ notch_edge = top
 notch_position = 0.5
 # Hide the notch and dock while a fullscreen app or game is in front.
 hide_in_fullscreen = true
+# Keep the notch on top of fullscreen apps and games anyway (the taskbar still
+# gets out of the way).
+notch_fullscreen = false
 # On battery (laptops), go easy on it: no refraction, no visualizer bars, and
 # the PC's stats read less often. Back to normal once it's plugged in.
 battery_saver = false
@@ -61,6 +64,9 @@ ducker_targets =
 ducker_level = 0.25
 # How long after it stops they come back, in milliseconds.
 ducker_release = 1500
+# How loud it has to be to count as making sound, in dB (-60 hears a whisper,
+# -10 only loud sound).
+ducker_threshold = -34
 # While music or a focus timer plays, show it on the closed notch: the notch
 # style grows with album art / the timer, the lip lights a coloured line.
 live_activity = true
@@ -311,6 +317,7 @@ pub struct Config {
     pub notch_edge: String,
     pub notch_position: f32,
     pub hide_in_fullscreen: bool,
+    pub notch_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
     pub snap_drag: bool,
@@ -319,6 +326,7 @@ pub struct Config {
     pub ducker_targets: String,
     pub ducker_level: f32,
     pub ducker_release: u32,
+    pub ducker_threshold: f32,
     pub live_activity: bool,
     pub visualizer: bool,
     pub lip_visualizer: bool,
@@ -433,6 +441,7 @@ impl Default for Config {
             notch_edge: "top".into(),
             notch_position: 0.5,
             hide_in_fullscreen: true,
+            notch_fullscreen: false,
             battery_saver: false,
             super_drag: true,
             snap_drag: true,
@@ -441,6 +450,7 @@ impl Default for Config {
             ducker_targets: String::new(),
             ducker_level: 0.25,
             ducker_release: 1500,
+            ducker_threshold: -34.0,
             live_activity: true,
             visualizer: true,
             lip_visualizer: true,
@@ -593,6 +603,7 @@ impl Config {
             targets: crate::ducker::parse_list(&self.ducker_targets),
             level: self.ducker_level,
             release: std::time::Duration::from_millis(self.ducker_release as u64),
+            loud: 10f32.powf(self.ducker_threshold / 20.0),
         })
     }
 
@@ -701,6 +712,7 @@ impl Config {
                 "notch_edge" if matches!(v, "top" | "bottom" | "left" | "right") => c.notch_edge = v.into(),
                 "notch_position" => set_f(&mut c.notch_position, 0.0, 1.0),
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
+                "notch_fullscreen" => set_b(&mut c.notch_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
                 "snap_drag" => set_b(&mut c.snap_drag),
@@ -709,6 +721,7 @@ impl Config {
                 "ducker_targets" => c.ducker_targets = v.trim_matches('"').to_string(),
                 "ducker_level" => set_f(&mut c.ducker_level, 0.0, 1.0),
                 "ducker_release" => set_u(&mut c.ducker_release, 200.0, 10000.0),
+                "ducker_threshold" => set_f(&mut c.ducker_threshold, -60.0, -6.0),
                 "live_activity" => set_b(&mut c.live_activity),
                 "visualizer" => set_b(&mut c.visualizer),
                 "lip_visualizer" => set_b(&mut c.lip_visualizer),
@@ -862,6 +875,7 @@ impl Config {
             "notch_edge" => self.notch_edge.clone(),
             "notch_position" => self.notch_position.to_string(),
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
+            "notch_fullscreen" => b(self.notch_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
             "snap_drag" => b(self.snap_drag),
@@ -870,6 +884,7 @@ impl Config {
             "ducker_targets" => self.ducker_targets.clone(),
             "ducker_level" => self.ducker_level.to_string(),
             "ducker_release" => self.ducker_release.to_string(),
+            "ducker_threshold" => self.ducker_threshold.to_string(),
             "live_activity" => b(self.live_activity),
             "visualizer" => b(self.visualizer),
             "lip_visualizer" => b(self.lip_visualizer),

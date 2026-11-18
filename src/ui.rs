@@ -1067,6 +1067,7 @@ fn setting_value(cfg: &Config, key: &str) -> String {
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
         "update_branch" => update::channel_label(&cfg.update_branch),
+        "ducker_targets" if cfg.ducker_targets.trim().is_empty() => "Every other app".into(),
         _ => cfg.get(key),
     }
 }
@@ -1702,10 +1703,32 @@ impl App {
         self.sync_visualizer();
         if self.fullscreen {
             self.preview.hide();
+            self.raise_notch();
         }
         mouseedge::pause(self.fullscreen);
         mouseedge::raise();
         self.arm_stats();
+    }
+
+    /// With *Notch over fullscreen apps*, puts the notch (and its glass) on
+    /// top of everything, the fullscreen app included.
+    fn raise_notch(&mut self) {
+        if !(self.fullscreen && self.cfg.notch_fullscreen && self.shown) {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        self.notch_backdrop.restack(self.hwnd);
+        self.dirty = true;
     }
 
     /// Windows says when a fullscreen app closes, but a missed word (a game
@@ -1716,6 +1739,8 @@ impl App {
     fn check_fullscreen(&mut self) {
         if !self.fullscreen || shell::foreground_covers_screen() || shell::fullscreen_now() {
             self.fullscreen_misses = 0;
+            // A fullscreen app that's always on top may have come back over it.
+            self.raise_notch();
             return;
         }
         self.fullscreen_misses += 1;
@@ -2191,7 +2216,7 @@ impl App {
             self.wifi_open = false;
             self.bt_open = false;
         }
-        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen);
+        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen && !self.cfg.notch_fullscreen);
         if visible != self.shown {
             self.shown = visible;
             unsafe {
@@ -2386,7 +2411,7 @@ impl App {
                 // Another screen's taskbar: only that screen is affected.
                 match wp.0 as u32 {
                     ABN_FULLSCREENAPP => {
-                        self.screens[i].fullscreen = lp.0 != 0;
+                        self.screens[i].fullscreen = lp.0 != 0 && !shell::overlay_in_front();
                         self.show_docks();
                     }
                     ABN_POSCHANGED => self.screens[i].reposition(),
@@ -2395,7 +2420,18 @@ impl App {
                 return Some(LRESULT(0));
             }
             match wp.0 as u32 {
-                ABN_FULLSCREENAPP => self.set_fullscreen(lp.0 != 0),
+                ABN_FULLSCREENAPP => {
+                    // A see-through, click-through overlay over the whole
+                    // screen (Claude's computer-use frame, a screen recorder's
+                    // border) isn't a fullscreen app: stay.
+                    let on = lp.0 != 0 && !shell::overlay_in_front();
+                    if lp.0 != 0 && !on {
+                        config::log("fullscreen: Windows says a fullscreen app came up, but it's an overlay; staying");
+                    }
+                    if on != self.fullscreen {
+                        self.set_fullscreen(on);
+                    }
+                }
                 ABN_POSCHANGED if hwnd == self.dock.hwnd => {
                     self.dock.reposition();
                     mouseedge::raise();
@@ -2558,6 +2594,14 @@ impl App {
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
             WM_CLIPBOARDUPDATE => {
                 let _ = self.clip_tx.send(ClipCmd::Record);
+            }
+            msg::RELOAD => {
+                self.reload_config();
+                if let Some(s) = &mut self.settings {
+                    let cfg = &self.cfg;
+                    s.sync_edits(&|k: &str| setting_value(cfg, k));
+                    s.invalidate();
+                }
             }
             msg::CLIP_FRONT => {
                 if let Some(c) = self.clips.as_ref().filter(|c| c.open) {
@@ -3808,6 +3852,8 @@ impl App {
         self.pd_mut().set_visible(true);
         self.dock_held = true;
         self.pd_mut().set_held(true);
+        // Over a fullscreen app, whether or not Windows said there was one.
+        self.pd_mut().raise();
         let k = self.pd().k();
         self.launcher.show(k, self.dock.pinned_apps());
     }
@@ -3911,7 +3957,11 @@ impl App {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
             Change::Set(key, v) if key.starts_with("win_") => crate::winset::set(key, &v),
             // Run once this handler has returned: pickers and some buttons wait for an answer.
-            Change::Action(key) if key.starts_with("win_") || key == "update_branch" => crate::winset::queue(key),
+            Change::Action(key)
+                if key.starts_with("win_") || matches!(key, "update_branch" | "ducker_trigger" | "ducker_targets") =>
+            {
+                crate::winset::queue(key)
+            }
             Change::Set("shell_mode", v) => {
                 let on = v == "true";
                 shellmode::set_registered(on);

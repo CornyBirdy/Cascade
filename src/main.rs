@@ -145,6 +145,8 @@ pub mod msg {
     /// The clipboard reader was refused: bring Cascade's clipboard menu (or the
     /// widgets panel) to the front so Windows hands the history over.
     pub const CLIP_FRONT: u32 = WM_APP + 46;
+    /// A picker changed the config file: read it again.
+    pub const RELOAD: u32 = WM_APP + 47;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
