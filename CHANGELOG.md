@@ -9,6 +9,15 @@ Settings > Updates > What's new opens the list.
 **New**
 - **Shell mode (experimental)**: Settings > General > *Run as the Windows shell*. From your next sign-in Windows starts Cascade in Explorer's place, so the Windows taskbar and Start menu are never made at all, where until now Cascade hid the one and kept the Win key from the other. Cascade then does the shell's jobs itself: the desktop and wallpaper, the space under the taskbar, the tray, the programs that start with Windows, the keyboard's volume and media keys, new notifications in the notch, and the shortcuts Explorer answered (Win+E, Win+R, Win+D, Win+M, Win+I, Win+L, Win+S, Win+arrows to snap, Win+Shift+arrows to change screen, Win+1 to 9 for the taskbar's apps, Win+Shift+S, Ctrl+Esc). A small guard process starts Cascade again if it ever goes away, and turns shell mode off and brings Explorer back if Cascade fails three times in a row. The first sign-in is a trial: a box asks whether to keep it, and no answer within two minutes brings Explorer back. `cascade.exe --shell-off` (from Task Manager's *Run new task*) is the way out if anything goes wrong. *Quit to Explorer* in the right-click menu hands over for the rest of the session. Off by default. Without Explorer, Store-style apps (Windows' own Settings among them) may not open, and there are no virtual desktops, quick settings or desktop icons: see the README's *Shell mode* section before turning it on.
 
+**Shell mode: as if Explorer never existed**
+- **Windows' settings on Cascade's pages**: Display, Sound, Network & Bluetooth, Personalisation, Apps, Power & battery, Time & language, Privacy & access and System, in Cascade's Settings. Win+I and Settings links open them in shell mode. Includes a night light of Cascade's own.
+- **Notification pop-ups** in Cascade's theme, with Do Not Disturb.
+- **Desktop icons**, with each item's own shell menu, New folder, and dropping files on the desktop.
+- **Snapping by dragging** to an edge or corner, with a preview.
+- **Start search finds files and settings**.
+- **Win+P**, **Win+Space** (and a keyboard-language taskbar widget), **Win+.** (an emoji panel), **Win+H** (dictation), and **Alt+F4 on the desktop**.
+- **Controls quick toggles**: airplane mode, night light, mobile hotspot, Do Not Disturb.
+
 **Shell mode, after its first try**
 - **Wallpaper**: Cascade draws Windows' wallpaper itself (it stayed black), fitted to each screen as Windows is set to. Right-click the desktop to change the picture or how it fits. The desktop is laid out as Explorer's, so **Wallpaper Engine** and **Lively** can put their wallpaper on it.
 - **Win+I froze Cascade** and opened nothing: Windows' Settings can't open without Explorer, and asking for it hung Cascade. Settings links now open the nearest classic Control Panel page straight away, and everything shell mode opens is opened without holding Cascade up.

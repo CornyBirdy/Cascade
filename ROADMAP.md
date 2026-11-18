@@ -38,24 +38,13 @@ Tried once on a real PC (taskbar, Start, shortcuts and tray worked). Fixed since
 
 ## Shell mode: as if Explorer never existed
 
-The goal before merging to `main`: nothing in daily use falls back to Windows' own UI, or needs Explorer.
+Built (untested on a real PC so far): Windows' settings on Cascade's pages, notification pop-ups and Do Not Disturb, snapping by dragging, Win+P, Start searching files and settings, keyboard language (Win+Space and a taskbar widget), Controls' quick toggles, desktop icons, the emoji panel, Alt+F4 on the desktop, dictation (Win+H).
 
-**First (gaps hit every day)**
-- [ ] **Cascade Settings for Windows**: Cascade's own pages for what Windows' Settings did. Display (resolution, scale, refresh rate, screen layout, night light), Sound (devices, levels), Network (Wi-Fi with password entry, Ethernet, VPN, mobile hotspot), Bluetooth (pairing new devices), Personalisation (wallpaper, accent colour, light/dark mode), Apps (installed list, uninstall), Power and battery, Date and time, About.
-- [ ] **Real notification pop-ups**: banners with the app's buttons and quick reply, plus Do Not Disturb.
-- [ ] **Window snapping**: drag to an edge or corner to snap, and a layout picker (Explorer did both).
-- [ ] **Win+P**: duplicate / extend / one screen only.
-- [ ] **Start searches files and settings** (Windows' search index works without Explorer).
-- [ ] **Keyboard language switcher** (Win+Space, Alt+Shift) with an indicator on the taskbar.
+Still to do:
+- [ ] **Desktop icons where you drag them** (they're arranged by name), and renaming in place (F2).
+- [ ] **Keyboard on desktop icons** (Enter, Delete, arrows).
+- [ ] **Emoji search by name**.
+- [ ] **Screen recording** (Win+Alt+R) of Cascade's own.
+- [ ] **Cascade's own file manager** (big).
 
-**Next**
-- [ ] **More Controls toggles**: airplane mode, night light, mobile hotspot, battery saver, Do Not Disturb.
-- [ ] **Desktop icons**, and right-click New folder / drop files on the desktop.
-- [ ] **Emoji panel** (Win+.).
-- [ ] **Shut-down box** on Alt+F4 at the desktop.
-- [ ] **Stand-ins for Store-only tools**: Game Bar (Win+G), screen recording, dictation (Win+H), casting (Win+K).
-
-**Big**
-- [ ] **Cascade's own file manager** (File Explorer windows still open, but they're Windows' look).
-
-**Not possible**: the lock screen, sign-in, UAC prompts and the Ctrl+Alt+Del screen run on Windows' secure desktop, which no app can draw on. Pure Store apps (Calculator, Photos, Windows' Settings) only open through Explorer.
+**Not possible**: the lock screen, sign-in, UAC prompts and the Ctrl+Alt+Del screen (Windows' secure desktop); pure Store apps (Calculator, Photos, Windows' Settings, Game Bar); casting (Win+K); apps' own buttons in notification pop-ups; setting default apps from another program.
