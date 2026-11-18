@@ -26,7 +26,7 @@ Settings > Updates > What's new opens the list.
 - **Switching without signing out**: turning the setting on offers to switch now, closing Explorer and taking over on the spot; turning it off offers to bring Explorer back now.
 - **Minimised windows** left a stub (a small title bar) along the bottom of the screen: Cascade now tells Windows it's the taskbar, and moves any stub Windows leaves anyway off the screen.
 - **A busy pointer over Wallpaper Engine's wallpaper**: the desktop now sets the arrow, as Explorer's does.
-- **Snips** with Win+Shift+S, Cascade's own (Windows' Snipping Tool is a Store app): on the clipboard and in Pictures\Screenshots.
+- **The Snipping Tool, Cascade's own** (Windows' is a Store app): rectangle, window, full-screen and freeform snips with a delay (Win+Shift+S, Print Screen); an editor with pen, highlighter, eraser, crop, undo, copying text out of the picture, copy and save as; and **screen recording** to MP4 with the PC's sound (Win+Shift+R, Win+Alt+R).
 
 ## 2026-11-09
 

@@ -44,7 +44,8 @@ Still to do:
 - [ ] **Desktop icons where you drag them** (they're arranged by name), and renaming in place (F2).
 - [ ] **Keyboard on desktop icons** (Enter, Delete, arrows).
 - [ ] **Emoji search by name**.
-- [ ] **Screen recording** (Win+Alt+R) of Cascade's own.
+- [ ] **Screen recording**: a microphone track, and recording games in exclusive fullscreen (Windows' capture API instead of copying the screen).
+- [ ] **Snip editor**: a ruler and protractor, shapes and arrows, and opening the snip in another app.
 - [ ] **Cascade's own file manager** (big).
 
 **Not possible**: the lock screen, sign-in, UAC prompts and the Ctrl+Alt+Del screen (Windows' secure desktop); pure Store apps (Calculator, Photos, Windows' Settings, Game Bar); casting (Win+K); apps' own buttons in notification pop-ups; setting default apps from another program.
