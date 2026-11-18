@@ -790,6 +790,10 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
         // Cascade's is there from the start (see `create_desktop`).
         0x052C => LRESULT(0),
         WM_ERASEBKGND => LRESULT(1),
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(None, IDC_ARROW).ok());
+            LRESULT(1)
+        }
         // Always under every other window, whatever asks to move it.
         WM_WINDOWPOSCHANGING => {
             let pos = &mut *(lp.0 as *mut WINDOWPOS);
@@ -832,6 +836,13 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
 /// The window the wallpaper is drawn in, and where wallpaper apps put theirs.
 unsafe extern "system" fn wallpaper_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
+        // The pointer over the desktop is the arrow. A wallpaper app's window
+        // in here (Wallpaper Engine's) sets none, and asks this one: without
+        // an answer the pointer kept whatever it last was (the busy one).
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(None, IDC_ARROW).ok());
+            LRESULT(1)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             crate::wallpaper::paint(hwnd);
