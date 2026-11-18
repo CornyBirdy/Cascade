@@ -23,6 +23,7 @@ mod http;
 mod icons;
 mod ics;
 mod keyhook;
+mod lang;
 mod launcher;
 mod lens;
 mod lensmath;
@@ -55,6 +56,7 @@ mod wallpaper;
 mod weather;
 mod widgets;
 mod wifi;
+mod winset;
 
 /// Messages worker threads post to the main (notch) window.
 pub mod msg {
@@ -114,6 +116,12 @@ pub mod msg {
     pub const NOTE: u32 = WM_APP + 35;
     /// Shell mode, switching now (wParam 1: to Cascade as the shell; 2: back to Explorer).
     pub const SHELL_SWITCH: u32 = WM_APP + 36;
+    /// A Windows setting changed (see `winset`): the settings window shows the new value.
+    pub const WIN_CHANGED: u32 = WM_APP + 37;
+    /// A Windows-settings picker or button is waiting to run (see `winset::queue`).
+    pub const WIN_ACTION: u32 = WM_APP + 38;
+    /// Open the settings window (wParam: the page, plus one; 0 for where it was).
+    pub const OPEN_SETTINGS_AT: u32 = WM_APP + 39;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

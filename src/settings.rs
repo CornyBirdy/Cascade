@@ -20,7 +20,7 @@ use crate::theme;
 use crate::weather::Lookup;
 
 const CW: f32 = 900.0;
-const CH: f32 = 620.0;
+const CH: f32 = 680.0;
 const SIDEBAR: f32 = 220.0;
 const ROW_H: f32 = 58.0;
 const ROW_GAP: f32 = 8.0;
@@ -36,7 +36,7 @@ const LINE_H: f32 = 15.0;
 /// Most lines a description wraps to.
 const MAX_LINES: usize = 3;
 
-pub const SECTIONS: [&str; 11] = [
+pub const SECTIONS: [&str; 20] = [
     "General",
     "Appearance",
     "Notch",
@@ -48,7 +48,35 @@ pub const SECTIONS: [&str; 11] = [
     "Focus & weather",
     "Updates",
     "About",
+    // Windows' own settings (see `winset`), after a rule in the sidebar.
+    "Display",
+    "Sound",
+    "Network & Bluetooth",
+    "Personalisation",
+    "Apps",
+    "Power & battery",
+    "Time & language",
+    "Privacy & access",
+    "System",
 ];
+
+/// The pages for Windows' own settings, by number (see `winset::page_for`).
+pub mod page {
+    pub const DISPLAY: usize = 11;
+    pub const SOUND: usize = 12;
+    pub const NETWORK: usize = 13;
+    pub const LOOK: usize = 14;
+    pub const APPS: usize = 15;
+    pub const POWER: usize = 16;
+    pub const TIME: usize = 17;
+    pub const PRIVACY: usize = 18;
+    pub const SYSTEM: usize = 19;
+}
+
+/// The height of a sidebar entry: as tall as fits, up to 40.
+fn nav_row() -> f32 {
+    ((CH - NAV_TOP - 12.0) / SECTIONS.len() as f32).min(40.0).floor()
+}
 
 /// The page that lists what the search box found: one past the real sections,
 /// so it has no sidebar entry. Its rows are the matching rows of the others.
@@ -136,6 +164,9 @@ enum Ctl {
     /// Segmented buttons: (config value, label).
     Choice(&'static [(&'static str, &'static str)]),
     Button(&'static str),
+    /// A value to pick from a list (Windows' settings: a resolution, a
+    /// device...): shows the value, and clicking it shows the list.
+    Pick,
     /// The themes, as a grid of samples to click.
     Gallery,
     /// Tiles to drag between lanes (which widgets show, where and in what order).
@@ -951,7 +982,140 @@ fn rows(section: usize) -> Vec<Row> {
             row("changelog", "What's new", "What changed in each build.", Button("Open changelog")),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
         ],
-        _ => vec![
+        page::DISPLAY => vec![
+            heading("h_screens", "Screens"),
+            row("win_screen", "Screen", "Which screen the settings below are for.", Pick),
+            row("win_layout", "Multiple screens", "Extend, duplicate, or show on one screen only (Win+P).", Pick),
+            row("win_primary", "Main screen", "Make this the main screen.", Button("Make main")),
+            heading("h_scale", "Scale & layout"),
+            row("win_scale", "Scale", "Makes text, apps and everything else bigger.", Pick),
+            row("win_resolution", "Display resolution", "Windows asks whether to keep a new one.", Pick),
+            row("win_refresh", "Refresh rate", "Higher is smoother, for games and scrolling.", Pick),
+            row("win_orientation", "Display orientation", "Turn the picture for a screen on its side.", Pick),
+            row("win_hdr", "Use HDR", "Brighter highlights and richer colour.", Toggle),
+            heading("h_night", "Night light"),
+            row("win_night", "Night light", "Warmer colours, easier on the eyes at night.", Toggle),
+            row("win_night_strength", "Strength", "How warm the colours get.", slider(0.1, 1.0, 0.05, Unit::Percent)),
+            row("win_night_schedule", "Schedule", "When it comes on.", Pick),
+        ],
+        page::SOUND => vec![
+            heading("h_output", "Output"),
+            row("win_output", "Play sound through", "The default output, for every app.", Pick),
+            row("win_volume", "Volume", "", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            heading("h_input", "Input"),
+            row("win_input", "Microphone", "The default input apps listen to.", Pick),
+            row("win_mic", "Input level", "", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            heading("h_sound_more", "More"),
+            row("win_mixer", "Volume mixer", "Each app's volume (Windows' classic mixer).", Button("Open")),
+            row(
+                "win_sound_cpl",
+                "More sound settings",
+                "Device properties, enhancements, spatial sound and system sounds.",
+                Button("Open"),
+            ),
+        ],
+        page::NETWORK => vec![
+            heading("h_net", "Network"),
+            row("win_net_info", "Connection", "What you're connected through.", Note),
+            row("win_wifi", "Wi-Fi", "", Toggle),
+            row("win_airplane", "Airplane mode", "Turns every radio off: Wi-Fi, Bluetooth and mobile data.", Toggle),
+            row("win_hotspot", "Mobile hotspot", "Share this PC's internet over Wi-Fi.", Toggle),
+            heading("h_join", "Join a network"),
+            row("win_join_ssid", "Network", "One in range (with a lock if it needs a password).", Pick),
+            row("win_join_pw", "Password", "For a network that needs one.", Text { secret: true }),
+            row("win_join", "Join", "Joins it, and remembers it for next time, as Windows does.", Button("Join")),
+            heading("h_bt", "Bluetooth & devices"),
+            row("win_bt", "Bluetooth", "", Toggle),
+            row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
+            row("win_printers", "Devices and printers", "Printers, scanners and everything plugged in.", Button("Open")),
+            heading("h_net_more", "More"),
+            row("win_vpn", "VPN", "Connect to a VPN set up on this PC.", Button("Open")),
+            row("win_ncpa", "Network adapters", "Each adapter, its IP settings, and sharing.", Button("Open")),
+            row("win_proxy", "Proxy", "Internet connection and proxy settings.", Button("Open")),
+        ],
+        page::LOOK => vec![
+            heading("h_mode", "Light and dark"),
+            row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
+            row("win_dark_windows", "Dark mode for Windows", "Windows' own menus and dialogs.", Toggle),
+            row("win_transparency", "Transparency effects", "Windows' and apps' see-through surfaces.", Toggle),
+            heading("h_colour", "Colour"),
+            row("win_accent", "Accent colour", "Windows' colour for highlights, buttons and links.", Pick),
+            row("win_accent_bars", "Accent colour on title bars", "And on window borders.", Toggle),
+            heading("h_wall", "Background"),
+            row("win_wallpaper", "Wallpaper", "A picture for the desktop.", Button("Choose\u{2026}")),
+            row("win_wallpaper_fit", "Fit", "How the picture fills each screen.", Pick),
+            row("win_look_note", "Cascade's look", "Cascade's own theme and colours are on the Appearance page.", Note),
+        ],
+        page::APPS => vec![
+            row("win_uninstall", "Uninstall an app", "Desktop programs and Store apps.", Pick),
+            row("win_startup", "Startup apps", "Which apps start when you sign in (ticked: on).", Pick),
+            row("win_appwiz", "Programs and Features", "Windows' classic list: repair, change and updates.", Button("Open")),
+            row("win_features", "Windows features", "Turn optional parts of Windows on or off.", Button("Open")),
+            row(
+                "win_defaults_note",
+                "Default apps",
+                "Windows keeps these from being set by other apps: right-click a file > Open with > Choose another app > Always.",
+                Note,
+            ),
+        ],
+        page::POWER => vec![
+            row("win_battery", "Battery", "This PC's battery.", Note),
+            row("win_power_mode", "Power mode", "Balanced, or better battery life, or more speed.", Pick),
+            heading("h_plugged", "Plugged in"),
+            row("win_screen_ac", "Turn off the screen after", "Plugged in.", Pick),
+            row("win_sleep_ac", "Sleep after", "Plugged in.", Pick),
+            heading("h_battery", "On battery"),
+            row("win_screen_dc", "Turn off the screen after", "On battery.", Pick),
+            row("win_sleep_dc", "Sleep after", "On battery.", Pick),
+            row("win_power_cpl", "Lid and power buttons", "What closing the lid and the power button do.", Button("Open")),
+        ],
+        page::TIME => vec![
+            row("win_timezone", "Time zone", "Where your clock's time comes from.", Pick),
+            row(
+                "win_time_sync",
+                "Set the time now",
+                "Syncs the clock with Windows' time server (Windows asks first).",
+                Button("Sync now"),
+            ),
+            row("win_time_cpl", "Date and time", "Windows' classic date and time, and extra clocks.", Button("Open")),
+            row("win_layouts", "Keyboard layouts", "The layouts you type with.", Note),
+            row("win_intl", "Region and language", "Formats, languages and keyboards to add.", Button("Open")),
+        ],
+        page::PRIVACY => vec![
+            heading("h_notify", "Notifications"),
+            row("win_dnd", "Do not disturb", "Notification pop-ups stay quiet; they still go in the list.", Toggle),
+            row("win_toasts", "Notifications from apps", "Windows' own switch for every app's notifications.", Toggle),
+            heading("h_privacy", "Privacy"),
+            row("win_camera", "Camera", "Let apps use the camera.", Toggle),
+            row("win_mic_access", "Microphone", "Let apps use the microphone.", Toggle),
+            row("win_location", "Location", "Let apps know where this PC is.", Toggle),
+            heading("h_access", "Accessibility"),
+            row("win_magnifier", "Magnifier", "Zooms in on part of the screen (Win++).", Button("Open")),
+            row("win_narrator", "Narrator", "Reads the screen aloud.", Button("Open")),
+            row("win_osk", "On-screen keyboard", "Type with the mouse or a touch screen.", Button("Open")),
+            row(
+                "win_ease",
+                "Ease of Access Center",
+                "Windows' classic accessibility settings: high contrast, sticky keys, mouse keys and more.",
+                Button("Open"),
+            ),
+        ],
+        page::SYSTEM => vec![
+            row("win_about", "This PC", "Its name, Windows and hardware.", Note),
+            row("win_storage", "Storage", "Space on each drive.", Note),
+            row("win_cleanup", "Free up space", "Windows' Disk Cleanup.", Button("Clean up")),
+            row("win_update", "Windows Update", "Look for updates now.", Button("Check")),
+            row("win_rename", "Rename this PC", "The name other devices see.", Button("Rename")),
+            row("win_devmgr", "Device Manager", "Drivers and hardware.", Button("Open")),
+            row(
+                "win_sysprops",
+                "Advanced system settings",
+                "Performance, virtual memory, startup and recovery, environment variables.",
+                Button("Open"),
+            ),
+            row("win_taskmgr", "Task Manager", "What's running, and how hard the PC is working.", Button("Open")),
+        ],
+        10 => vec![
             row("about", "Cascade", "A tiny native notch, taskbar and Start menu for Windows.", Note),
             row("resources", "Resource use", "", Note),
             row("open_config", "Config file", "Every setting, as plain text.", Button("Open")),
@@ -963,6 +1127,7 @@ fn rows(section: usize) -> Vec<Row> {
                 Button("Add exclusion"),
             ),
         ],
+        _ => vec![],
     }
 }
 
@@ -978,6 +1143,10 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
     let on = |k: &str| get(k) == "true";
     let lip = get("notch_style") == "lip";
     let side = matches!(get("notch_edge").as_str(), "left" | "right");
+    // Windows' settings that don't apply here (HDR on a screen without it, battery on a desktop...).
+    if key.starts_with("win_") && !crate::winset::shown(key) {
+        return false;
+    }
     match (section, key) {
         // Appearance: what the theme picked can use.
         (1, "theme_hue") => get("theme_color") == "custom",
@@ -1218,6 +1387,14 @@ fn edit_text(h: HWND) -> String {
 
 impl Settings {
     /// Opens the window (class `CascadeSettings`, registered by the app).
+    /// Shows page `section` (see `SECTIONS`).
+    pub fn show_section(&mut self, section: usize) {
+        if section < SECTIONS.len() {
+            self.section = section;
+            self.invalidate();
+        }
+    }
+
     pub fn create(instance: HINSTANCE) -> Result<Self> {
         unsafe {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
@@ -1469,6 +1646,8 @@ impl Settings {
             crate::mouseedge::info()
         } else if r.key == "resources" {
             crate::usage::summary()
+        } else if let Some(text) = r.key.starts_with("win_").then(|| crate::winset::desc(r.key)).flatten() {
+            text
         } else if let Some((text, warn)) = live_desc(r.key, get) {
             return (text.to_string(), if warn { WARN } else { Color::white(0.55) }, None);
         } else if r.key == "admin_helper" && get(r.key) == "true" {
@@ -1580,6 +1759,7 @@ impl Settings {
                 (x1 - w, y + (h - 32.0) / 2.0, w, 32.0)
             }
             Ctl::Button(_) => (x1 - 130.0, y + (h - 32.0) / 2.0, 130.0, 32.0),
+            Ctl::Pick => (x1 - 260.0, y + (h - 32.0) / 2.0, 260.0, 32.0),
             // The samples, under the title.
             Ctl::Gallery => (
                 SIDEBAR + 24.0 + 18.0,
@@ -1663,7 +1843,7 @@ impl Settings {
     fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         if lx < SIDEBAR {
-            let i = ((ly - NAV_TOP) / 40.0).floor();
+            let i = ((ly - NAV_TOP) / nav_row()).floor();
             return (ly >= NAV_TOP && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
         }
         for (i, r) in self.rows().iter().enumerate() {
@@ -1832,7 +2012,7 @@ impl Settings {
                         let value = opts[j as usize].0;
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
-                    Ctl::Button(_) => Some(Change::Action(r.key)),
+                    Ctl::Button(_) | Ctl::Pick => Some(Change::Action(r.key)),
                     _ => None,
                 }
             }
@@ -1907,29 +2087,33 @@ impl Settings {
                 p.rrect(bx, by, bw, bh, bh / 2.0, BOX_BG);
                 p.stroke_circle(bx + 17.0, by + 15.0, 5.0, Color::white(0.55), 1.5);
                 p.line(bx + 20.5, by + 18.5, bx + 24.0, by + 22.0, Color::white(0.55), 1.5);
+                let nav = nav_row();
+                // A rule above Windows' own pages.
+                let rule = NAV_TOP + page::DISPLAY as f32 * nav;
+                p.rrect(24.0, rule, SIDEBAR - 48.0, 1.0, 0.0, Color::white(0.08));
                 for (i, name) in SECTIONS.iter().enumerate() {
-                    let y = NAV_TOP + i as f32 * 40.0;
+                    let y = NAV_TOP + i as f32 * nav;
                     let active = i == self.section;
                     if active || self.hovered == Some(Hit::Nav(i)) {
                         p.rrect(
                             12.0,
-                            y + 2.0,
+                            y + 1.0,
                             SIDEBAR - 24.0,
-                            36.0,
+                            nav - 2.0,
                             8.0,
                             Color::white(if active { 0.09 } else { 0.05 }),
                         );
                     }
                     if active {
-                        p.rrect(12.0, y + 12.0, 3.0, 16.0, 1.5, theme::accent());
+                        p.rrect(12.0, y + nav / 2.0 - 7.0, 3.0, 14.0, 1.5, theme::accent());
                     }
                     p.text(
                         name,
                         &f.body,
                         28.0,
-                        y + 2.0,
+                        y,
                         SIDEBAR - 40.0,
-                        36.0,
+                        nav,
                         Align::Left,
                         Color::white(if active { 0.95 } else { 0.7 }),
                     );
@@ -2099,6 +2283,16 @@ impl Settings {
                                 if hovered { theme::accent_hover() } else { theme::accent() },
                             );
                             p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
+                        }
+                        Ctl::Pick => {
+                            p.rrect(cx, cy, cwid, ch, 6.0, if hovered { Color::white(0.12) } else { BOX_BG });
+                            let value = get(r.key);
+                            let value = if value.is_empty() { "Choose\u{2026}".to_string() } else { value };
+                            p.text(&value, &f.label, cx + 12.0, cy, cwid - 36.0, ch, Align::Left, Color::white(0.9));
+                            // A small chevron: the list opens on a click.
+                            let (vx, vy) = (cx + cwid - 18.0, cy + ch / 2.0);
+                            p.line(vx - 4.0, vy - 2.0, vx, vy + 2.0, Color::white(0.6), 1.5);
+                            p.line(vx, vy + 2.0, vx + 4.0, vy - 2.0, Color::white(0.6), 1.5);
                         }
                         Ctl::Gallery => {
                             let picked = get(r.key);

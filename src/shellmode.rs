@@ -1187,6 +1187,10 @@ pub enum Hotkey {
     DeskNew,
     /// Ctrl+Win+F4: close this desktop.
     DeskClose,
+    /// Win+Space: the next keyboard language.
+    Language,
+    /// Win+P: how several screens are used.
+    Project,
     Snip,
     Magnifier,
     TaskManager,
@@ -1233,6 +1237,8 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
         (CTRL | WIN, RIGHT, Hotkey::DeskStep(true)),
         (CTRL | WIN, b'D' as u32, Hotkey::DeskNew),
         (CTRL | WIN, 0x73, Hotkey::DeskClose),
+        (WIN, 0x20, Hotkey::Language),
+        (WIN, b'P' as u32, Hotkey::Project),
     ];
     for n in 0..9u32 {
         keys.push((WIN, b'1' as u32 + n, Hotkey::App(n as usize)));
@@ -1281,7 +1287,9 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::DeskNew => crate::vdesk::create(true),
         Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
         // Windows' Snipping Tool is a Store app: Cascade's own snip instead.
-        Hotkey::Search | Hotkey::Start | Hotkey::App(_) | Hotkey::Snip => return Some(key),
+        Hotkey::Search | Hotkey::Start | Hotkey::App(_) | Hotkey::Snip | Hotkey::Language | Hotkey::Project => {
+            return Some(key)
+        }
     }
     None
 }
@@ -1317,6 +1325,12 @@ fn classic_page(uri: &str) -> (&'static str, &'static str) {
 /// asker for a minute), so the nearest classic Control Panel page opens
 /// instead, straight away. Says so the first time.
 pub fn open_settings(uri: &str) {
+    // Cascade's own page for it, where there's one (see `winset`).
+    if let Some(page) = crate::winset::page_for(uri) {
+        config::log(&format!("shell mode: {uri} -> Cascade's settings, page {page}"));
+        msg::post(msg::OPEN_SETTINGS_AT, page + 1, 0);
+        return;
+    }
     static TOLD: AtomicBool = AtomicBool::new(false);
     let (file, args) = classic_page(uri);
     config::log(&format!("shell mode: {uri} -> {file} {args}"));
@@ -1928,7 +1942,7 @@ fn move_screen(right: bool) {
 
 /// Replaces `%NAME%` with that environment variable, as Windows does for
 /// startup entries.
-fn expand_env(text: &str) -> String {
+pub(crate) fn expand_env(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find('%') {
@@ -1960,7 +1974,7 @@ fn expand_env(text: &str) -> String {
 /// Splits a command line into the program and its arguments. An unquoted
 /// path may hold spaces (`C:\Program Files\App\app.exe /background`): the
 /// program is then the shortest run of words that names a file.
-fn split_command(cmd: &str, is_file: &dyn Fn(&str) -> bool) -> (String, String) {
+pub(crate) fn split_command(cmd: &str, is_file: &dyn Fn(&str) -> bool) -> (String, String) {
     let cmd = cmd.trim();
     if let Some(rest) = cmd.strip_prefix('"') {
         return match rest.find('"') {
@@ -1985,7 +1999,7 @@ fn split_command(cmd: &str, is_file: &dyn Fn(&str) -> bool) -> (String, String) 
 /// Whether Task Manager's Startup page (Settings > Apps > Startup) has the
 /// entry `name` of `list` turned off. Windows keeps that as a few bytes per
 /// entry, the first one odd for off.
-fn startup_disabled(list: &str, name: &str) -> bool {
+pub(crate) fn startup_disabled(list: &str, name: &str) -> bool {
     let key = HSTRING::from(format!("{EXPLORER_KEY}\\StartupApproved\\{list}"));
     let value = HSTRING::from(name);
     [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().any(|root| {
@@ -2007,7 +2021,7 @@ fn startup_disabled(list: &str, name: &str) -> bool {
 }
 
 /// The (name, command) values of a Run key.
-fn run_entries(root: HKEY, key: &str, wow: bool) -> Vec<(String, String)> {
+pub(crate) fn run_entries(root: HKEY, key: &str, wow: bool) -> Vec<(String, String)> {
     let mut out = Vec::new();
     unsafe {
         let mut handle = HKEY::default();

@@ -762,6 +762,37 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.on_desktop_focus());
             return LRESULT(0);
         }
+        msg::WIN_CHANGED => {
+            with_app(|a| {
+                if let Some(s) = &a.settings {
+                    s.invalidate();
+                }
+            });
+            return LRESULT(0);
+        }
+        msg::WIN_ACTION => {
+            if let Some(key) = crate::winset::take_queued() {
+                let owner = with_app(|a| a.settings.as_ref().map(|s| s.hwnd)).flatten().unwrap_or(hwnd);
+                crate::winset::action(key, owner);
+                with_app(|a| {
+                    if let Some(s) = &a.settings {
+                        s.invalidate();
+                    }
+                });
+            }
+            return LRESULT(0);
+        }
+        msg::OPEN_SETTINGS_AT => {
+            with_app(|a| {
+                a.open_settings();
+                if wp.0 > 0 {
+                    if let Some(s) = &mut a.settings {
+                        s.show_section(wp.0 - 1);
+                    }
+                }
+            });
+            return LRESULT(0);
+        }
         msg::NOTE => {
             let text = Box::from_raw(lp.0 as *mut String);
             with_app(move |a| a.notify(*text, theme::accent(), true));
@@ -959,6 +990,8 @@ fn setting_value(cfg: &Config, key: &str) -> String {
         // Kept in Windows' own settings, not Cascade's (see `shellmode`).
         "shell_mode" => shellmode::registered().to_string(),
         "shell_active" => shellmode::active().to_string(),
+        // Windows' own settings, read from Windows (see `winset`).
+        k if k.starts_with("win_") => crate::winset::get(k),
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
         _ => cfg.get(key),
@@ -1046,6 +1079,11 @@ fn clock(seconds: bool) -> (String, String) {
         let n = GetTimeFormatEx(PCWSTR::null(), flags, None, PCWSTR::null(), Some(&mut t));
         (String::from_utf16_lossy(&t[..(n.max(1) - 1) as usize]), date_text(w!("dddd d MMMM")))
     }
+}
+
+/// The battery's level and whether it's plugged in (None without one), for other modules.
+pub(crate) fn battery_now() -> Option<(u8, bool)> {
+    battery()
 }
 
 fn battery() -> Option<(u8, bool)> {
@@ -1317,6 +1355,7 @@ impl App {
             }
         }
         shell::ensure_shortcuts();
+        crate::winset::start();
         launcher::spawn_scan();
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
@@ -1356,6 +1395,7 @@ impl App {
 
     fn shutdown(&mut self) {
         keyhook::configure(false, false, 0);
+        crate::winset::stop();
         // Puts any turned-down app's volume back.
         crate::ducker::configure(None);
         self.settings = None;
@@ -1687,6 +1727,18 @@ impl App {
         match shellmode::on_hotkey(id) {
             Some(Hotkey::Search | Hotkey::Start) if self.cfg.launcher => self.toggle_launcher(),
             Some(Hotkey::Snip) => crate::snip::start(self.instance),
+            Some(Hotkey::Language) => {
+                if let Some(name) = crate::lang::next() {
+                    self.notify(name, theme::accent(), false);
+                }
+            }
+            Some(Hotkey::Project) => {
+                use crate::winset::display;
+                let names: Vec<String> = display::LAYOUTS.iter().map(|(n, _)| n.to_string()).collect();
+                if let Some(i) = crate::winset::pick(self.hwnd, &names, display::layout()) {
+                    display::set_layout(i);
+                }
+            }
             Some(Hotkey::App(n)) if self.cfg.dock => {
                 // The nth app on the taskbar the pointer is on, as Windows counts them.
                 let di = self.dock_under_cursor();
@@ -3490,6 +3542,9 @@ impl App {
     fn apply_change(&mut self, change: Change) {
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
+            Change::Set(key, v) if key.starts_with("win_") => crate::winset::set(key, &v),
+            // Run once this handler has returned: pickers and some buttons wait for an answer.
+            Change::Action(key) if key.starts_with("win_") => crate::winset::queue(key),
             Change::Set("shell_mode", v) => {
                 let on = v == "true";
                 shellmode::set_registered(on);
