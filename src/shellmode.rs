@@ -936,6 +936,8 @@ unsafe fn create_desktop(instance: HINSTANCE) -> Option<HWND> {
         None,
     ) {
         WALLPAPER.store(wall.0 as isize, Ordering::Release);
+        // Files dropped on the desktop go into the Desktop folder.
+        crate::deskicons::register_drop(wall);
         if let Some(d) = defview {
             let _ = SetWindowPos(wall, Some(d), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
@@ -995,6 +997,11 @@ unsafe fn desktop_menu(owner: HWND) {
         let flags = if *f == now { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(fits, flags, 100 + i, &HSTRING::from(*name));
     }
+    let _ = AppendMenuW(menu, MF_STRING, 10, w!("New folder"));
+    let icons = if crate::deskicons::shown() { MF_STRING | MF_CHECKED } else { MF_STRING };
+    let _ = AppendMenuW(menu, icons, 11, w!("Show desktop icons"));
+    let _ = AppendMenuW(menu, MF_STRING, 12, w!("Refresh"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, 1, w!("Change wallpaper\u{2026}"));
     let _ = AppendMenuW(menu, MF_POPUP, fits.0 as usize, w!("Wallpaper fit"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -1014,6 +1021,12 @@ unsafe fn desktop_menu(owner: HWND) {
             }
         }
         2 => shell::open("taskmgr.exe"),
+        10 => crate::deskicons::new_folder(),
+        11 => crate::deskicons::set_shown(!crate::deskicons::shown()),
+        12 => {
+            msg::post(msg::DESK_ICONS, 0, 0);
+            reload_wallpaper();
+        }
         3 => {
             msg::post(msg::OPEN_SETTINGS, 0, 0);
         }
@@ -1168,6 +1181,9 @@ pub fn shutdown(main: HWND) {
     // Windows on other desktops come back, unless the next copy is on its way to carry on with them.
     if INTENT.load(Ordering::Acquire) != 2 {
         crate::vdesk::restore_all();
+    }
+    if let Some(w) = wallpaper_window() {
+        crate::deskicons::revoke_drop(w);
     }
     let h = DESKTOP.swap(0, Ordering::AcqRel);
     WALLPAPER.store(0, Ordering::Release);

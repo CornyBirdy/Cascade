@@ -12,6 +12,7 @@ mod bt;
 mod calendar;
 mod clipboard;
 mod config;
+mod deskicons;
 mod deskosd;
 mod desktops;
 mod devices;
@@ -127,6 +128,12 @@ pub mod msg {
     pub const OPEN_SETTINGS_AT: u32 = WM_APP + 39;
     /// Files the Start menu's search found (a boxed `(u32, Vec<(String, String)>)`).
     pub const FILES: u32 = WM_APP + 40;
+    /// Shell mode: the desktop's icons, read (a boxed `Vec<deskicons::Item>`).
+    pub const DESK_ITEMS: u32 = WM_APP + 41;
+    /// Shell mode: read the desktop's icons again (something changed, or their setting).
+    pub const DESK_ICONS: u32 = WM_APP + 42;
+    /// Shell mode: show a desktop icon's menu (see `ui::DESK_MENU_FOR`).
+    pub const DESK_MENU: u32 = WM_APP + 43;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

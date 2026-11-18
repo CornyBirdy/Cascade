@@ -50,7 +50,7 @@ impl IDropTarget_Impl for Target_Impl {
 }
 
 /// The paths of the files being dropped.
-fn files(data: &IDataObject) -> Vec<String> {
+pub(crate) fn files(data: &IDataObject) -> Vec<String> {
     let format = FORMATETC {
         cfFormat: CF_HDROP.0,
         ptd: std::ptr::null_mut(),

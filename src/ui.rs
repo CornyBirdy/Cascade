@@ -461,6 +461,8 @@ struct App {
     /// Shell mode: the emoji panel (made the first time it's opened), the
     /// window it types into, and what it's about to type.
     emoji: Option<crate::emoji::EmojiPanel>,
+    /// Shell mode: the desktop's icons.
+    deskicons: Option<crate::deskicons::DeskIcons>,
     emoji_target: HWND,
     emoji_text: String,
     /// The Win+V menu (made the first time it's opened), its reader, and the
@@ -737,7 +739,14 @@ fn right_click(hwnd: HWND) {
     }
 }
 
+/// The desktop icon whose menu is waiting to be shown (see `msg::DESK_MENU`).
+static DESK_MENU_FOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // A desktop icon's shell menu on screen draws and fills its own submenus.
+    if let Some(r) = crate::deskicons::menu_message(m, wp, lp) {
+        return r;
+    }
     match m {
         WM_MOUSEACTIVATE => {
             // Only the notch, dock and previews refuse focus.
@@ -812,6 +821,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
                     }
                 }
             });
+            return LRESULT(0);
+        }
+        msg::DESK_ITEMS => {
+            let items = Box::from_raw(lp.0 as *mut Vec<crate::deskicons::Item>);
+            with_app(move |a| {
+                if let Some(d) = &mut a.deskicons {
+                    d.set_items(*items);
+                }
+            });
+            return LRESULT(0);
+        }
+        msg::DESK_ICONS => {
+            crate::deskicons::spawn_load();
+            with_app(|a| {
+                if let Some(d) = &mut a.deskicons {
+                    d.dirty = true;
+                }
+            });
+            return LRESULT(0);
+        }
+        msg::DESK_MENU => {
+            let path = DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let owner = with_app(|a| a.deskicons.as_ref().map(|d| d.hwnd)).flatten();
+            if let (Some(path), Some(owner)) = (path, owner) {
+                crate::deskicons::item_menu(owner, &path);
+            }
             return LRESULT(0);
         }
         msg::NOTE => {
@@ -1317,6 +1352,7 @@ impl App {
             deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
             banner: None,
             emoji: None,
+            deskicons: None,
             emoji_target: HWND::default(),
             emoji_text: String::new(),
             clips: None,
@@ -1374,6 +1410,7 @@ impl App {
         if shellmode::active() {
             // Cascade is the shell: there's no Explorer taskbar to wait for.
             shellmode::init(self.instance, self.hwnd);
+            self.make_desk_icons();
             unsafe {
                 SetTimer(Some(self.hwnd), TIMER_SHELLPOLL, 2000, None);
             }
@@ -1461,6 +1498,9 @@ impl App {
         if self.taskbar_hidden {
             shell::restore_taskbar();
             self.taskbar_hidden = false;
+        }
+        if let Some(d) = self.deskicons.take() {
+            crate::deskicons::revoke_drop(d.hwnd);
         }
         shellmode::shutdown(self.hwnd);
     }
@@ -1706,6 +1746,61 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Shell mode: the desktop icons' window, just above the desktop (it
+    /// belongs to it, so it stays with it under every app).
+    fn make_desk_icons(&mut self) {
+        let Some(desktop) = shellmode::desktop() else { return };
+        let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        let made = unsafe {
+            CreateWindowExW(
+                ex,
+                w!("CascadeWindow"),
+                w!("Desktop icons"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                Some(desktop),
+                None,
+                Some(self.instance),
+                None,
+            )
+        };
+        let Ok(hwnd) = made else { return };
+        crate::deskicons::register_drop(hwnd);
+        let mut d = crate::deskicons::DeskIcons::new(hwnd);
+        d.place(self.area, self.dpi);
+        self.deskicons = Some(d);
+        crate::deskicons::watch();
+        crate::deskicons::spawn_load();
+    }
+
+    fn handle_deskicons(&mut self, m: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let d = self.deskicons.as_mut()?;
+        match m {
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                d.on_move(x, y);
+            }
+            WM_MOUSELEAVE => d.on_leave(),
+            WM_LBUTTONDOWN => {
+                let (x, y) = lparam_xy(lp);
+                d.on_press(x, y);
+            }
+            WM_RBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(path) = d.item_at(x, y) {
+                    // Shown once this handler has returned (the menu waits for a pick).
+                    *DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+                    msg::post(msg::DESK_MENU, 0, 0);
+                }
+            }
+            _ => return None,
+        }
+        Some(LRESULT(0))
     }
 
     /// The emoji panel, by the text cursor (see `emoji`).
@@ -2206,6 +2301,9 @@ impl App {
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
         }
+        if self.deskicons.as_ref().is_some_and(|d| d.hwnd == hwnd) {
+            return self.handle_deskicons(m, wp, lp);
+        }
         if self.emoji.as_ref().is_some_and(|e| e.hwnd == hwnd) {
             return self.handle_emoji(m, wp, lp);
         }
@@ -2274,6 +2372,10 @@ impl App {
         match m {
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 self.update_display();
+                let (area, dpi) = (self.area, self.dpi);
+                if let Some(d) = &mut self.deskicons {
+                    d.place(area, dpi);
+                }
                 self.apply_edges(true);
                 self.configure_docks();
                 self.show_docks();
@@ -5149,6 +5251,7 @@ impl App {
             || self.deskosd.wants_frame()
             || self.banner.as_ref().is_some_and(|b| b.wants_frame())
             || self.emoji.as_ref().is_some_and(|e| e.wants_frame())
+            || self.deskicons.as_ref().is_some_and(|d| d.dirty)
             || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
@@ -5274,6 +5377,9 @@ impl App {
         if let Some(e) = self.emoji.as_mut().filter(|e| e.wants_frame()) {
             fast |= e.step(dt);
             let _ = e.render(&mut self.gfx);
+        }
+        if let Some(d) = self.deskicons.as_mut().filter(|d| d.dirty) {
+            let _ = d.render(&mut self.gfx);
         }
         if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
             fast |= c.step(dt);

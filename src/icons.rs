@@ -69,7 +69,7 @@ pub fn spawn() -> Sender<String> {
     tx
 }
 
-unsafe fn load_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Result<Vec<u8>> {
+pub(crate) unsafe fn load_icon(item: &IShellItem, wic: &IWICImagingFactory) -> Result<Vec<u8>> {
     let factory: IShellItemImageFactory = item.cast()?;
     let size = SIZE { cx: ICON_SIZE as i32, cy: ICON_SIZE as i32 };
     let hbmp = factory
