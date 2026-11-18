@@ -167,30 +167,9 @@ pub(crate) fn changed() {
 /// Shows `options` as a menu at the pointer, the one `current` ticked;
 /// returns the one picked.
 pub(crate) fn pick(owner: HWND, options: &[String], current: Option<usize>) -> Option<usize> {
-    if options.is_empty() {
-        return None;
-    }
-    unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        for (i, o) in options.iter().enumerate() {
-            let mut flags = MF_STRING;
-            if Some(i) == current {
-                flags |= MF_CHECKED;
-            }
-            // A long list goes on in another column, as Windows' own long menus do.
-            if i > 0 && i % 30 == 0 {
-                flags |= MF_MENUBARBREAK;
-            }
-            let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(o.as_str()));
-        }
-        let mut p = POINT::default();
-        let _ = GetCursorPos(&mut p);
-        let _ = SetForegroundWindow(owner);
-        let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), owner, None);
-        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        (id.0 > 0).then(|| id.0 as usize - 1)
-    }
+    let entries =
+        options.iter().enumerate().map(|(i, o)| crate::menu::check(i + 1, o.as_str(), Some(i) == current)).collect();
+    crate::menu::show(owner, entries, crate::menu::Place::Cursor).checked_sub(1)
 }
 
 /// Asks a yes/no question; true for yes.
@@ -245,7 +224,9 @@ pub fn get(key: &str) -> String {
         "win_dark_apps" | "win_dark_windows" | "win_transparency" | "win_accent_bars" => b(look::flag(key)),
         "win_accent" => look::accent_label(),
         "win_wallpaper_fit" => look::fit_label(),
-        "win_power_mode" | "win_screen_ac" | "win_sleep_ac" | "win_screen_dc" | "win_sleep_dc" => power::label(key),
+        "win_power_mode" | "win_power_plan" | "win_screen_ac" | "win_sleep_ac" | "win_screen_dc" | "win_sleep_dc" => {
+            power::label(key)
+        }
         "win_timezone" => system::timezone_label(),
         "win_camera" | "win_mic_access" | "win_location" | "win_toasts" => b(system::flag(key)),
         "win_dnd" => b(dnd()),
@@ -347,7 +328,7 @@ pub fn action(key: &str, owner: HWND) {
         "win_startup" => apps::pick_startup(owner),
         "win_appwiz" => open("appwiz.cpl"),
         "win_features" => open("optionalfeatures.exe"),
-        "win_power_mode" | "win_screen_ac" | "win_sleep_ac" | "win_screen_dc" | "win_sleep_dc" => {
+        "win_power_mode" | "win_power_plan" | "win_screen_ac" | "win_sleep_ac" | "win_screen_dc" | "win_sleep_dc" => {
             power::pick(key, owner)
         }
         "win_power_cpl" => open("powercfg.cpl"),

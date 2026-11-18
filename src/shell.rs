@@ -740,14 +740,10 @@ pub fn spawn_full_restart() -> bool {
 /// Shows `menu` at the cursor and returns the chosen item id (0 = none).
 fn track(hwnd: HWND, menu: HMENU) -> usize {
     unsafe {
-        let mut p = POINT::default();
-        let _ = GetCursorPos(&mut p);
-        // Required so the menu closes when clicking elsewhere.
-        let _ = SetForegroundWindow(hwnd);
-        let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), hwnd, None);
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        // Cascade's own menu, built from this one.
+        let id = crate::menu::track(hwnd, menu, crate::menu::Place::Cursor);
         let _ = DestroyMenu(menu);
-        id.0 as usize
+        id
     }
 }
 

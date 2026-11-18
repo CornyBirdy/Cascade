@@ -3,6 +3,11 @@
 //! and on battery. As Windows' Settings > System > Power & battery, through
 //! the power-scheme API (the power mode through the call its Settings uses).
 //! Lid and power-button actions are in the classic Power Options.
+//!
+//! Windows only applies a power mode on the Balanced plan (on High
+//! performance or Ultimate the call is ignored, and its Settings hides the
+//! choice), so picking a mode switches to Balanced first. The plan itself is
+//! its own picker, as in the classic Power Options.
 
 use windows::core::{w, GUID, PCSTR};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
@@ -112,23 +117,80 @@ fn mode() -> Option<usize> {
     MODES.iter().position(|(_, m)| *m == g)
 }
 
+/// Windows' Balanced plan, the one power modes work on.
+const BALANCED: GUID = GUID::from_u128(0x381b4222_f694_41f0_9685_ff5bb260df2e);
+
+/// Every power plan: its id and name.
+fn plans() -> Vec<(GUID, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        for i in 0.. {
+            let mut g = GUID::zeroed();
+            let mut size = std::mem::size_of::<GUID>() as u32;
+            let r = PowerEnumerate(None, None, None, ACCESS_SCHEME, i, Some(&mut g as *mut GUID as *mut u8), &mut size);
+            if r != ERROR_SUCCESS {
+                break;
+            }
+            out.push((g, plan_name(&g)));
+        }
+    }
+    out
+}
+
+fn plan_name(g: &GUID) -> String {
+    unsafe {
+        let mut size = 0u32;
+        let _ = PowerReadFriendlyName(None, Some(g), None, None, None, &mut size);
+        let mut buf = vec![0u8; size.max(2) as usize];
+        if PowerReadFriendlyName(None, Some(g), None, None, Some(buf.as_mut_ptr()), &mut size) != ERROR_SUCCESS {
+            return format!("{g:?}");
+        }
+        let wide: Vec<u16> =
+            buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+        String::from_utf16_lossy(&wide)
+    }
+}
+
 fn set_mode(i: usize) {
     let Some(f) = powrprof(c"PowerSetActiveOverlayScheme") else { return };
+    // Power modes only take on the Balanced plan.
+    if active() != Some(BALANCED) {
+        let r = unsafe { PowerSetActiveScheme(None, Some(&BALANCED)) };
+        config::log(&format!("power: switched to the Balanced plan for a power mode (result {})", r.0));
+    }
     let r = unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, SetOverlay>(f)(&MODES[i].1) };
     config::log(&format!("power: mode {} (result {r})", MODES[i].0));
 }
 
 pub fn label(key: &str) -> String {
+    if key == "win_power_plan" {
+        return active().map(|g| plan_name(&g)).unwrap_or_default();
+    }
     if key == "win_power_mode" {
+        if active().is_some_and(|g| g != BALANCED) {
+            return "Set by the power plan".into();
+        }
         return mode().map(|i| MODES[i].0.to_string()).unwrap_or_else(|| "Balanced".into());
     }
     read(key).map(|s| minutes_text(s / 60)).unwrap_or_default()
 }
 
 pub fn pick(key: &str, owner: HWND) {
+    if key == "win_power_plan" {
+        let plans = plans();
+        let names: Vec<String> = plans.iter().map(|(_, n)| n.clone()).collect();
+        let now = active();
+        if let Some(i) = super::pick(owner, &names, plans.iter().position(|(g, _)| Some(*g) == now)) {
+            let r = unsafe { PowerSetActiveScheme(None, Some(&plans[i].0)) };
+            config::log(&format!("power: plan {} (result {})", plans[i].1, r.0));
+            super::changed();
+        }
+        return;
+    }
     if key == "win_power_mode" {
         let names: Vec<String> = MODES.iter().map(|(n, _)| n.to_string()).collect();
-        if let Some(i) = super::pick(owner, &names, mode()) {
+        let now = if active() == Some(BALANCED) { mode() } else { None };
+        if let Some(i) = super::pick(owner, &names, now) {
             set_mode(i);
             super::changed();
         }

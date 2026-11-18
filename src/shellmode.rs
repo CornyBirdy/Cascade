@@ -977,18 +977,19 @@ unsafe fn shutdown_menu(owner: HWND) {
     let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     let _ = GetMonitorInfoW(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
     let (x, y) = ((mi.rcWork.left + mi.rcWork.right) / 2, (mi.rcWork.top + mi.rcWork.bottom) / 2);
-    let _ = SetForegroundWindow(owner);
-    let flags = TPM_RETURNCMD | TPM_CENTERALIGN | TPM_VCENTERALIGN | TPM_NONOTIFY;
-    let id = TrackPopupMenu(menu, flags, x, y, Some(0), owner, None);
-    let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+    let id = crate::menu::track(owner, menu, crate::menu::Place::Centre(POINT { x, y }));
     let _ = DestroyMenu(menu);
-    if let Some((_, p)) = (id.0 as usize).checked_sub(1).and_then(|i| ITEMS.get(i)) {
+    if let Some((_, p)) = id.checked_sub(1).and_then(|i| ITEMS.get(i)) {
         shell::power(*p);
     }
 }
 
 /// The desktop's right-click menu.
-unsafe fn desktop_menu(owner: HWND) {
+pub(crate) fn desktop_menu(owner: HWND) {
+    unsafe { desktop_menu_(owner) }
+}
+
+unsafe fn desktop_menu_(owner: HWND) {
     use crate::wallpaper::{self, Fit};
     let Ok(menu) = CreatePopupMenu() else { return };
     let Ok(fits) = CreatePopupMenu() else { return };
@@ -1001,19 +1002,16 @@ unsafe fn desktop_menu(owner: HWND) {
     let icons = if crate::deskicons::shown() { MF_STRING | MF_CHECKED } else { MF_STRING };
     let _ = AppendMenuW(menu, icons, 11, w!("Show desktop icons"));
     let _ = AppendMenuW(menu, MF_STRING, 12, w!("Refresh"));
+    let _ = AppendMenuW(menu, MF_STRING, 13, w!("Paste\tCtrl+V"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, 1, w!("Change wallpaper\u{2026}"));
     let _ = AppendMenuW(menu, MF_POPUP, fits.0 as usize, w!("Wallpaper fit"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, 2, w!("Task Manager"));
     let _ = AppendMenuW(menu, MF_STRING, 3, w!("Cascade settings\u{2026}"));
-    let mut p = POINT::default();
-    let _ = GetCursorPos(&mut p);
-    let _ = SetForegroundWindow(owner);
-    let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), owner, None);
-    let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+    let id = crate::menu::track(owner, menu, crate::menu::Place::Cursor);
     let _ = DestroyMenu(menu);
-    match id.0 as usize {
+    match id {
         1 => {
             if let Some(path) = wallpaper::choose(owner) {
                 wallpaper::set_picture(&path);
@@ -1022,6 +1020,7 @@ unsafe fn desktop_menu(owner: HWND) {
         }
         2 => shell::open("taskmgr.exe"),
         10 => crate::deskicons::new_folder(),
+        13 => crate::deskicons::paste(owner),
         11 => crate::deskicons::set_shown(!crate::deskicons::shown()),
         12 => {
             msg::post(msg::DESK_ICONS, 0, 0);

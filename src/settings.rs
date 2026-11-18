@@ -1,8 +1,15 @@
-//! The settings window ("Cascade Settings" in the Start menu). Drawn with
-//! Direct2D like the rest of Cascade; only the text boxes are native EDIT
-//! controls. Every change is written to config.ini and applied at once.
+//! The settings window ("Cascade Settings" in the Start menu). Laid out as
+//! Windows 11's Settings: a sidebar with an icon for each page in two groups
+//! (Cascade's own, and Windows'), a page title, and settings as cards in
+//! groups, in a window that sizes to the screen and can be resized. It moves
+//! as Windows' does: pages slide in, the sidebar's marker glides to the page,
+//! scrolling eases, toggles slide and hovers fade. Drawn with Direct2D like
+//! the rest of Cascade; only the text boxes are native EDIT controls. Every
+//! change is written to config.ini and applied at once.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
 
 use windows::core::{w, Result, BOOL};
 use windows::Win32::Foundation::*;
@@ -19,16 +26,60 @@ use crate::gfx::{Align, Color, Fonts, Gfx, Measure, Painter};
 use crate::theme;
 use crate::weather::Lookup;
 
-const CW: f32 = 900.0;
-const CH: f32 = 680.0;
-const SIDEBAR: f32 = 220.0;
-const ROW_H: f32 = 58.0;
-const ROW_GAP: f32 = 8.0;
+/// The window's size when it opens (less on a small screen), and the least it goes to.
+const DEF_W: f32 = 1120.0;
+const DEF_H: f32 = 840.0;
+pub const MIN_W: f32 = 820.0;
+pub const MIN_H: f32 = 560.0;
+const SIDEBAR: f32 = 290.0;
+/// Widest the cards get (a wide window centres them).
+const MAX_CONTENT: f32 = 1040.0;
+const ROW_H: f32 = 68.0;
+const ROW_GAP: f32 = 4.0;
 /// A group heading, and a row with no description (e.g. a sidebar shortcut).
-const HEAD_H: f32 = 38.0;
-const COMPACT_H: f32 = 44.0;
-const TOP: f32 = 84.0;
-const BG: Color = Color(0.11, 0.11, 0.12, 1.0);
+const HEAD_H: f32 = 46.0;
+const COMPACT_H: f32 = 52.0;
+const TOP: f32 = 104.0;
+const BG: Color = Color(0.125, 0.125, 0.13, 1.0);
+const CARD: Color = Color(1.0, 1.0, 1.0, 0.048);
+/// The sidebar: a page's height, a group title's, and where the list starts.
+const NAV_H: f32 = 36.0;
+const GROUP_H: f32 = 34.0;
+/// The timer that runs the window's animations.
+pub const ANIM_TIMER: usize = 77;
+/// How long a page takes to slide in.
+const PAGE_S: f32 = 0.30;
+
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Each page's icon in Windows' icon font (none: drawn instead).
+fn nav_icon(i: usize) -> Option<char> {
+    let code = match i {
+        0 => 0xE713,  // Settings
+        1 => 0xE790,  // Colour
+        4 => 0xE80F,  // Home
+        5 => 0xE765,  // Keyboard
+        6 => 0xE8A9,  // View all
+        7 => 0xE7C4,  // Task view
+        8 => 0xE708,  // Quiet hours
+        9 => 0xE895,  // Sync
+        10 => 0xE946, // Info
+        11 => 0xE7F4, // Monitor
+        12 => 0xE767, // Volume
+        13 => 0xE701, // Wi-Fi
+        14 => 0xE771, // Personalise
+        15 => 0xE71D, // All apps
+        16 => 0xE7E8, // Power
+        17 => 0xE774, // Globe
+        18 => 0xE72E, // Lock
+        19 => 0xE770, // System
+        _ => return None,
+    };
+    char::from_u32(code)
+}
 /// Narrowest a segmented button gets (they widen to fit their labels).
 const CHOICE_W: f32 = 84.0;
 /// Each extra line of a wrapped description.
@@ -73,9 +124,15 @@ pub mod page {
     pub const SYSTEM: usize = 19;
 }
 
-/// The height of a sidebar entry: as tall as fits, up to 40.
-fn nav_row() -> f32 {
-    ((CH - NAV_TOP - 12.0) / SECTIONS.len() as f32).min(40.0).floor()
+/// Where sidebar entry `i` starts (before scrolling): under its group's title.
+fn nav_y(i: usize) -> f32 {
+    let groups = if i >= page::DISPLAY { 2.0 } else { 1.0 };
+    NAV_TOP + groups * GROUP_H + i as f32 * NAV_H
+}
+
+/// The sidebar list's whole height.
+fn nav_total() -> f32 {
+    nav_y(SECTIONS.len()) - NAV_TOP + 16.0
 }
 
 /// The page that lists what the search box found: one past the real sections,
@@ -85,7 +142,7 @@ const SEARCH: usize = SECTIONS.len();
 pub const SEARCH_ID: usize = 900;
 const SEARCH_BOX: (f32, f32, f32, f32) = (14.0, 18.0, SIDEBAR - 28.0, 32.0);
 /// Where the sidebar's section list starts, under the search box.
-const NAV_TOP: f32 = 70.0;
+const NAV_TOP: f32 = 64.0;
 const BOX_BG: Color = Color(0.169, 0.169, 0.169, 1.0);
 
 /// What the search box found: the settings that match what was typed, each
@@ -1102,7 +1159,8 @@ fn rows(section: usize) -> Vec<Row> {
         ],
         page::POWER => vec![
             row("win_battery", "Battery", "This PC's battery.", Note),
-            row("win_power_mode", "Power mode", "Balanced, or better battery life, or more speed.", Pick),
+            row("win_power_mode", "Power mode", "Balanced, or better battery life, or more speed (on the Balanced plan).", Pick),
+            row("win_power_plan", "Power plan", "High performance, Ultimate and the like set everything themselves.", Pick),
             heading("h_plugged", "Plugged in"),
             row("win_screen_ac", "Turn off the screen after", "Plugged in.", Pick),
             row("win_sleep_ac", "Sleep after", "Plugged in.", Pick),
@@ -1417,6 +1475,22 @@ pub struct Settings {
     search_edit: HWND,
     search: String,
     before_search: usize,
+    /// The client area, logical units (it can be resized).
+    cw: f32,
+    ch: f32,
+    /// Where scrolling is going (`scroll` eases to it), and the sidebar's scroll.
+    scroll_to: f32,
+    nav_scroll: f32,
+    /// The sidebar's marker, gliding to the open page.
+    nav_mark: f32,
+    /// When the open page was opened (it slides in).
+    page_since: Instant,
+    /// How lit each recently hovered thing is (fading in and out).
+    glow: Vec<(Hit, f32)>,
+    /// Each toggle's knob: where it's drawn (0 off, 1 on) and where it's going.
+    knobs: RefCell<HashMap<&'static str, (f32, f32)>>,
+    last_tick: Instant,
+    animating: std::cell::Cell<bool>,
 }
 
 /// The rows shown (see `shown`), their heights (descriptions wrap onto
@@ -1440,14 +1514,115 @@ impl Settings {
     /// Shows page `section` (see `SECTIONS`).
     pub fn show_section(&mut self, section: usize) {
         if section < SECTIONS.len() {
-            self.section = section;
+            self.go_to(section);
+        }
+    }
+
+    /// Opens page `section`: it slides in, and the sidebar shows it.
+    fn go_to(&mut self, section: usize) {
+        if section != self.section {
+            self.page_since = Instant::now();
+        }
+        self.section = section;
+        self.scroll = 0.0;
+        self.scroll_to = 0.0;
+        self.hovered = None;
+        // The sidebar scrolls to show the page.
+        if section < SECTIONS.len() {
+            let y = nav_y(section) - self.nav_scroll;
+            let view = self.ch - 16.0;
+            if y < NAV_TOP {
+                self.nav_scroll -= NAV_TOP - y;
+            } else if y + NAV_H > view {
+                self.nav_scroll += y + NAV_H - view;
+            }
+            self.nav_scroll = self.nav_scroll.clamp(0.0, self.nav_max());
+        }
+        self.invalidate();
+    }
+
+    fn nav_max(&self) -> f32 {
+        (NAV_TOP + nav_total() - self.ch).max(0.0)
+    }
+
+    /// How far down the page is while it slides in.
+    fn page_dy(&self) -> f32 {
+        (1.0 - ease(self.page_since.elapsed().as_secs_f32() / PAGE_S)) * 26.0
+    }
+
+    /// How lit `h` is (0 to 1).
+    fn glow(&self, h: Hit) -> f32 {
+        self.glow.iter().find(|(g, _)| *g == h).map_or(0.0, |(_, a)| *a)
+    }
+
+    /// The client area changed size.
+    pub fn on_size(&mut self) {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let (w, h) = ((r.right - r.left) as f32 / self.k, (r.bottom - r.top) as f32 / self.k);
+        if w > 0.0 && h > 0.0 && (w != self.cw || h != self.ch) {
+            self.cw = w;
+            self.ch = h;
+            self.fit.borrow_mut().section = None;
+            self.nav_scroll = self.nav_scroll.clamp(0.0, self.nav_max());
             self.invalidate();
         }
     }
 
+    /// A frame of the animations; false once everything has settled (the timer stops).
+    pub fn tick(&mut self) -> bool {
+        let dt = self.last_tick.elapsed().as_secs_f32().min(0.05);
+        self.last_tick = Instant::now();
+        let follow = |v: &mut f32, to: f32, rate: f32| {
+            *v += (to - *v) * (1.0 - (-dt * rate).exp());
+            if (to - *v).abs() < 0.3 {
+                *v = to;
+            }
+        };
+        let before = self.scroll;
+        let max = self.max_scroll();
+        self.scroll_to = self.scroll_to.clamp(0.0, max);
+        follow(&mut self.scroll, self.scroll_to, 16.0);
+        let mark = if self.section < SECTIONS.len() { nav_y(self.section) } else { self.nav_mark };
+        follow(&mut self.nav_mark, mark, 18.0);
+        let hovered = self.hovered;
+        if let Some(h) = hovered {
+            if !self.glow.iter().any(|(g, _)| *g == h) {
+                self.glow.push((h, 0.0));
+            }
+        }
+        for (g, a) in &mut self.glow {
+            let to = if Some(*g) == hovered { 1.0 } else { 0.0 };
+            *a = if to > *a { (*a + dt / 0.10).min(1.0) } else { (*a - dt / 0.18).max(0.0) };
+        }
+        self.glow.retain(|(g, a)| *a > 0.0 || Some(*g) == hovered);
+        for (pos, to) in self.knobs.borrow_mut().values_mut() {
+            *pos = if *to > *pos { (*pos + dt / 0.16).min(*to) } else { (*pos - dt / 0.16).max(*to) };
+        }
+        let sliding = self.page_since.elapsed().as_secs_f32() < PAGE_S;
+        if before != self.scroll || sliding {
+            self.place_edits();
+        }
+        let busy = sliding
+            || self.scroll != self.scroll_to
+            || self.nav_mark != mark
+            || self.glow.iter().any(|(g, a)| *a < 1.0 && Some(*g) == hovered || *a > 0.0 && Some(*g) != hovered)
+            || self.knobs.borrow().values().any(|(p, t)| p != t);
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            if !busy {
+                let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+                self.animating.set(false);
+            }
+        }
+        busy
+    }
+
     pub fn create(instance: HINSTANCE) -> Result<Self> {
         unsafe {
-            let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+            let style = WS_OVERLAPPEDWINDOW;
             let hwnd = CreateWindowExW(
                 WS_EX_APPWINDOW,
                 w!("CascadeSettings"),
@@ -1484,6 +1659,16 @@ impl Settings {
                 search_edit: HWND::default(),
                 search: String::new(),
                 before_search: 0,
+                cw: DEF_W,
+                ch: DEF_H,
+                scroll_to: 0.0,
+                nav_scroll: 0.0,
+                nav_mark: nav_y(0),
+                page_since: Instant::now(),
+                glow: Vec::new(),
+                knobs: RefCell::default(),
+                last_tick: Instant::now(),
+                animating: std::cell::Cell::new(false),
             };
             s.apply_dpi(None);
             s.search_edit = CreateWindowExW(
@@ -1515,27 +1700,36 @@ impl Settings {
     pub fn apply_dpi(&mut self, suggested: Option<RECT>) {
         unsafe {
             self.k = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
-            let (cw, ch) = ((CW * self.k) as i32, (CH * self.k) as i32);
-            let mut r = RECT { left: 0, top: 0, right: cw, bottom: ch };
-            let _ = AdjustWindowRectEx(
-                &mut r,
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                false,
-                WS_EX_APPWINDOW,
-            );
-            let (w, h) = (r.right - r.left, r.bottom - r.top);
-            let (x, y) = match suggested {
-                Some(s) => (s.left, s.top),
+            match suggested {
+                // Windows says where it goes on the new screen.
+                Some(s) => {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        None,
+                        s.left,
+                        s.top,
+                        s.right - s.left,
+                        s.bottom - s.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 None => {
                     let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTOPRIMARY);
                     let mut mi =
                         MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
                     let _ = GetMonitorInfoW(mon, &mut mi);
                     let wa = mi.rcWork;
-                    (wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2)
+                    // As big as it's made to be, on a screen that has room for it.
+                    let fit_w = ((wa.right - wa.left) as f32 * 0.92 / self.k).max(MIN_W);
+                    let fit_h = ((wa.bottom - wa.top) as f32 * 0.92 / self.k).max(MIN_H);
+                    let (cw, ch) = ((DEF_W.min(fit_w) * self.k) as i32, (DEF_H.min(fit_h) * self.k) as i32);
+                    let mut r = RECT { left: 0, top: 0, right: cw, bottom: ch };
+                    let _ = AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW);
+                    let (w, h) = (r.right - r.left, r.bottom - r.top);
+                    let (x, y) = (wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2);
+                    let _ = SetWindowPos(self.hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
                 }
-            };
-            let _ = SetWindowPos(self.hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             if !self.font.is_invalid() {
                 let _ = DeleteObject(self.font.into());
             }
@@ -1557,6 +1751,7 @@ impl Settings {
             );
         }
         self.place_search();
+        self.on_size();
     }
 
     /// Puts the search box in its place in the sidebar (and its font).
@@ -1600,6 +1795,8 @@ impl Settings {
             search(&self.search);
         }
         self.scroll = 0.0;
+        self.scroll_to = 0.0;
+        self.page_since = Instant::now();
         self.hovered = None;
         self.sync_edits(get);
         self.invalidate();
@@ -1610,14 +1807,27 @@ impl Settings {
         SECTIONS.get(self.section).copied().unwrap_or("Search results")
     }
 
+    /// Redraws, and runs the animations until they settle.
     pub fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
+            if !self.animating.replace(true) {
+                SetTimer(Some(self.hwnd), ANIM_TIMER, 15, None);
+            }
         }
     }
 
     fn content_w(&self) -> f32 {
-        CW - SIDEBAR - 24.0 - 28.0
+        (self.cw - SIDEBAR - 64.0).clamp(300.0, MAX_CONTENT)
+    }
+
+    /// The cards' left edge (centred in a wide window).
+    fn x0(&self) -> f32 {
+        SIDEBAR + ((self.cw - SIDEBAR - self.content_w()) / 2.0).max(28.0)
+    }
+
+    fn max_scroll(&self) -> f32 {
+        (TOP + self.offset(usize::MAX) + 24.0 - self.ch).max(0.0)
     }
 
     /// The current section's rows as shown: those that apply with the
@@ -1634,12 +1844,11 @@ impl Settings {
     /// How far the page is scrolled, kept in range when rows above the end
     /// are left out.
     fn scroll(&self) -> f32 {
-        let content = TOP + self.offset(usize::MAX) + 16.0;
-        self.scroll.min((content - CH).max(0.0))
+        self.scroll.min(self.max_scroll())
     }
 
     fn row_y(&self, i: usize) -> f32 {
-        TOP + self.offset(i) - self.scroll()
+        TOP + self.offset(i) - self.scroll() + self.page_dy()
     }
 
     /// Height of row `i` of the current section.
@@ -1678,7 +1887,7 @@ impl Settings {
             Ctl::Board(_) | Ctl::Gallery | Ctl::Note | Ctl::Heading => cw - 36.0,
             _ => {
                 let (rx, ..) = self.reset_rect(i, &r.ctl);
-                rx - 8.0 - (SIDEBAR + 24.0 + 18.0)
+                rx - 8.0 - (self.x0() + 18.0)
             }
         }
     }
@@ -1797,11 +2006,11 @@ impl Settings {
 
     /// Control rect (x, y, w, h) of row `i`.
     fn ctl_rect(&self, i: usize, ctl: &Ctl) -> (f32, f32, f32, f32) {
-        let x1 = SIDEBAR + 24.0 + self.content_w() - 18.0;
+        let x1 = self.x0() + self.content_w() - 18.0;
         let y = self.row_y(i);
         let h = self.row_h(i);
         match ctl {
-            Ctl::Toggle => (x1 - 44.0, y + (h - 22.0) / 2.0, 44.0, 22.0),
+            Ctl::Toggle => (x1 - 40.0, y + (h - 20.0) / 2.0, 40.0, 20.0),
             Ctl::Slider { .. } => (x1 - 170.0, y + 14.0, 170.0, h - 28.0),
             Ctl::Text { .. } => (x1 - 250.0, y + (h - 30.0) / 2.0, 250.0, 30.0),
             Ctl::Choice(opts) => {
@@ -1812,14 +2021,14 @@ impl Settings {
             Ctl::Pick => (x1 - 260.0, y + (h - 32.0) / 2.0, 260.0, 32.0),
             // The samples, under the title.
             Ctl::Gallery => (
-                SIDEBAR + 24.0 + 18.0,
+                self.x0() + 18.0,
                 y + BOARD_HEAD,
                 self.content_w() - 36.0,
                 gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP,
             ),
             // The lanes, under the title.
             Ctl::Board(b) => (
-                SIDEBAR + 24.0 + 18.0,
+                self.x0() + 18.0,
                 y + BOARD_HEAD,
                 self.content_w() - 36.0,
                 b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP,
@@ -1833,6 +2042,8 @@ impl Settings {
         let (cx, _, _, _) = self.ctl_rect(i, ctl);
         let x = match ctl {
             Ctl::Slider { .. } => cx - 112.0,
+            // Left of its On / Off.
+            Ctl::Toggle => cx - 74.0,
             _ => cx - 36.0,
         };
         (x, self.row_y(i) + (self.row_h(i) - 26.0) / 2.0, 26.0)
@@ -1893,8 +2104,11 @@ impl Settings {
     fn hit(&self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Hit> {
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
         if lx < SIDEBAR {
-            let i = ((ly - NAV_TOP) / nav_row()).floor();
-            return (ly >= NAV_TOP && (i as usize) < SECTIONS.len()).then_some(Hit::Nav(i as usize));
+            if ly < NAV_TOP {
+                return None;
+            }
+            let y = ly + self.nav_scroll;
+            return (0..SECTIONS.len()).find(|&i| y >= nav_y(i) && y < nav_y(i) + NAV_H).map(Hit::Nav);
         }
         for (i, r) in self.rows().iter().enumerate() {
             let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
@@ -2032,11 +2246,8 @@ impl Settings {
                             let _ = SetWindowTextW(self.search_edit, w!(""));
                         }
                     }
-                    self.section = i;
-                    self.scroll = 0.0;
-                    self.hovered = None;
+                    self.go_to(i);
                     self.sync_edits(get);
-                    self.invalidate();
                 }
                 None
             }
@@ -2062,7 +2273,20 @@ impl Settings {
                         let value = opts[j as usize].0;
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
-                    Ctl::Button(_) | Ctl::Pick => Some(Change::Action(r.key)),
+                    Ctl::Button(_) => Some(Change::Action(r.key)),
+                    // The list drops down from the control.
+                    Ctl::Pick => {
+                        let (cx, cy, cw, ch) = self.ctl_rect(i, &r.ctl);
+                        let k = self.k;
+                        let mut a = POINT { x: (cx * k) as i32, y: (cy * k) as i32 };
+                        let mut b = POINT { x: ((cx + cw) * k) as i32, y: ((cy + ch) * k) as i32 };
+                        unsafe {
+                            let _ = ClientToScreen(self.hwnd, &mut a);
+                            let _ = ClientToScreen(self.hwnd, &mut b);
+                        }
+                        crate::menu::set_anchor(RECT { left: a.x, top: a.y, right: b.x, bottom: b.y });
+                        Some(Change::Action(r.key))
+                    }
                     _ => None,
                 }
             }
@@ -2108,72 +2332,96 @@ impl Settings {
         Some(Change::Set(r.key, format!("{v}")))
     }
 
-    pub fn on_wheel(&mut self, delta: i16, get: &dyn Fn(&str) -> String) {
-        let content = TOP + self.offset(usize::MAX) + 16.0;
-        let max = (content - CH).max(0.0);
-        let before = self.scroll();
-        self.scroll = (before - delta as f32 / 120.0 * 60.0).clamp(0.0, max);
-        if self.scroll != before {
-            self.sync_edits(get);
-            self.invalidate();
+    /// The wheel: scrolls the sidebar or the page, whichever the pointer is over (easing there).
+    pub fn on_wheel(&mut self, delta: i16, _get: &dyn Fn(&str) -> String) {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(self.hwnd, &mut p);
         }
+        let step = delta as f32 / 120.0 * 100.0;
+        if (p.x as f32 / self.k) < SIDEBAR {
+            self.nav_scroll = (self.nav_scroll - step * 0.6).clamp(0.0, self.nav_max());
+        } else {
+            self.scroll_to = (self.scroll_to - step).clamp(0.0, self.max_scroll());
+        }
+        self.invalidate();
     }
 
     pub fn paint(&self, gfx: &mut Gfx, get: &dyn Fn(&str) -> String, build: u32) -> Result<()> {
         let mut ps = PAINTSTRUCT::default();
         let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
-        let (pw, ph) = ((CW * self.k) as i32, (CH * self.k) as i32);
+        let (pw, ph) = ((self.cw * self.k).ceil() as i32, (self.ch * self.k).ceil() as i32);
         if self.refit(get, build) {
             self.place_edits();
         }
+        let (cwin, chin) = (self.cw, self.ch);
         let r = (|| {
             gfx.begin_dc(hdc, pw, ph, self.k, BG)?;
             {
                 let p = gfx.painter();
                 let f = &gfx.fonts;
-                // Sidebar.
-                p.rrect(0.0, 0.0, SIDEBAR, CH, 0.0, Color(0.09, 0.09, 0.10, 1.0));
+                // Sidebar: the search box, then each page with its icon, in two groups.
                 let (bx, by, bw, bh) = SEARCH_BOX;
-                p.rrect(bx, by, bw, bh, bh / 2.0, BOX_BG);
+                p.rrect(bx, by, bw, bh, 6.0, BOX_BG);
+                p.rrect(bx + 1.0, by + bh - 1.5, bw - 2.0, 1.5, 0.75, Color::white(0.14));
                 p.stroke_circle(bx + 17.0, by + 15.0, 5.0, Color::white(0.55), 1.5);
                 p.line(bx + 20.5, by + 18.5, bx + 24.0, by + 22.0, Color::white(0.55), 1.5);
-                let nav = nav_row();
-                // A rule above Windows' own pages.
-                let rule = NAV_TOP + page::DISPLAY as f32 * nav;
-                p.rrect(24.0, rule, SIDEBAR - 48.0, 1.0, 0.0, Color::white(0.08));
-                for (i, name) in SECTIONS.iter().enumerate() {
-                    let y = NAV_TOP + i as f32 * nav;
-                    let active = i == self.section;
-                    if active || self.hovered == Some(Hit::Nav(i)) {
-                        p.rrect(
-                            12.0,
-                            y + 1.0,
-                            SIDEBAR - 24.0,
-                            nav - 2.0,
-                            8.0,
-                            Color::white(if active { 0.09 } else { 0.05 }),
-                        );
-                    }
-                    if active {
-                        p.rrect(12.0, y + nav / 2.0 - 7.0, 3.0, 14.0, 1.5, theme::accent());
-                    }
+                p.clip(0.0, NAV_TOP, SIDEBAR, chin - NAV_TOP);
+                let ns = self.nav_scroll;
+                for (g, title) in [(0usize, "Cascade"), (page::DISPLAY, "Windows")] {
+                    let gy = nav_y(g) - GROUP_H - ns;
                     p.text(
-                        name,
-                        &f.body,
-                        28.0,
-                        y,
+                        title,
+                        &f.label,
+                        26.0,
+                        gy + 8.0,
                         SIDEBAR - 40.0,
-                        nav,
+                        GROUP_H - 8.0,
                         Align::Left,
-                        Color::white(if active { 0.95 } else { 0.7 }),
+                        Color::white(0.5),
                     );
                 }
-                if build > 0 {
+                for (i, name) in SECTIONS.iter().enumerate() {
+                    let y = nav_y(i) - ns;
+                    if y + NAV_H < NAV_TOP || y > chin {
+                        continue;
+                    }
+                    let active = i == self.section;
+                    let lit = self.glow(Hit::Nav(i));
+                    let a = if active { 0.075 } else { 0.05 * lit };
+                    if a > 0.0 {
+                        p.rrect(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 5.0, Color::white(a));
+                    }
+                    let c = Color::white(if active { 0.96 } else { 0.78 + 0.15 * lit });
+                    let (ix, iy) = (34.0, y + NAV_H / 2.0);
+                    match (nav_icon(i), &f.icons) {
+                        (Some(ch), Some(font)) => {
+                            p.text(&ch.to_string(), font, ix - 12.0, y, 24.0, NAV_H, Align::Center, c);
+                        }
+                        // The notch and the taskbar, drawn.
+                        _ if i == 2 => p.stroke_rrect(ix - 8.0, iy - 3.5, 16.0, 7.0, 3.5, c, 1.3),
+                        _ if i == 3 => {
+                            p.stroke_rrect(ix - 8.0, iy - 6.0, 16.0, 12.0, 2.0, c, 1.2);
+                            p.rrect(ix - 8.0, iy + 3.0, 16.0, 3.0, 1.0, c);
+                        }
+                        _ => p.circle(ix, iy, 2.5, c),
+                    }
+                    p.text(name, &f.body, 56.0, y, SIDEBAR - 68.0, NAV_H, Align::Left, c);
+                }
+                // The marker beside the open page, gliding to it.
+                if self.section < SECTIONS.len() {
+                    let my = self.nav_mark - ns + NAV_H / 2.0;
+                    p.rrect(12.0, my - 8.0, 3.0, 16.0, 1.5, theme::accent());
+                }
+                p.unclip();
+                let foot = nav_y(SECTIONS.len()) - ns + 8.0;
+                if build > 0 && foot < chin - 30.0 {
                     p.text(
                         &format!("Build {build}"),
                         &f.small,
-                        24.0,
-                        CH - 40.0,
+                        26.0,
+                        foot,
                         160.0,
                         20.0,
                         Align::Left,
@@ -2181,31 +2429,35 @@ impl Settings {
                     );
                 }
 
-                // Content.
-                let x0 = SIDEBAR + 24.0;
+                // Content: the title, then the cards.
+                let x0 = self.x0();
                 let cw = self.content_w();
-                p.clip(SIDEBAR, 0.0, CW - SIDEBAR, CH);
-                p.text(self.title(), &f.big, x0, 22.0 - self.scroll(), cw, 44.0, Align::Left, Color::white(0.95));
+                let dy = self.page_dy();
+                let fade = ease(self.page_since.elapsed().as_secs_f32() / PAGE_S);
+                p.clip(SIDEBAR, 0.0, cwin - SIDEBAR, chin);
+                p.text(
+                    self.title(),
+                    &f.big,
+                    x0,
+                    30.0 - self.scroll() + dy,
+                    cw,
+                    48.0,
+                    Align::Left,
+                    Color::white(0.96 * fade.max(0.2)),
+                );
                 for (i, r) in self.rows().iter().enumerate() {
                     let y = self.row_y(i);
                     let h = self.row_h(i);
-                    if y + h < 0.0 || y > CH {
+                    if y + h < 0.0 || y > chin {
                         continue;
                     }
                     if matches!(r.ctl, Ctl::Heading) {
-                        p.text(
-                            r.title,
-                            &f.label,
-                            x0 + 4.0,
-                            y + 12.0,
-                            cw,
-                            22.0,
-                            Align::Left,
-                            theme::lighten(theme::accent(), 0.3),
-                        );
+                        p.text(r.title, &f.title, x0 + 2.0, y + 16.0, cw, 24.0, Align::Left, Color::white(0.92));
                         continue;
                     }
-                    p.rrect(x0, y, cw, h, 8.0, Color::white(0.045));
+                    let lit = self.glow(Hit::Row(i)).max(self.glow(Hit::Reset(i)) * 0.6);
+                    p.rrect(x0, y, cw, h, 6.0, CARD.alpha(CARD.3 + 0.022 * lit));
+                    p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 6.0, Color::white(0.045), 1.0);
                     let text_w = self.text_w(i, r);
                     // The gallery's title and description are the picked theme's.
                     let picked = matches!(r.ctl, Ctl::Gallery)
@@ -2216,7 +2468,7 @@ impl Settings {
                     if desc.is_empty() {
                         p.text(
                             title,
-                            &f.label,
+                            &f.body,
                             x0 + 18.0,
                             y + (h - 20.0) / 2.0,
                             text_w,
@@ -2225,10 +2477,10 @@ impl Settings {
                             Color::white(0.95),
                         );
                     } else {
-                        p.text(title, &f.label, x0 + 18.0, y + 9.0, text_w, 20.0, Align::Left, Color::white(0.95));
+                        p.text(title, &f.body, x0 + 18.0, y + 13.0, text_w, 20.0, Align::Left, Color::white(0.95));
                         let mut dx = x0 + 18.0;
                         if let Some(ok) = mark {
-                            let (mx, my) = (dx + 5.0, y + 39.0);
+                            let (mx, my) = (dx + 5.0, y + 43.0);
                             if ok {
                                 p.line(mx - 4.0, my, mx - 1.2, my + 3.0, tone, 1.6);
                                 p.line(mx - 1.2, my + 3.0, mx + 4.5, my - 3.5, tone, 1.6);
@@ -2240,11 +2492,11 @@ impl Settings {
                         }
                         let dw = text_w - (dx - x0 - 18.0);
                         if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery) {
-                            p.text(&desc, &f.small, dx, y + 30.0, dw, 18.0, Align::Left, tone);
+                            p.text(&desc, &f.small, dx, y + 34.0, dw, 18.0, Align::Left, tone);
                         } else {
                             // Wrapped onto as many lines as the row was sized for.
                             let lines = ((h - row_h(r)) / LINE_H).round() as usize + 1;
-                            p.text_wrap(&desc, &f.small, dx, y + 31.0, dw, lines as f32 * LINE_H + 2.0, tone);
+                            p.text_wrap(&desc, &f.small, dx, y + 35.0, dw, lines as f32 * LINE_H + 2.0, tone);
                         }
                     }
                     let (cx, cy, cwid, ch) = self.ctl_rect(i, &r.ctl);
@@ -2252,33 +2504,38 @@ impl Settings {
                     match r.ctl {
                         Ctl::Toggle => {
                             let on = get(r.key) == "true";
-                            if on {
-                                p.rrect(
-                                    cx,
-                                    cy,
-                                    cwid,
-                                    ch,
-                                    ch / 2.0,
-                                    if hovered { theme::accent_hover() } else { theme::accent() },
-                                );
-                                p.circle(cx + cwid - ch / 2.0, cy + ch / 2.0, ch / 2.0 - 4.0, Color::white(1.0));
-                            } else {
-                                p.stroke_rrect(
-                                    cx + 0.5,
-                                    cy + 0.5,
-                                    cwid - 1.0,
-                                    ch - 1.0,
-                                    ch / 2.0,
-                                    Color::white(if hovered { 0.75 } else { 0.55 }),
-                                    1.2,
-                                );
-                                p.circle(
-                                    cx + ch / 2.0,
-                                    cy + ch / 2.0,
-                                    ch / 2.0 - 5.5,
-                                    Color::white(if hovered { 0.85 } else { 0.7 }),
-                                );
-                            }
+                            // The knob slides (see `tick`).
+                            let t = {
+                                let mut knobs = self.knobs.borrow_mut();
+                                let e = knobs.entry(r.key).or_insert((on as u8 as f32, on as u8 as f32));
+                                e.1 = on as u8 as f32;
+                                ease(e.0)
+                            };
+                            let lit = self.glow(Hit::Row(i));
+                            p.rrect(cx, cy, cwid, ch, ch / 2.0, theme::accent().alpha(t * (0.9 + 0.1 * lit)));
+                            p.stroke_rrect(
+                                cx + 0.5,
+                                cy + 0.5,
+                                cwid - 1.0,
+                                ch - 1.0,
+                                ch / 2.0,
+                                Color::white((0.6 + 0.2 * lit) * (1.0 - t)),
+                                1.0,
+                            );
+                            let kr = 5.0 + t + 0.8 * lit;
+                            let kx = cx + ch / 2.0 + (cwid - ch) * t;
+                            p.circle(kx, cy + ch / 2.0, kr, Color::white(0.8 + 0.2 * t));
+                            let label = if on { "On" } else { "Off" };
+                            p.text(
+                                label,
+                                &f.body,
+                                cx - 40.0,
+                                cy - 4.0,
+                                32.0,
+                                ch + 8.0,
+                                Align::Right,
+                                Color::white(0.85),
+                            );
                         }
                         Ctl::Slider { min, max, unit, .. } => {
                             let v = match self.drag {
@@ -2324,18 +2581,17 @@ impl Settings {
                             }
                         }
                         Ctl::Button(label) => {
-                            p.rrect(
-                                cx,
-                                cy,
-                                cwid,
-                                ch,
-                                6.0,
-                                if hovered { theme::accent_hover() } else { theme::accent() },
-                            );
-                            p.text(label, &f.label, cx, cy, cwid, ch, Align::Center, Color::white(1.0));
+                            // As Windows' buttons: neutral, lighter under the pointer.
+                            let lit = self.glow(Hit::Row(i));
+                            p.rrect(cx, cy, cwid, ch, 5.0, Color::white(0.06 + 0.035 * lit));
+                            p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 5.0, Color::white(0.08), 1.0);
+                            p.text(label, &f.body, cx, cy, cwid, ch, Align::Center, Color::white(0.95));
                         }
                         Ctl::Pick => {
-                            p.rrect(cx, cy, cwid, ch, 6.0, if hovered { Color::white(0.12) } else { BOX_BG });
+                            // As Windows' drop-down boxes.
+                            let lit = self.glow(Hit::Row(i));
+                            p.rrect(cx, cy, cwid, ch, 5.0, Color::white(0.06 + 0.035 * lit));
+                            p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 5.0, Color::white(0.08), 1.0);
                             let value = get(r.key);
                             let value = if value.is_empty() { "Choose\u{2026}".to_string() } else { value };
                             p.text(&value, &f.label, cx + 12.0, cy, cwid - 36.0, ch, Align::Left, Color::white(0.9));

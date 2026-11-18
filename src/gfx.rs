@@ -4,7 +4,7 @@
 
 use std::ffi::c_void;
 
-use windows::core::{w, Interface, Result};
+use windows::core::{w, Interface, Result, BOOL};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -46,6 +46,9 @@ pub struct Fonts {
     pub label: IDWriteTextFormat,
     /// For emoji (the emoji panel): big enough to see, drawn in colour.
     pub emoji: IDWriteTextFormat,
+    /// Windows' own icon font (Segoe Fluent Icons, or Segoe MDL2 Assets on
+    /// Windows 10), centred; none if neither is there.
+    pub icons: Option<IDWriteTextFormat>,
 }
 
 struct Surface {
@@ -160,6 +163,35 @@ struct PanelCache {
     tick: u64,
 }
 
+/// Windows' icon font, if it's installed (Segoe Fluent Icons, else Segoe MDL2 Assets).
+fn icon_format(dw: &IDWriteFactory, size: f32) -> Option<IDWriteTextFormat> {
+    unsafe {
+        let mut fonts = None;
+        dw.GetSystemFontCollection(&mut fonts, false).ok()?;
+        let fonts = fonts?;
+        for family in [w!("Segoe Fluent Icons"), w!("Segoe MDL2 Assets")] {
+            let (mut at, mut there) = (0u32, BOOL(0));
+            if fonts.FindFamilyName(family, &mut at, &mut there).is_ok() && there.as_bool() {
+                let f = dw
+                    .CreateTextFormat(
+                        family,
+                        None,
+                        DWRITE_FONT_WEIGHT_NORMAL,
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        size,
+                        w!(""),
+                    )
+                    .ok()?;
+                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER).ok()?;
+                f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER).ok()?;
+                return Some(f);
+            }
+        }
+        None
+    }
+}
+
 fn text_format(dw: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
     unsafe {
         let f = dw.CreateTextFormat(
@@ -252,6 +284,7 @@ impl Gfx {
                 num: text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 label: text_format(&dw, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 emoji: text_format(&dw, 22.0, DWRITE_FONT_WEIGHT_NORMAL)?,
+                icons: icon_format(&dw, 16.0),
             };
             Ok(Self {
                 factory,

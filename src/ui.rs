@@ -739,14 +739,11 @@ fn right_click(hwnd: HWND) {
     }
 }
 
-/// The desktop icon whose menu is waiting to be shown (see `msg::DESK_MENU`).
-static DESK_MENU_FOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The desktop icons whose menu is waiting to be shown (see `msg::DESK_MENU`;
+/// none: the desktop's own menu).
+static DESK_MENU_FOR: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
 unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // A desktop icon's shell menu on screen draws and fills its own submenus.
-    if let Some(r) = crate::deskicons::menu_message(m, wp, lp) {
-        return r;
-    }
     match m {
         WM_MOUSEACTIVATE => {
             // Only the notch, dock and previews refuse focus.
@@ -846,11 +843,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             return LRESULT(0);
         }
         msg::DESK_MENU => {
-            let path = DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let paths = DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()).take();
             let owner = with_app(|a| a.deskicons.as_ref().map(|d| d.hwnd)).flatten();
-            if let (Some(path), Some(owner)) = (path, owner) {
-                crate::deskicons::item_menu(owner, &path);
+            match (paths, owner) {
+                (Some(paths), Some(owner)) => crate::deskicons::item_menu(owner, &paths),
+                (None, Some(owner)) if wp.0 == 1 => shellmode::desktop_menu(owner),
+                _ => {}
             }
+            return LRESULT(0);
+        }
+        msg::DESK_RENAME => {
+            with_app(|a| {
+                if let Some(d) = &mut a.deskicons {
+                    d.rename_selected();
+                }
+            });
             return LRESULT(0);
         }
         msg::NOTE => {
@@ -1758,7 +1765,8 @@ impl App {
     /// belongs to it, so it stays with it under every app).
     fn make_desk_icons(&mut self) {
         let Some(desktop) = shellmode::desktop() else { return };
-        let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        // It takes the focus (for the desktop's keys) but never comes over apps (see `deskicons::keep_low`).
+        let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
         let made = unsafe {
             CreateWindowExW(
                 ex,
@@ -1784,6 +1792,17 @@ impl App {
         crate::deskicons::spawn_load();
     }
 
+    /// A menu the desktop asked for, shown once its handler has returned (it waits for a pick).
+    fn ask_desktop(ask: crate::deskicons::Ask) {
+        let paths = match ask {
+            crate::deskicons::Ask::ItemMenu(p) => Some(p),
+            crate::deskicons::Ask::DesktopMenu => None,
+        };
+        let desktop = paths.is_none() as usize;
+        *DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()) = paths;
+        msg::post(msg::DESK_MENU, desktop, 0);
+    }
+
     fn handle_deskicons(&mut self, m: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         let d = self.deskicons.as_mut()?;
         match m {
@@ -1792,17 +1811,40 @@ impl App {
                 d.on_move(x, y);
             }
             WM_MOUSELEAVE => d.on_leave(),
-            WM_LBUTTONDOWN => {
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let (x, y) = lparam_xy(lp);
-                d.on_press(x, y);
+                let (ctrl, shift) = (_wp.0 & 0x0008 != 0, _wp.0 & 0x0004 != 0); // MK_CONTROL, MK_SHIFT
+                unsafe {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(d.hwnd));
+                }
+                d.on_press(x, y, ctrl, shift);
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                d.on_release(x, y, _wp.0 & 0x0008 != 0, _wp.0 & 0x0004 != 0);
+            }
+            WM_CAPTURECHANGED => {
+                let (x, y) = (i32::MIN, i32::MIN);
+                d.on_release(x, y, false, false);
             }
             WM_RBUTTONUP => {
                 let (x, y) = lparam_xy(lp);
-                if let Some(path) = d.item_at(x, y) {
-                    // Shown once this handler has returned (the menu waits for a pick).
-                    *DESK_MENU_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
-                    msg::post(msg::DESK_MENU, 0, 0);
+                let ask = d.on_right(x, y);
+                Self::ask_desktop(ask);
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN if _wp.0 != 0x12 => {
+                if let Some(ask) = d.on_key(_wp.0 as u16) {
+                    Self::ask_desktop(ask);
                 }
+                if m == WM_SYSKEYDOWN {
+                    return None;
+                }
+            }
+            // Never over apps, whatever asks it to come up.
+            WM_WINDOWPOSCHANGING => {
+                let pos = unsafe { &mut *(lp.0 as *mut WINDOWPOS) };
+                crate::deskicons::keep_low(d.hwnd, pos);
+                return None;
             }
             _ => return None,
         }
@@ -3943,6 +3985,22 @@ impl App {
         let s = self.settings.as_mut()?;
         let change = match m {
             WM_ERASEBKGND => return Some(LRESULT(1)),
+            WM_TIMER if wp.0 == crate::settings::ANIM_TIMER => {
+                s.tick();
+                return Some(LRESULT(0));
+            }
+            WM_SIZE => {
+                s.on_size();
+                s.sync_edits(&get);
+                return Some(LRESULT(0));
+            }
+            WM_GETMINMAXINFO => {
+                let k = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(s.hwnd) }.max(96) as f32 / 96.0;
+                let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize =
+                    POINT { x: (crate::settings::MIN_W * k) as i32 + 16, y: (crate::settings::MIN_H * k) as i32 + 40 };
+                return Some(LRESULT(0));
+            }
             WM_MOUSEMOVE => {
                 let (x, y) = lparam_xy(lp);
                 s.on_move(x, y, &get);

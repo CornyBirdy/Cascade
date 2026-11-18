@@ -32,6 +32,7 @@ mod launcher;
 mod lens;
 mod lensmath;
 mod media;
+mod menu;
 mod mixer;
 mod mouseedge;
 mod mousehook;
@@ -139,6 +140,8 @@ pub mod msg {
     pub const DESK_MENU: u32 = WM_APP + 43;
     /// Snip now, after the delay that was asked for (wParam: the instance).
     pub const SNIP_NOW: u32 = WM_APP + 44;
+    /// Shell mode: rename the selected desktop icon (its menu's Rename).
+    pub const DESK_RENAME: u32 = WM_APP + 45;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

@@ -191,13 +191,10 @@ pub fn pick_startup(owner: HWND) {
             let label = name.trim_end_matches(".lnk");
             let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(label));
         }
-        let mut p = windows::Win32::Foundation::POINT::default();
-        let _ = GetCursorPos(&mut p);
-        let _ = SetForegroundWindow(owner);
-        let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), owner, None);
+        let id = crate::menu::track(owner, menu, crate::menu::Place::Cursor);
         let _ = DestroyMenu(menu);
-        if id.0 > 0 {
-            let (name, list, root) = &apps[id.0 as usize - 1];
+        if id > 0 {
+            let (name, list, root) = &apps[id - 1];
             let on = !crate::shellmode::startup_disabled(list, name);
             set_startup(name, list, *root, !on);
             super::changed();
