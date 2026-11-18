@@ -4149,6 +4149,12 @@ impl App {
             DockHot::Tray => self.toggle_flyout(),
             DockHot::TrayIcon(i) => self.systray.click(i, false),
             DockHot::Chip(dock::Chip::Desktops) => self.toggle_task_view(),
+            DockHot::Chip(dock::Chip::Lang) => {
+                if let Some(name) = crate::lang::next() {
+                    self.notify(name, theme::accent(), false);
+                }
+                self.dock_mut(di).dirty = true;
+            }
             DockHot::Widgets | DockHot::Chip(_) => self.toggle_widgets(),
             DockHot::MusicToggle => self.toggle_play(),
             DockHot::Status => self.on_status_click(),

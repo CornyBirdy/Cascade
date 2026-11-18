@@ -21,7 +21,6 @@ pub fn layout_name(hkl: HKL) -> String {
     locale_text(hkl, LOCALE_SLOCALIZEDDISPLAYNAME)
 }
 
-#[allow(dead_code)] // for the taskbar's language button
 /// The short name the taskbar shows: "ENG", "DEU"... (the language's three ISO letters, as Windows' own).
 pub fn short_name(hkl: HKL) -> String {
     const LOCALE_SISO639LANGNAME2: u32 = 0x67;

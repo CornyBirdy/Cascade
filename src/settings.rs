@@ -284,6 +284,7 @@ impl Board {
                 ("gpu", "GPU"),
                 ("net", "Network"),
                 ("desktops", "Desktops"),
+                ("lang", "Language"),
                 ("widgets", "Widgets"),
             ],
             Board::Panel => &[
@@ -383,6 +384,13 @@ fn drop_slot(area: (f32, f32, f32, f32), lanes: &[Vec<&'static str>], x: f32, y:
 /// The little picture on a board tile.
 fn tile_icon(p: &Painter, item: &str, cx: f32, cy: f32, c: Color) {
     match item {
+        "lang" => {
+            // A key with a letter on it.
+            p.stroke_rrect(cx - 7.0, cy - 6.0, 14.0, 12.0, 2.0, c, 1.2);
+            p.line(cx - 3.0, cy + 3.0, cx, cy - 3.0, c, 1.2);
+            p.line(cx, cy - 3.0, cx + 3.0, cy + 3.0, c, 1.2);
+            p.line(cx - 1.6, cy + 0.6, cx + 1.6, cy + 0.6, c, 1.0);
+        }
         "desktops" => {
             // Two desktops, one behind the other.
             p.stroke_rrect(cx - 7.0, cy - 6.0, 11.0, 8.0, 1.5, c, 1.2);
@@ -2528,7 +2536,7 @@ mod tests {
         let lanes = Board::Taskbar.read(&get);
         assert_eq!(
             lanes,
-            vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "widgets"]]
+            vec![vec!["weather", "ram"], vec!["cpu", "gpu"], vec!["music", "net", "desktops", "lang", "widgets"]]
         );
         let lanes = Board::Panel.read(&|_: &str| "stats,calendar,notifications".to_string());
         assert_eq!(lanes, vec![vec!["system", "calendar"], vec!["media", "weather", "clipboard", "phone"]]);

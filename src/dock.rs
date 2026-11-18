@@ -186,6 +186,8 @@ pub enum Chip {
     Widgets,
     /// A dot per virtual desktop, the one you're on lit (opens Task View).
     Desktops,
+    /// The keyboard language ("ENG"); a click switches to the next one.
+    Lang,
 }
 
 impl Chip {
@@ -199,6 +201,7 @@ impl Chip {
             "net" | "network" => Chip::Net,
             "widgets" => Chip::Widgets,
             "desktops" | "desktop" => Chip::Desktops,
+            "lang" | "language" => Chip::Lang,
             _ => return None,
         })
     }
@@ -216,6 +219,7 @@ impl Chip {
             Chip::Net => "net",
             Chip::Widgets => "widgets",
             Chip::Desktops => "desktops",
+            Chip::Lang => "lang",
         }
     }
 
@@ -660,6 +664,9 @@ pub fn start_logo(p: &Painter, cx: f32, cy: f32, size: f32, alpha: f32) {
 /// music and weather widgets fit what they show (`music` and `weather`), and
 /// the GPU widget has a column for each of the `gpus` NVIDIA cards.
 /// `gpu_col` is one card's column.
+/// The language button's width.
+const CHIP_LANG_W: f32 = 44.0;
+
 fn chip_width(
     c: Chip,
     music: Option<f32>,
@@ -677,6 +684,8 @@ fn chip_width(
         // Only with more than one desktop.
         Chip::Desktops if desk_numbers => (desks > 1).then(|| desk_nums_w(desks) + 16.0),
         Chip::Desktops => (desks > 1).then(|| desk_dots_w(desks) + 16.0),
+        // Only with more than one keyboard layout.
+        Chip::Lang => (crate::lang::layouts().len() > 1).then_some(CHIP_LANG_W),
         Chip::Gpu if gpus > 0 => Some(gpu_col * gpus as f32),
         Chip::Cpu | Chip::Ram | Chip::Gpu => Some(CHIP_STAT_W),
     }
@@ -2186,6 +2195,10 @@ impl Dock {
                             p.rrect(x, mid_y - DESK_DOT / 2.0, dw, DESK_DOT, DESK_DOT / 2.0, c);
                             x += dw + DESK_DOT_GAP;
                         }
+                    }
+                    Chip::Lang => {
+                        let name = crate::lang::short_name(crate::lang::current());
+                        p.text(&name, &f.label, s.x, mid_y - 10.0, s.w, 20.0, Align::Center, white);
                     }
                     Chip::Widgets => {
                         let c = Color::white(0.85);
