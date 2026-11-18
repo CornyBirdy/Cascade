@@ -18,6 +18,7 @@ mod devices;
 mod dock;
 mod drop;
 mod ducker;
+mod emoji;
 mod gfx;
 mod helper;
 mod http;

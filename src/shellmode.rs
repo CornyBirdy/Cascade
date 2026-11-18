@@ -1224,6 +1224,8 @@ pub enum Hotkey {
     Language,
     /// Win+P: how several screens are used.
     Project,
+    /// Win+. or Win+;: the emoji panel.
+    Emoji,
     Snip,
     Magnifier,
     TaskManager,
@@ -1272,6 +1274,8 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
         (CTRL | WIN, 0x73, Hotkey::DeskClose),
         (WIN, 0x20, Hotkey::Language),
         (WIN, b'P' as u32, Hotkey::Project),
+        (WIN, 0xBE, Hotkey::Emoji),
+        (WIN, 0xBA, Hotkey::Emoji),
     ];
     for n in 0..9u32 {
         keys.push((WIN, b'1' as u32 + n, Hotkey::App(n as usize)));
@@ -1320,9 +1324,13 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::DeskNew => crate::vdesk::create(true),
         Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
         // Windows' Snipping Tool is a Store app: Cascade's own snip instead.
-        Hotkey::Search | Hotkey::Start | Hotkey::App(_) | Hotkey::Snip | Hotkey::Language | Hotkey::Project => {
-            return Some(key)
-        }
+        Hotkey::Search
+        | Hotkey::Start
+        | Hotkey::App(_)
+        | Hotkey::Snip
+        | Hotkey::Language
+        | Hotkey::Project
+        | Hotkey::Emoji => return Some(key),
     }
     None
 }

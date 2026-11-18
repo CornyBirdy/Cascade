@@ -119,6 +119,8 @@ const TIMER_FULLSCREEN: usize = 26;
 const TIMER_SHELLPOLL: usize = 27;
 /// Shell mode: moves the stubs of minimised windows off the screen (see `shellmode::park_minimized`).
 const TIMER_PARK: usize = 28;
+/// Types the emoji picked, once the app it's for is back in front.
+const TIMER_EMOJI: usize = 29;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -456,6 +458,11 @@ struct App {
     deskosd: DeskOsd,
     /// Shell mode: notification pop-ups (made the first time one's needed).
     banner: Option<crate::banner::Banner>,
+    /// Shell mode: the emoji panel (made the first time it's opened), the
+    /// window it types into, and what it's about to type.
+    emoji: Option<crate::emoji::EmojiPanel>,
+    emoji_target: HWND,
+    emoji_text: String,
     /// The Win+V menu (made the first time it's opened), its reader, and the
     /// window it pastes into.
     clips: Option<ClipMenu>,
@@ -1309,6 +1316,9 @@ impl App {
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
             deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
             banner: None,
+            emoji: None,
+            emoji_target: HWND::default(),
+            emoji_text: String::new(),
             clips: None,
             widget_clips: clipboard::Clips::default(),
             clip_tx: clipboard::spawn(),
@@ -1561,6 +1571,9 @@ impl App {
         if let Some(b) = &mut self.banner {
             b.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         }
+        if let Some(e) = &mut self.emoji {
+            e.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        }
         if let Some(c) = &mut self.clips {
             c.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
             if !self.cfg.shortcut_win_v {
@@ -1695,6 +1708,81 @@ impl App {
         }
     }
 
+    /// The emoji panel, by the text cursor (see `emoji`).
+    fn toggle_emoji(&mut self) {
+        if let Some(e) = self.emoji.as_mut().filter(|e| e.open) {
+            e.hide();
+            return;
+        }
+        let fg = unsafe { GetForegroundWindow() };
+        if self.emoji.as_ref().is_none_or(|e| e.hwnd != fg) {
+            self.emoji_target = fg;
+        }
+        if self.emoji.is_none() {
+            let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+            let (Ok(hwnd), Ok(backdrop)) =
+                (create_window(w!("CascadeWindow"), self.instance, ex), Backdrop::create(self.instance))
+            else {
+                return;
+            };
+            let mut e = crate::emoji::EmojiPanel::new(hwnd, backdrop);
+            e.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            self.emoji = Some(e);
+        }
+        let at = clipboard::caret().unwrap_or_else(|| {
+            let mut p = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+            }
+            p
+        });
+        let bounds = shell::work_area_of(RECT { left: at.x, top: at.y, right: at.x + 1, bottom: at.y + 1 });
+        let k = self.dock.k();
+        if let Some(e) = &mut self.emoji {
+            e.show(at.x, at.y, bounds, k);
+        }
+    }
+
+    fn handle_emoji(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let e = self.emoji.as_mut()?;
+        let action = match m {
+            WM_ACTIVATE => {
+                if wp.0 & 0xFFFF == 0 {
+                    e.hide();
+                }
+                return None;
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                e.on_move(x, y);
+                None
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                e.on_click(x, y)
+            }
+            WM_MOUSEWHEEL => {
+                e.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+                None
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => e.on_key(wp.0 as u16),
+            _ => return None,
+        };
+        match action {
+            Some(crate::emoji::Action::Pick(text)) => {
+                e.hide();
+                self.emoji_text = text;
+                dock::focus_window(self.emoji_target);
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_EMOJI, 60, None);
+                }
+            }
+            Some(crate::emoji::Action::Close) => e.hide(),
+            None => {}
+        }
+        Some(LRESULT(0))
+    }
+
     /// Shows a notification pop-up (see `banner`).
     fn show_banner(&mut self, n: notifications::Notif) {
         if self.banner.is_none() {
@@ -1794,6 +1882,7 @@ impl App {
         match shellmode::on_hotkey(id) {
             Some(Hotkey::Search | Hotkey::Start) if self.cfg.launcher => self.toggle_launcher(),
             Some(Hotkey::Snip) => crate::snip::start(self.instance),
+            Some(Hotkey::Emoji) => self.toggle_emoji(),
             Some(Hotkey::Language) => {
                 if let Some(name) = crate::lang::next() {
                     self.notify(name, theme::accent(), false);
@@ -2116,6 +2205,9 @@ impl App {
         }
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
+        }
+        if self.emoji.as_ref().is_some_and(|e| e.hwnd == hwnd) {
+            return self.handle_emoji(m, wp, lp);
         }
         if self.banner.as_ref().is_some_and(|b| b.hwnd == hwnd) {
             return self.handle_banner(m, wp, lp);
@@ -2999,6 +3091,12 @@ impl App {
             TIMER_TICK => self.dirty = true,
             TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
             TIMER_FULLSCREEN => self.check_fullscreen(),
+            TIMER_EMOJI => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_EMOJI);
+                }
+                crate::emoji::type_text(&std::mem::take(&mut self.emoji_text));
+            }
             TIMER_PARK => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_PARK);
@@ -5050,6 +5148,7 @@ impl App {
             || self.quick.wants_frame()
             || self.deskosd.wants_frame()
             || self.banner.as_ref().is_some_and(|b| b.wants_frame())
+            || self.emoji.as_ref().is_some_and(|e| e.wants_frame())
             || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
@@ -5171,6 +5270,10 @@ impl App {
         if let Some(b) = self.banner.as_mut().filter(|b| b.wants_frame()) {
             fast |= b.step(dt);
             let _ = b.render(&mut self.gfx);
+        }
+        if let Some(e) = self.emoji.as_mut().filter(|e| e.wants_frame()) {
+            fast |= e.step(dt);
+            let _ = e.render(&mut self.gfx);
         }
         if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
             fast |= c.step(dt);

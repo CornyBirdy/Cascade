@@ -44,6 +44,8 @@ pub struct Fonts {
     pub big: IDWriteTextFormat,
     pub num: IDWriteTextFormat,
     pub label: IDWriteTextFormat,
+    /// For emoji (the emoji panel): big enough to see, drawn in colour.
+    pub emoji: IDWriteTextFormat,
 }
 
 struct Surface {
@@ -249,6 +251,7 @@ impl Gfx {
                 big: text_format(&dw, 32.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 num: text_format(&dw, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 label: text_format(&dw, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+                emoji: text_format(&dw, 22.0, DWRITE_FONT_WEIGHT_NORMAL)?,
             };
             Ok(Self {
                 factory,
@@ -612,6 +615,23 @@ impl Painter<'_> {
         let Some(layout) = self.layout(s, font, w, h, align) else { return };
         unsafe {
             self.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+
+    /// Like `text`, but colour fonts (emoji) keep their colours.
+    pub fn text_colour(&self, s: &str, font: &IDWriteTextFormat, x: f32, y: f32, w: f32, h: f32, c: Color) {
+        if s.is_empty() || w <= 0.0 {
+            return;
+        }
+        let (x, y) = (self.snap(x), self.snap(y));
+        let Some(layout) = self.layout(s, font, w, h, Align::Center) else { return };
+        unsafe {
+            self.rt.DrawTextLayout(
+                pt(x, y),
+                &layout,
+                self.brush(c),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+            );
         }
     }
 
