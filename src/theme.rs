@@ -1,19 +1,24 @@
-//! Themes: one look shared by every Cascade surface (the notch's lip, the
-//! taskbar, the Start menu, the panels and Alt+Tab). Picked in Settings >
-//! Appearance, or `theme =` in the config.
+//! The look shared by every Cascade surface (the notch's lip, the taskbar,
+//! the Start menu, the panels and Alt+Tab): one of two themes, and your
+//! accent colour. Picked in Settings > Appearance, or `theme =` and
+//! `accent =` in the config.
 //!
-//! A theme is a material, not only a colour: which glass DWM puts behind a
-//! panel (frosted acrylic, a blur, clear glass or none), how the glass is washed,
-//! how its edge is drawn, and how light passes through it (`Light`): thick
-//! glass bending light round its rounded edge and splitting it into colours,
-//! frosted glass carrying light to its edges, Aero's gloss and streaks, a
-//! polished stone's reflection, a matte surface lit from above. It costs
-//! nothing at run time beyond a few gradients per panel.
+//! - **Acrylic**: Windows 11's frosted glass with a fine edge lit along the top.
+//! - **Liquid Glass**: a light blur and what thick glass does to light, drawn
+//!   rather than simulated: a brighter top where it catches the light, a
+//!   band of gathered light just inside the rounded edge, a faint split of
+//!   colour along it, a soft reflection from the top left, the glass's
+//!   thickness as a shadow along the bottom, and a specular rim with glints
+//!   on two corners. Only gradients, painted once per panel size into a
+//!   bitmap and drawn from that (see `panel`): nothing reads the screen, so
+//!   it costs no more than Acrylic.
 //!
-//! The theme's colours can be swapped for the Windows accent, a hue of your
-//! own or none at all, and made stronger or weaker (`set_colour`).
+//! The accent colour (highlights: the app in front, toggles, progress,
+//! today) is your Windows accent by default, or one picked from Windows'
+//! own palette, and can tint the glass too, as Windows' *Show accent colour
+//! on Start and taskbar* does.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use windows::core::BOOL;
 use windows::Win32::Graphics::Direct2D::ID2D1Brush;
@@ -21,7 +26,6 @@ use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
 
 use crate::backdrop::Backdrop;
 use crate::gfx::{Color, Painter};
-use crate::lens::Lens;
 
 /// What DWM puts behind a panel.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -30,71 +34,38 @@ pub enum Glass {
     Acrylic,
     /// A plain blur with no frost or noise.
     Blur,
-    /// No blur at all: clear glass that what's behind shows through sharp,
-    /// with only the light in and on the glass drawn over it.
-    Clear,
-    /// No blur: a solid panel.
+    /// No blur: a solid panel (the Blur setting off).
     Solid,
 }
 
 /// How a panel's edge is drawn.
 #[derive(Clone, Copy)]
 pub enum Rim {
-    None,
-    /// One flat line.
-    Line(Color),
     /// One line, lighter along the top than the bottom (light from above).
     Lit(Color, Color),
     /// Light catching thick glass: a bright top edge with glints on the
     /// top-left and bottom-right corners, faint down the sides (the number
     /// is its strength).
     Specular(f32),
-    /// A dark outer line around a light inner one, like Aero's frames.
-    Double(Color, Color),
-    /// A line shading from one colour (top-left) to another (bottom-right).
-    Gradient(Color, Color),
 }
 
-/// How light passes through and off a panel. Every effect is off at 0.
+/// What thick glass does to the light. Every effect is off at 0.
 #[derive(Clone, Copy)]
 pub struct Light {
-    /// Thick glass bending light round its rounded edge: (width, strength)
-    /// of a band just inside the edge where the light gathers. It is
-    /// brightest at the rim, fades smoothly inwards, and is lit from above,
-    /// with some of the light coming out again along the bottom.
+    /// Light gathered just inside the rounded edge: (width, strength) of a
+    /// band brightest at the rim that fades smoothly inwards, lit from above.
     pub lens: (f32, f32),
-    /// Light split into colours where the edge bends it: a cool fringe along
-    /// the lit top and a warm one along the bottom.
+    /// Light split into colours along the edge: a cool fringe along the lit
+    /// top, a warm one along the bottom.
     pub dispersion: f32,
-    /// Light carried inside the glass and given off at its edge: (width,
-    /// strength) of a soft glow, in the rim's colours with a gradient rim and
-    /// white otherwise.
-    pub glow: (f32, f32),
-    /// A glossy reflection over the top of the panel, Aero-style.
-    pub gloss: f32,
-    /// Faint diagonal streaks of reflected light, as on Aero glass.
-    pub streaks: f32,
-    /// A soft reflection of the room on a polished surface, from the top left.
+    /// A soft reflection from the top left.
     pub sheen: f32,
-    /// Lit from above, as a matte or solid surface is: a touch lighter at the
-    /// top, darker at the bottom.
-    pub shade: f32,
-    /// The thickness of clear glass seen from the front: a soft dark band
-    /// just inside the edge, heaviest along the bottom, so the pane stands
-    /// out over light things behind it too.
+    /// The glass's thickness seen from the front: a soft dark band just
+    /// inside the edge, heaviest along the bottom.
     pub depth: f32,
 }
 
-const DARK: Light = Light {
-    lens: (0.0, 0.0),
-    dispersion: 0.0,
-    glow: (0.0, 0.0),
-    gloss: 0.0,
-    streaks: 0.0,
-    sheen: 0.0,
-    shade: 0.0,
-    depth: 0.0,
-};
+const NONE: Light = Light { lens: (0.0, 0.0), dispersion: 0.0, sheen: 0.0, depth: 0.0 };
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -105,7 +76,7 @@ pub struct Theme {
     pub glass: Glass,
     /// Colour the glass is tinted with; the Tint sliders set how strongly.
     pub tint: (f32, f32, f32),
-    /// Scales the Tint sliders, so clear-glass themes stay clear.
+    /// Scales the Tint sliders, so light glass stays light.
     pub tint_scale: f32,
     /// Panel colour without blur.
     pub solid: (f32, f32, f32),
@@ -115,15 +86,10 @@ pub struct Theme {
     pub film: (Color, Color),
     pub rim: Rim,
     pub light: Light,
-    /// Clear glass that bends what's behind it round its edge (see `lens`),
-    /// with Refraction on. It then needs no drawn edge: the bending shows it.
-    pub refract: Option<Lens>,
-    /// Highlights: the app in front, toggles, progress, today.
+    /// Highlights: the app in front, toggles, progress, today (filled in
+    /// from the accent colour by `resolve`).
     pub accent: Color,
 }
-
-const WIN_BLUE: Color = Color(0.38, 0.67, 1.0, 1.0);
-const LOVE: Color = Color(0.922, 0.435, 0.573, 1.0);
 
 const fn white(a: f32) -> Color {
     Color(1.0, 1.0, 1.0, a)
@@ -133,166 +99,47 @@ const fn black(a: f32) -> Color {
     Color(0.0, 0.0, 0.0, a)
 }
 
-pub const THEMES: [Theme; 10] = [
+pub const THEMES: [Theme; 2] = [
     Theme {
         key: "acrylic",
         name: "Acrylic",
         about: "Frosted dark glass with a fine edge, lit along the top, like Windows 11. The default.",
         glass: Glass::Acrylic,
-        tint: (0.110, 0.110, 0.118),
+        // Neutral grey: any colour in it comes from the accent, if you want it.
+        tint: (0.114, 0.114, 0.114),
         tint_scale: 1.0,
-        solid: (0.13, 0.13, 0.14),
+        solid: (0.133, 0.133, 0.133),
         film: (white(0.015), white(0.015)),
         rim: Rim::Lit(white(0.14), white(0.06)),
-        light: DARK,
-        refract: None,
-        accent: WIN_BLUE,
+        light: NONE,
+        accent: Color(0.38, 0.67, 1.0, 1.0),
     },
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Apple-style glass: a light blur, an edge that bends what's behind it like a lens, and a bright rim.",
-        // Apple's glass is lightly frosted, so what's on it stays readable
-        // over anything; the lens ring (Refraction) sits over that blur at
-        // the edge, where the glass is thick and bends the light most.
+        about: "Thick, lightly frosted glass: bright along its top, light gathered in its rounded edge, a glinting rim.",
         glass: Glass::Blur,
-        tint: (0.11, 0.12, 0.15),
-        tint_scale: 0.35,
-        solid: (0.17, 0.18, 0.21),
+        tint: (0.10, 0.10, 0.11),
+        tint_scale: 0.4,
+        solid: (0.17, 0.17, 0.18),
         // Brighter at the top, as the glass catches the light from above.
-        film: (white(0.07), white(0.015)),
-        // The rim stays with Refraction on: the light it catches is the other
-        // half of the look.
-        rim: Rim::Specular(0.55),
-        light: Light { lens: (6.0, 0.06), dispersion: 0.06, ..DARK },
-        refract: Some(Lens { band: 16.0, bend: 0.8, split: 0.12 }),
-        accent: Color(0.04, 0.52, 1.0, 1.0),
-    },
-    Theme {
-        key: "windows_glass",
-        name: "Windows Glass",
-        about:
-            "Aero, as in Windows 7: coloured glass with a glossy top, faint light streaks and a dark-and-light edge.",
-        glass: Glass::Blur,
-        tint: (0.10, 0.28, 0.48),
-        tint_scale: 0.85,
-        solid: (0.10, 0.22, 0.36),
-        film: (white(0.06), white(0.01)),
-        rim: Rim::Double(black(0.55), white(0.40)),
-        light: Light { lens: (5.0, 0.08), gloss: 0.20, streaks: 0.05, ..DARK },
-        refract: None,
-        accent: Color(0.45, 0.78, 1.0, 1.0),
-    },
-    Theme {
-        key: "frosted",
-        name: "Frosted Glass",
-        about: "Milky, sand-blasted glass that carries light to its edges, where it glows.",
-        glass: Glass::Acrylic,
-        tint: (0.30, 0.31, 0.34),
-        tint_scale: 1.0,
-        solid: (0.25, 0.26, 0.28),
-        film: (white(0.11), white(0.06)),
-        rim: Rim::Line(white(0.16)),
-        light: Light { glow: (10.0, 0.09), ..DARK },
-        refract: None,
-        accent: Color(0.42, 0.70, 1.0, 1.0),
-    },
-    Theme {
-        key: "tinted",
-        name: "Tinted Glass",
-        about: "Acrylic in your Windows accent colour, edged and softly lit in a lighter shade of it.",
-        glass: Glass::Acrylic,
-        // Filled in from the accent colour by `resolve`.
-        tint: (0.11, 0.11, 0.12),
-        tint_scale: 1.0,
-        solid: (0.13, 0.13, 0.14),
-        film: (white(0.05), white(0.01)),
-        rim: Rim::Gradient(white(0.3), white(0.08)),
-        light: Light { glow: (6.0, 0.06), ..DARK },
-        refract: None,
-        accent: WIN_BLUE,
-    },
-    Theme {
-        key: "translucent",
-        name: "Translucent",
-        about: "Barely-there clear glass: no blur, no tint, no outline, only a faint bend of light at its edge.",
-        glass: Glass::Clear,
-        tint: (0.05, 0.05, 0.06),
-        tint_scale: 0.12,
-        solid: (0.12, 0.12, 0.13),
-        film: (white(0.012), white(0.012)),
-        rim: Rim::None,
-        light: Light { lens: (5.0, 0.05), ..DARK },
-        refract: Some(Lens { band: 10.0, bend: 0.5, split: 0.06 }),
-        accent: WIN_BLUE,
-    },
-    Theme {
-        key: "rose_pine",
-        name: "Ros\u{e9} Pine",
-        about: "Deep purple glass edged and lit from iris to love, from the Ros\u{e9} Pine palette.",
-        glass: Glass::Acrylic,
-        tint: (0.098, 0.090, 0.141),
-        tint_scale: 1.0,
-        solid: (0.122, 0.114, 0.180),
-        film: (Color(0.77, 0.65, 0.91, 0.05), Color(0.92, 0.44, 0.57, 0.025)),
-        rim: Rim::Gradient(Color(0.769, 0.655, 0.906, 0.5), Color(0.922, 0.435, 0.573, 0.4)),
-        light: Light { glow: (8.0, 0.07), ..DARK },
-        refract: None,
-        accent: LOVE,
-    },
-    Theme {
-        key: "neon",
-        name: "Neon",
-        about: "Near-black glass whose cyan-to-magenta edge gives off light, glowing into the glass.",
-        glass: Glass::Acrylic,
-        tint: (0.02, 0.02, 0.04),
-        tint_scale: 1.4,
-        solid: (0.03, 0.03, 0.05),
-        film: (Color(0.0, 0.85, 1.0, 0.025), Color(1.0, 0.2, 0.8, 0.025)),
-        rim: Rim::Gradient(Color(0.0, 0.9, 1.0, 0.95), Color(1.0, 0.25, 0.85, 0.95)),
-        light: Light { glow: (16.0, 0.30), ..DARK },
-        refract: None,
-        accent: Color(0.10, 0.70, 0.95, 1.0),
-    },
-    Theme {
-        key: "obsidian",
-        name: "Obsidian",
-        about: "Solid black, polished: it reflects the room, with a bevelled, lit edge. No blur.",
-        glass: Glass::Solid,
-        tint: (0.035, 0.035, 0.04),
-        tint_scale: 1.0,
-        solid: (0.035, 0.035, 0.04),
-        film: (white(0.02), white(0.0)),
-        rim: Rim::Specular(0.35),
-        light: Light { lens: (3.0, 0.07), sheen: 0.10, ..DARK },
-        refract: None,
-        accent: Color(0.98, 0.55, 0.20, 1.0),
-    },
-    Theme {
-        key: "clean_slate",
-        name: "Clean Slate",
-        about: "Matte, flat slate grey, softly lit from above. No blur, no shine.",
-        glass: Glass::Solid,
-        tint: (0.12, 0.125, 0.14),
-        tint_scale: 1.0,
-        solid: (0.12, 0.125, 0.14),
-        film: (white(0.0), white(0.0)),
-        rim: Rim::Line(white(0.05)),
-        light: Light { shade: 0.12, ..DARK },
-        refract: None,
-        accent: Color(0.36, 0.52, 0.74, 1.0),
+        film: (white(0.09), white(0.02)),
+        rim: Rim::Specular(0.6),
+        light: Light { lens: (9.0, 0.09), dispersion: 0.05, sheen: 0.05, depth: 0.22 },
+        accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
-/// The Windows accent colour (0xRRGGBB), for Tinted Glass.
+/// The Windows accent colour (0xRRGGBB).
 static SYSTEM_ACCENT: AtomicU32 = AtomicU32::new(0x0078D4);
 
 pub fn is_known(key: &str) -> bool {
     THEMES.iter().any(|t| t.key == key)
 }
 
-/// Switches to the theme named `key` (unknown names get the default).
+/// Switches to the theme named `key` (unknown names, the themes there used
+/// to be among them, get Acrylic).
 pub fn set(key: &str) {
     CURRENT.store(THEMES.iter().position(|t| t.key == key).unwrap_or(0), Ordering::Relaxed);
     refresh_accent();
@@ -309,21 +156,97 @@ pub fn refresh_accent() {
 
 // ------------------------------------------------------------ colour --
 
-/// What a theme's colours are based on (`theme_color` in the config).
-pub const SOURCES: [&str; 4] = ["theme", "accent", "neutral", "custom"];
+/// Windows' accent colours (Settings > Personalisation > Colours), for
+/// picking one of your own: (0xRRGGBB, name).
+pub const PALETTE: [(u32, &str); 24] = [
+    (0xFFB900, "Yellow gold"),
+    (0xF7630C, "Orange"),
+    (0xDA3B01, "Rust"),
+    (0xE81123, "Red"),
+    (0xEA005E, "Rose"),
+    (0xE3008C, "Plum"),
+    (0xC239B3, "Orchid"),
+    (0x881798, "Violet"),
+    (0x744DA9, "Iris"),
+    (0x8764B8, "Lavender"),
+    (0x6B69D6, "Indigo"),
+    (0x0078D4, "Blue"),
+    (0x0063B1, "Navy"),
+    (0x0099BC, "Cool blue"),
+    (0x00B7C3, "Seafoam"),
+    (0x038387, "Teal"),
+    (0x00B294, "Mint"),
+    (0x00CC6A, "Turf green"),
+    (0x107C10, "Green"),
+    (0x498205, "Meadow"),
+    (0x7A7574, "Grey"),
+    (0x68768A, "Steel"),
+    (0x567C73, "Moss"),
+    (0x847545, "Desert"),
+];
 
-static SOURCE: AtomicU8 = AtomicU8::new(0);
-/// `theme_hue` in degrees, as f32 bits.
-static HUE: AtomicU32 = AtomicU32::new(0x4352_0000); // 210.0
-/// `theme_intensity` (1 = the theme as designed), as f32 bits.
-static INTENSITY: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+/// The accent picked (`accent`: "windows", or "#RRGGBB"), or `u32::MAX`
+/// for the Windows accent.
+static ACCENT: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Whether the glass takes on the accent colour (`accent_glass`).
+static ACCENT_GLASS: AtomicBool = AtomicBool::new(false);
+
+/// `accent` as 0xRRGGBB, or None for the Windows accent ("windows", or
+/// anything that isn't a colour).
+pub fn parse_accent(value: &str) -> Option<u32> {
+    let hex = value.trim().strip_prefix('#')?;
+    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
+}
+
+/// Sets the accent colour (`accent` in the config) and whether the glass
+/// is tinted with it (`accent_glass`).
+pub fn set_accent(value: &str, on_glass: bool) {
+    ACCENT.store(parse_accent(value).unwrap_or(u32::MAX), Ordering::Relaxed);
+    ACCENT_GLASS.store(on_glass, Ordering::Relaxed);
+}
+
+/// Whether the look follows the Windows accent colour (so it has to be
+/// redrawn when that changes).
+pub fn follows_accent() -> bool {
+    ACCENT.load(Ordering::Relaxed) == u32::MAX
+}
+
+/// The accent colour as it is, before it's lightened for dark panels.
+fn base_accent() -> (f32, f32, f32) {
+    match ACCENT.load(Ordering::Relaxed) {
+        u32::MAX => unpack(SYSTEM_ACCENT.load(Ordering::Relaxed)),
+        c => unpack(c),
+    }
+}
+
+/// The Windows accent colour now (for the settings page's sample of it).
+pub fn windows_accent() -> Color {
+    let (r, g, b) = unpack(SYSTEM_ACCENT.load(Ordering::Relaxed));
+    Color(r, g, b, 1.0)
+}
+
+/// `t` with the accent colour filled in (and on its glass, if asked).
+pub fn resolve(mut t: Theme) -> Theme {
+    let (r, g, b) = base_accent();
+    // Lighter, as Windows draws its accent on dark surfaces, so it reads.
+    t.accent = lighten(Color(r, g, b, 1.0), 0.3);
+    if ACCENT_GLASS.load(Ordering::Relaxed) {
+        // Darkened behind the glass so white text stays readable.
+        let tint = |base: (f32, f32, f32), k: f32| {
+            (mix(base.0, r * k, 0.75), mix(base.1, g * k, 0.75), mix(base.2, b * k, 0.75))
+        };
+        t.tint = tint(t.tint, 0.42);
+        t.solid = tint(t.solid, 0.34);
+        t.film = (Color(r, g, b, t.film.0 .3.max(0.05)), Color(r, g, b, t.film.1 .3.max(0.012)));
+    }
+    edged(t)
+}
 
 /// `theme_edge` (1 = as designed), as f32 bits.
 static EDGE: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
 
-/// How strongly every theme's edge catches the light: its outline and the
-/// light gathered and glowing along it (0 = none, 1 = as designed, 2 =
-/// twice as strong).
+/// How strongly the glass's edge catches the light: its outline and the
+/// light gathered along it (0 = none, 1 = as designed, 2 = twice as strong).
 pub fn set_edge(k: f32) {
     EDGE.store(k.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
 }
@@ -336,154 +259,14 @@ fn edged(mut t: Theme) -> Theme {
     }
     let c = |c: Color| Color(c.0, c.1, c.2, (c.3 * k).min(1.0));
     t.rim = match t.rim {
-        Rim::None => Rim::None,
-        Rim::Line(a) => Rim::Line(c(a)),
         Rim::Lit(a, b) => Rim::Lit(c(a), c(b)),
         Rim::Specular(s) => Rim::Specular(s * k),
-        Rim::Double(a, b) => Rim::Double(c(a), c(b)),
-        Rim::Gradient(a, b) => Rim::Gradient(c(a), c(b)),
     };
     let l = &mut t.light;
     l.lens.1 *= k;
     l.dispersion *= k;
-    l.glow.1 *= k;
     l.depth *= k;
     t
-}
-
-/// Sets what every theme's colours are based on: `source` is one of
-/// `SOURCES` (the theme's own colours, the Windows accent, none, or `hue`),
-/// and `intensity` how colourful they are (0 = grey, 1 = as designed, up to
-/// 2 = twice as colourful).
-pub fn set_colour(source: &str, hue: f32, intensity: f32) {
-    SOURCE.store(SOURCES.iter().position(|s| *s == source).unwrap_or(0) as u8, Ordering::Relaxed);
-    HUE.store(hue.rem_euclid(360.0).to_bits(), Ordering::Relaxed);
-    INTENSITY.store(intensity.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
-}
-
-/// Whether the look follows the Windows accent colour (so it has to be
-/// redrawn when that changes).
-pub fn follows_accent(theme: &str) -> bool {
-    match SOURCE.load(Ordering::Relaxed) {
-        1 => true,
-        0 => theme == "tinted",
-        _ => false,
-    }
-}
-
-/// Below this saturation a colour counts as grey: it has no hue to turn.
-const GREY: f32 = 0.1;
-/// How colourful a theme's greys get when they take on a hue.
-const GREY_TINT: f32 = 0.5;
-
-/// (hue in degrees, saturation, lightness).
-fn to_hsl((r, g, b): (f32, f32, f32)) -> (f32, f32, f32) {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let d = max - min;
-    if d < 1e-5 {
-        return (0.0, 0.0, l);
-    }
-    let s = d / (1.0 - (2.0 * l - 1.0).abs()).max(1e-5);
-    let h = if max == r {
-        ((g - b) / d).rem_euclid(6.0)
-    } else if max == g {
-        (b - r) / d + 2.0
-    } else {
-        (r - g) / d + 4.0
-    };
-    (h * 60.0, s.min(1.0), l)
-}
-
-fn from_hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
-    let (r, g, b) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    ((r + m).clamp(0.0, 1.0), (g + m).clamp(0.0, 1.0), (b + m).clamp(0.0, 1.0))
-}
-
-/// How a theme's colours are turned to the chosen colour.
-#[derive(Clone, Copy)]
-enum Turn {
-    /// Its own colours.
-    Own,
-    /// No colour at all.
-    Grey,
-    /// Every hue turned by `by` degrees (so a theme's own shades keep
-    /// their places relative to each other), greys given hue `to`, and
-    /// colourfulness scaled by `sat`.
-    Hue { to: f32, by: f32, sat: f32 },
-}
-
-#[derive(Clone, Copy)]
-struct Recolour {
-    turn: Turn,
-    intensity: f32,
-}
-
-impl Recolour {
-    fn rgb(self, c: (f32, f32, f32)) -> (f32, f32, f32) {
-        if matches!(self.turn, Turn::Own) && (self.intensity - 1.0).abs() < 1e-3 {
-            return c;
-        }
-        let (h, s, l) = to_hsl(c);
-        let (h, s) = match self.turn {
-            Turn::Own => (h, s),
-            Turn::Grey => (h, 0.0),
-            Turn::Hue { to, sat, .. } if s < GREY => (to, GREY_TINT * sat),
-            Turn::Hue { by, sat, .. } => (h + by, s * sat),
-        };
-        from_hsl(h, (s * self.intensity).clamp(0.0, 1.0), l)
-    }
-
-    fn color(self, c: Color) -> Color {
-        let (r, g, b) = self.rgb((c.0, c.1, c.2));
-        Color(r, g, b, c.3)
-    }
-
-    fn rim(self, rim: Rim) -> Rim {
-        match rim {
-            Rim::Line(c) => Rim::Line(self.color(c)),
-            Rim::Lit(a, b) => Rim::Lit(self.color(a), self.color(b)),
-            Rim::Double(a, b) => Rim::Double(self.color(a), self.color(b)),
-            Rim::Gradient(a, b) => Rim::Gradient(self.color(a), self.color(b)),
-            r @ (Rim::None | Rim::Specular(_)) => r,
-        }
-    }
-}
-
-/// The colour settings, as they apply to `t` (whose main hue is its accent's).
-fn recolour(t: &Theme) -> Recolour {
-    let intensity = f32::from_bits(INTENSITY.load(Ordering::Relaxed));
-    let (own, own_s, _) = to_hsl((t.accent.0, t.accent.1, t.accent.2));
-    let own = if own_s < GREY { 0.0 } else { own };
-    let turn = match SOURCE.load(Ordering::Relaxed) {
-        1 => {
-            let (h, s, _) = to_hsl(unpack(SYSTEM_ACCENT.load(Ordering::Relaxed)));
-            if s < GREY {
-                Turn::Grey
-            } else {
-                Turn::Hue { to: h, by: h - own, sat: s }
-            }
-        }
-        2 => Turn::Grey,
-        3 => {
-            let h = f32::from_bits(HUE.load(Ordering::Relaxed));
-            Turn::Hue { to: h, by: h - own, sat: 1.0 }
-        }
-        _ => Turn::Own,
-    };
-    Recolour { turn, intensity }
 }
 
 fn unpack(c: u32) -> (f32, f32, f32) {
@@ -507,64 +290,7 @@ pub fn lighten(c: Color, t: f32) -> Color {
 }
 
 pub fn current() -> Theme {
-    let mut t = resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]);
-    if lens_of(&t).is_some() {
-        // The bent light shows the edge; a drawn band would only fight it. A
-        // specular rim (light on the glass, not in it) stays.
-        if !matches!(t.rim, Rim::Specular(_)) {
-            t.rim = Rim::None;
-        }
-        t.light.lens = (0.0, 0.0);
-        t.light.dispersion = 0.0;
-    }
-    t
-}
-
-static REFRACT: AtomicBool = AtomicBool::new(true);
-
-/// Turns refraction for clear glass on or off (`refraction` in the config).
-pub fn set_refraction(on: bool) {
-    REFRACT.store(on, Ordering::Relaxed);
-}
-
-/// How `t` bends light, if it does and Refraction is on.
-fn lens_of(t: &Theme) -> Option<Lens> {
-    let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
-    let lens =
-        t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Clear | Glass::Blur))?;
-    // The Edge slider sets how strongly it bends.
-    (k > 0.0).then_some(Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
-}
-
-/// Whether panels in the current theme bend light (and so need their
-/// rings refreshed as what's behind them changes). `acrylic` is the Blur
-/// setting.
-pub fn refracts(acrylic: bool) -> bool {
-    blurs(acrylic) && lens_of(&current()).is_some()
-}
-
-/// `t` with the colours it takes from Windows filled in, then turned to the
-/// colour settings.
-pub fn resolve(mut t: Theme) -> Theme {
-    if t.key == "tinted" {
-        let (r, g, b) = unpack(SYSTEM_ACCENT.load(Ordering::Relaxed));
-        // Darkened behind the glass so white text stays readable.
-        t.tint = (r * 0.4, g * 0.4, b * 0.4);
-        t.solid = (r * 0.3 + 0.04, g * 0.3 + 0.04, b * 0.3 + 0.04);
-        t.film = (Color(r, g, b, 0.08), Color(r, g, b, 0.01));
-        t.rim = Rim::Gradient(
-            Color(mix(r, 1.0, 0.6), mix(g, 1.0, 0.6), mix(b, 1.0, 0.6), 0.4),
-            Color(mix(r, 1.0, 0.2), mix(g, 1.0, 0.2), mix(b, 1.0, 0.2), 0.12),
-        );
-        t.accent = Color(mix(r, 1.0, 0.3), mix(g, 1.0, 0.3), mix(b, 1.0, 0.3), 1.0);
-    }
-    let c = recolour(&t);
-    t.tint = c.rgb(t.tint);
-    t.solid = c.rgb(t.solid);
-    t.film = (c.color(t.film.0), c.color(t.film.1));
-    t.rim = c.rim(t.rim);
-    t.accent = c.color(t.accent);
-    edged(t)
+    resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)])
 }
 
 pub fn accent() -> Color {
@@ -588,18 +314,16 @@ pub fn blurs(acrylic: bool) -> bool {
 
 /// Sets up a panel's blur window for the current theme, with the Tint
 /// slider at `opacity`. Returns whether the panel blurs (false with Blur
-/// turned off, or a theme without glass).
+/// turned off).
 pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) -> bool {
     let t = current();
     let blur = blurs(acrylic);
-    // Acrylic takes its tint from DWM. A clear blur, or clear glass, gets
-    // none there (it is painted in `panel` instead, so it looks the same on
-    // every Windows build).
+    // Acrylic takes its tint from DWM. A plain blur gets none there (it is
+    // painted in `panel` instead, so it looks the same on every Windows build).
     let tint = match t.glass {
         Glass::Acrylic => pack(t.tint, (opacity * t.tint_scale).min(1.0)),
         _ => pack(t.tint, 0.0),
     };
-    b.set_lens(lens_of(&t).filter(|_| blur));
     b.style(if blur { t.glass } else { Glass::Solid }, tint, radius);
     blur
 }
@@ -607,7 +331,6 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
 /// An opaque backdrop in the theme's panel colour (for Alt+Tab, whose
 /// backdrop also hosts the live previews, so it must always be there).
 pub fn style_opaque(b: &Backdrop, radius: f32) {
-    b.set_lens(None);
     b.style(Glass::Acrylic, pack(current().solid, 1.0), radius);
 }
 
@@ -618,6 +341,7 @@ pub fn style_opaque(b: &Backdrop, radius: f32) {
 /// It's painted once into a bitmap and drawn from that while it stays the
 /// same (see `Painter::cached`): the gradients and edge rings cost nothing
 /// on frames where only what's on the panel moves.
+#[allow(clippy::too_many_arguments)]
 pub fn panel(
     p: &Painter,
     x: f32,
@@ -639,23 +363,21 @@ pub fn panel(
     });
 }
 
-/// Everything the current look depends on (the theme, its colour and edge
-/// settings, refraction and the Windows accent), for telling cached panels
-/// apart.
+/// Everything the current look depends on (the theme, the accent and the
+/// edge setting), for telling cached panels apart.
 fn look() -> u64 {
     let parts = [
         CURRENT.load(Ordering::Relaxed) as u64,
         SYSTEM_ACCENT.load(Ordering::Relaxed) as u64,
-        SOURCE.load(Ordering::Relaxed) as u64,
-        HUE.load(Ordering::Relaxed) as u64,
-        INTENSITY.load(Ordering::Relaxed) as u64,
+        ACCENT.load(Ordering::Relaxed) as u64,
+        ACCENT_GLASS.load(Ordering::Relaxed) as u64,
         EDGE.load(Ordering::Relaxed) as u64,
-        REFRACT.load(Ordering::Relaxed) as u64,
     ];
     parts.iter().fold(0xcbf2_9ce4_8422_2325, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// `panel` in theme `t`.
+#[allow(clippy::too_many_arguments)]
 pub fn paint(
     p: &Painter,
     t: &Theme,
@@ -674,7 +396,7 @@ pub fn paint(
     }
     // The body: what the glass does to the light coming through it.
     if blurred {
-        if matches!(t.glass, Glass::Blur | Glass::Clear) {
+        if t.glass == Glass::Blur {
             let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, (opacity * t.tint_scale).clamp(0.0, 1.0) * alpha));
         }
@@ -687,44 +409,9 @@ pub fn paint(
         p.gradient_rrect(x, y, w, h, r, &[(0.0, top.alpha(alpha)), (1.0, bottom.alpha(alpha))]);
     }
 
-    // Light on the surface.
     let l = t.light;
-    if l.shade > 0.0 && h > 4.0 {
-        let s = l.shade * alpha;
-        p.gradient_rrect(x, y, w, h, r, &[(0.0, white(s * 0.25)), (0.45, white(0.0)), (1.0, black(s))]);
-    }
     if l.sheen > 0.0 && h > 4.0 {
         sheen(p, x, y, w, h, r, l.sheen * alpha);
-    }
-    if l.streaks > 0.0 && h > 4.0 {
-        streaks(p, x, y, w, h, r, l.streaks * alpha);
-    }
-    if l.gloss > 0.0 && h > 4.0 {
-        // A reflection with a crisp lower edge over the top of the panel
-        // (about half of a bar, a strip across the top of a tall panel).
-        let band = (h * 0.5).min(42.0) / h;
-        let g = l.gloss * alpha;
-        p.gradient_rrect(
-            x,
-            y,
-            w,
-            h,
-            r,
-            &[(0.0, white(g)), (band * 0.92, white(g * 0.35)), (band, white(0.0)), (1.0, white(0.0))],
-        );
-    }
-
-    // Light in the glass, gathered at its edge.
-    if l.glow.1 > 0.0 && h > 6.0 {
-        let brush = match t.rim {
-            Rim::Gradient(a, b) => {
-                p.linear(x, y, x + w, y + h, &[(0.0, Color(a.0, a.1, a.2, 1.0)), (1.0, Color(b.0, b.1, b.2, 1.0))])
-            }
-            _ => p.linear(x, y, x, y + h, &[(0.0, white(1.0)), (1.0, white(0.7))]),
-        };
-        if let Some(b) = brush {
-            edge_band(p, x, y, w, h, r, l.glow.0, l.glow.1 * alpha, &b);
-        }
     }
     if l.depth > 0.0 && h > 6.0 {
         if let Some(b) = lit(p, x, y, w, h, &[(0.0, black(0.35)), (0.6, black(0.55)), (1.0, black(1.0))]) {
@@ -742,23 +429,11 @@ pub fn paint(
         dispersion(p, x, y, w, h, r, l.dispersion * alpha);
     }
 
-    let line = p.px(1.0);
-    let (lx, ly, lw, lh) = (x + line / 2.0, y + line / 2.0, w - line, h - line);
     match t.rim {
-        Rim::None => {}
-        Rim::Line(c) => p.stroke_rrect(lx, ly, lw, lh, r, c.alpha(alpha), line),
         Rim::Lit(a, b) => {
+            let line = p.px(1.0);
+            let (lx, ly, lw, lh) = (x + line / 2.0, y + line / 2.0, w - line, h - line);
             if let Some(brush) = p.linear(x, y, x, y + h, &[(0.0, a.alpha(alpha)), (1.0, b.alpha(alpha))]) {
-                p.stroke_rrect_with(lx, ly, lw, lh, r, &brush, line);
-            }
-        }
-        Rim::Double(outer, inner) => {
-            p.stroke_rrect(lx, ly, lw, lh, r, outer.alpha(alpha), line);
-            let i = line;
-            p.stroke_rrect(lx + i, ly + i, lw - 2.0 * i, lh - 2.0 * i, (r - i).max(0.0), inner.alpha(alpha), line);
-        }
-        Rim::Gradient(a, b) => {
-            if let Some(brush) = p.linear(x, y, x + w, y + h, &[(0.0, a.alpha(alpha)), (1.0, b.alpha(alpha))]) {
                 p.stroke_rrect_with(lx, ly, lw, lh, r, &brush, line);
             }
         }
@@ -818,43 +493,6 @@ fn dispersion(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
     }
 }
 
-/// Faint diagonal streaks of light across the glass, leaning like Aero's,
-/// of uneven width and spacing so they read as reflections, not stripes.
-fn streaks(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
-    // The gradient runs down to the right at 30 degrees; the streaks cross it.
-    let (ax, ay) = (0.866, 0.5);
-    let len = w * ax + h * ay;
-    if len < 1.0 {
-        return;
-    }
-    // (gap before, width, strength), repeated along the panel.
-    const PATTERN: [(f32, f32, f32); 6] = [
-        (70.0, 26.0, 1.0),
-        (22.0, 8.0, 0.55),
-        (120.0, 40.0, 0.8),
-        (46.0, 12.0, 0.4),
-        (90.0, 30.0, 0.9),
-        (34.0, 10.0, 0.5),
-    ];
-    let mut stops = vec![(0.0, white(0.0))];
-    let mut at = 0.0;
-    for &(gap, width, a) in PATTERN.iter().cycle().take(60) {
-        let start = at + gap;
-        let end = start + width;
-        if end >= len {
-            break;
-        }
-        stops.push((start / len, white(0.0)));
-        stops.push(((start + width / 2.0) / len, white(a * s)));
-        stops.push((end / len, white(0.0)));
-        at = end;
-    }
-    stops.push((1.0, white(0.0)));
-    if let Some(b) = p.linear(x, y, x + len * ax, y + len * ay, &stops) {
-        p.fill_rrect_with(x, y, w, h, r, &b);
-    }
-}
-
 /// A polished surface reflecting the room: a broad soft highlight from the
 /// top left.
 fn sheen(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
@@ -898,7 +536,7 @@ fn specular(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
 }
 
 /// A small sample of theme `t` for the settings page: the panel over a
-/// colourful wallpaper, so clear and frosted glass look different.
+/// colourful wallpaper, so frosted and light glass look different.
 pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
     // The "wallpaper", seen through the glass.
     if let Some(b) = p.linear(
@@ -906,24 +544,19 @@ pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
         y,
         x + w,
         y + h,
-        &[(0.0, Color(1.0, 0.42, 0.24, 1.0)), (0.5, Color(0.98, 0.31, 0.64, 1.0)), (1.0, Color(0.48, 0.24, 1.0, 1.0))],
+        &[(0.0, Color(1.0, 0.42, 0.24, 1.0)), (0.5, Color(0.98, 0.31, 0.64, 1.0)), (1.0, Color(0.20, 0.45, 1.0, 1.0))],
     ) {
         p.fill_rrect_with(x, y, w, h, r, &b);
     }
     let opacity = 0.55;
+    let (cr, cg, cb) = t.tint;
     match t.glass {
-        // Frost hides the wallpaper; clear glass mostly shows it.
+        // Frost hides the wallpaper; a light blur mostly shows it.
         Glass::Acrylic => {
-            let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, (0.55 + opacity * t.tint_scale * 0.4).min(0.95)));
             p.rrect(x, y, w, h, r, white(0.04));
         }
-        Glass::Blur => {
-            let (cr, cg, cb) = t.tint;
-            p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5));
-        }
-        // Clear glass: the wallpaper as it is; `paint` adds the tint.
-        Glass::Clear => {}
+        Glass::Blur => p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5)),
         Glass::Solid => {}
     }
     paint(p, t, x, y, w, h, r, t.glass != Glass::Solid, opacity, 1.0, 1.0);
@@ -961,30 +594,11 @@ mod tests {
     }
 
     #[test]
-    fn hsl_round_trips() {
-        for c in [(0.38, 0.67, 1.0), (0.922, 0.435, 0.573), (0.11, 0.11, 0.118), (1.0, 1.0, 1.0), (0.0, 0.9, 1.0)] {
-            let (h, s, l) = to_hsl(c);
-            let back = from_hsl(h, s, l);
-            assert!((back.0 - c.0).abs() < 1e-3 && (back.1 - c.1).abs() < 1e-3 && (back.2 - c.2).abs() < 1e-3);
-        }
-    }
-
-    #[test]
-    fn recolouring_keeps_lightness_and_white() {
-        let turn = Recolour { turn: Turn::Hue { to: 0.0, by: 150.0, sat: 1.0 }, intensity: 1.0 };
-        // Windows Glass's blue tint turned red keeps how dark it is.
-        let (r, g, b) = turn.rgb((0.10, 0.28, 0.48));
-        assert!(r > g && r > b);
-        assert!((to_hsl((r, g, b)).2 - to_hsl((0.10, 0.28, 0.48)).2).abs() < 1e-3);
-        // White highlights stay white.
-        let w = turn.rgb((1.0, 1.0, 1.0));
-        assert!(w.0 > 0.999 && w.1 > 0.999 && w.2 > 0.999);
-        // No colour: grey.
-        let grey = Recolour { turn: Turn::Grey, intensity: 1.0 }.rgb((0.10, 0.28, 0.48));
-        assert!((grey.0 - grey.1).abs() < 1e-3 && (grey.1 - grey.2).abs() < 1e-3);
-        // Intensity 0 is grey too; the default leaves colours alone.
-        let flat = Recolour { turn: Turn::Own, intensity: 0.0 }.rgb((0.38, 0.67, 1.0));
-        assert!((flat.0 - flat.2).abs() < 1e-3);
-        assert_eq!(Recolour { turn: Turn::Own, intensity: 1.0 }.rgb((0.38, 0.67, 1.0)), (0.38, 0.67, 1.0));
+    fn reads_accents() {
+        assert_eq!(parse_accent("#0078D4"), Some(0x0078D4));
+        assert_eq!(parse_accent(" #ffb900 "), Some(0xFFB900));
+        assert_eq!(parse_accent("windows"), None);
+        assert_eq!(parse_accent("#12345"), None);
+        assert!(PALETTE.iter().all(|(c, _)| *c <= 0xFF_FFFF));
     }
 }

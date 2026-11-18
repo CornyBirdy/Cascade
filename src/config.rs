@@ -8,23 +8,17 @@ const DEFAULT: &str = "\
 
 # ---- Look ----
 # One look for the notch's lip, taskbar, Start menu, panels and Alt+Tab:
-# acrylic, liquid_glass, windows_glass, frosted, tinted (your Windows accent
-# colour), translucent, rose_pine, neon, obsidian (no blur) or clean_slate
-# (no blur).
+# acrylic or liquid_glass.
 theme = acrylic
-# What the theme's colours are based on: theme (its own), accent (your Windows
-# accent colour), neutral (no colour) or custom (theme_hue, in degrees round
-# the colour wheel: 0 red, 120 green, 210 blue, 280 purple).
-theme_color = theme
-theme_hue = 210
-# How colourful the theme is: 0 = grey, 1 = as designed, 2 = twice as strong.
-theme_intensity = 1
+# The accent colour (the app in front, toggles, progress, today): windows (your
+# Windows accent colour, followed when it changes) or one of your own, #RRGGBB.
+accent = windows
+# Tint the glass with the accent colour too, as Windows' Show accent colour
+# on Start and taskbar setting does.
+accent_glass = false
 # How strongly the glass's edge catches the light (its outline, and the light
-# gathered and glowing along it): 0 = none, 1 = as designed, 2 = twice as strong.
+# gathered along it): 0 = none, 1 = as designed, 2 = twice as strong.
 theme_edge = 1
-# Clear glass (Liquid Glass, Translucent) bends what's behind it round its
-# edge, like real thick glass. Reads the screen behind it a few times a second.
-refraction = true
 
 # ---- Notch ----
 notch = true
@@ -45,7 +39,7 @@ hide_in_fullscreen = true
 # Keep the notch on top of fullscreen apps and games anyway (the taskbar still
 # gets out of the way).
 notch_fullscreen = false
-# On battery (laptops), go easy on it: no refraction, no visualizer bars, and
+# On battery (laptops), go easy on it: no visualizer bars, and
 # the PC's stats read less often. Back to normal once it's plugged in.
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
@@ -305,11 +299,9 @@ perf_log = false
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
-    pub theme_color: String,
-    pub theme_hue: f32,
-    pub theme_intensity: f32,
+    pub accent: String,
+    pub accent_glass: bool,
     pub theme_edge: f32,
-    pub refraction: bool,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -429,11 +421,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "acrylic".into(),
-            theme_color: "theme".into(),
-            theme_hue: 210.0,
-            theme_intensity: 1.0,
+            accent: "windows".into(),
+            accent_glass: false,
             theme_edge: 1.0,
-            refraction: true,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -612,7 +602,6 @@ impl Config {
     /// are off. Applied to the loaded settings only; the file is untouched.
     pub fn save_battery(&mut self, power: Option<(u8, bool)>) {
         if self.battery_saver && power.is_some_and(|(_, plugged)| !plugged) {
-            self.refraction = false;
             self.visualizer = false;
             self.lip_visualizer = false;
             self.widget_visualizer = false;
@@ -700,11 +689,9 @@ impl Config {
             };
             match k {
                 "theme" if crate::theme::is_known(v) => c.theme = v.into(),
-                "theme_color" if crate::theme::SOURCES.contains(&v) => c.theme_color = v.into(),
-                "theme_hue" => set_f(&mut c.theme_hue, 0.0, 360.0),
-                "theme_intensity" => set_f(&mut c.theme_intensity, 0.0, 2.0),
+                "accent" if v == "windows" || crate::theme::parse_accent(v).is_some() => c.accent = v.into(),
+                "accent_glass" => set_b(&mut c.accent_glass),
                 "theme_edge" => set_f(&mut c.theme_edge, 0.0, 2.0),
-                "refraction" => set_b(&mut c.refraction),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -863,11 +850,9 @@ impl Config {
         let b = |v: bool| v.to_string();
         match key {
             "theme" => self.theme.clone(),
-            "theme_color" => self.theme_color.clone(),
-            "theme_hue" => self.theme_hue.to_string(),
-            "theme_intensity" => self.theme_intensity.to_string(),
+            "accent" => self.accent.clone(),
+            "accent_glass" => b(self.accent_glass),
             "theme_edge" => self.theme_edge.to_string(),
-            "refraction" => b(self.refraction),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),
             "lip_width" => self.lip_width.to_string(),

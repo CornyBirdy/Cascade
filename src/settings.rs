@@ -230,7 +230,6 @@ enum Unit {
     Percent,
     Count,
     Seconds,
-    Degrees,
     Db,
 }
 
@@ -254,6 +253,9 @@ enum Ctl {
     Pick,
     /// The themes, as a grid of samples to click.
     Gallery,
+    /// The accent colour: the Windows accent, then Windows' own palette, as
+    /// dots to click (`theme::PALETTE`).
+    Accents,
     /// Tiles to drag between lanes (which widgets show, where and in what order).
     Board(Board),
     Note,
@@ -281,6 +283,7 @@ fn row_h(r: &Row) -> f32 {
     match r.ctl {
         Ctl::Heading => HEAD_H,
         Ctl::Gallery => BOARD_HEAD + gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP + 16.0,
+        Ctl::Accents => BOARD_HEAD + accent_rows() as f32 * (DOT + DOT_GAP) - DOT_GAP + 16.0,
         Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
         Ctl::Note => ROW_H,
         _ if r.desc.is_empty() => COMPACT_H,
@@ -307,6 +310,38 @@ const SWATCH_COLS: usize = 5;
 const SWATCH_PREVIEW: f32 = 50.0;
 const SWATCH_H: f32 = SWATCH_PREVIEW + 24.0;
 const SWATCH_GAP: f32 = 10.0;
+
+/// The accent dots: the Windows accent first, then the palette.
+const DOT: f32 = 30.0;
+const DOT_GAP: f32 = 10.0;
+const DOT_COLS: usize = 13;
+
+fn accent_rows() -> usize {
+    (theme::PALETTE.len() + 1).div_ceil(DOT_COLS)
+}
+
+/// Dot `k`'s centre in an accent grid filling `area`.
+fn dot_at(area: (f32, f32, f32, f32), k: usize) -> (f32, f32) {
+    let step = ((area.2 - DOT) / (DOT_COLS - 1) as f32).min(DOT + 18.0);
+    let (col, line) = (k % DOT_COLS, k / DOT_COLS);
+    (area.0 + DOT / 2.0 + col as f32 * step, area.1 + DOT / 2.0 + line as f32 * (DOT + DOT_GAP))
+}
+
+/// What dot `k` sets `accent` to.
+fn accent_value(k: usize) -> Option<String> {
+    match k {
+        0 => Some("windows".into()),
+        k => theme::PALETTE.get(k - 1).map(|(c, _)| format!("#{c:06X}")),
+    }
+}
+
+/// Which dot `accent` is.
+fn accent_index(value: &str) -> Option<usize> {
+    match theme::parse_accent(value) {
+        None => Some(0),
+        Some(c) => theme::PALETTE.iter().position(|(p, _)| *p == c).map(|i| i + 1),
+    }
+}
 
 fn gallery_rows() -> usize {
     theme::THEMES.len().div_ceil(SWATCH_COLS)
@@ -522,21 +557,6 @@ fn draw_tile(p: &Painter, f: &Fonts, item: &str, label: &str, x: f32, y: f32, bg
     p.text(label, &f.small, x, y + 24.0, TILE_W, 16.0, Align::Center, Color::white(0.8 * a));
 }
 
-/// A fully saturated colour at `hue` degrees round the colour wheel.
-fn hue_color(hue: f32) -> Color {
-    let h = hue.rem_euclid(360.0) / 60.0;
-    let x = 1.0 - (h.rem_euclid(2.0) - 1.0).abs();
-    let (r, g, b) = match h as u32 {
-        0 => (1.0, x, 0.0),
-        1 => (x, 1.0, 0.0),
-        2 => (0.0, 1.0, x),
-        3 => (0.0, x, 1.0),
-        4 => (x, 0.0, 1.0),
-        _ => (1.0, 0.0, x),
-    };
-    Color(r, g, b, 1.0)
-}
-
 const GOOD: Color = Color(0.42, 0.84, 0.52, 1.0);
 const BAD: Color = Color(1.0, 0.46, 0.42, 1.0);
 const WARN: Color = Color(0.98, 0.76, 0.36, 1.0);
@@ -593,7 +613,7 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "battery_saver",
                 "Battery saver",
-                "On battery, turn off refraction and the visualizer bars and read stats less often.",
+                "On battery, turn off the visualizer bars and read stats less often.",
                 Toggle,
             ),
             row(
@@ -641,23 +661,12 @@ fn rows(section: usize) -> Vec<Row> {
         1 => vec![
             row("theme", "Theme", "", Gallery),
             heading("h_colour", "Colour"),
+            row("accent", "Accent colour", "", Accents),
             row(
-                "theme_color",
-                "Based on",
-                "The theme's own colours, your Windows accent, none, or your own.",
-                Choice(&[("theme", "Theme"), ("accent", "Accent"), ("neutral", "None"), ("custom", "Custom")]),
-            ),
-            row(
-                "theme_hue",
-                "Custom colour",
-                "Drag to pick one.",
-                slider(0.0, 360.0, 1.0, Unit::Degrees),
-            ),
-            row(
-                "theme_intensity",
-                "Colour intensity",
-                "0% = grey, 100% = as the theme was made, 200% = twice as strong.",
-                slider(0.0, 2.0, 0.05, Unit::Percent),
+                "accent_glass",
+                "Accent colour on the glass",
+                "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
+                Toggle,
             ),
             heading("h_glass", "Glass"),
             row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
@@ -682,14 +691,8 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "theme_edge",
                 "Edge",
-                "How strongly the edge catches (or bends) the light. 0% = no outline.",
+                "How strongly the edge catches the light. 0% = no outline.",
                 slider(0.0, 2.0, 0.05, Unit::Percent),
-            ),
-            row(
-                "refraction",
-                "Refraction",
-                "Liquid Glass and Translucent bend what's behind them round their edge. Uses a little CPU.",
-                Toggle,
             ),
         ],
         2 => vec![
@@ -1257,15 +1260,6 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         return false;
     }
     match (section, key) {
-        // Appearance: what the theme picked can use.
-        (1, "theme_hue") => get("theme_color") == "custom",
-        // With no colour everything is grey already.
-        (1, "theme_intensity") => get("theme_color") != "neutral",
-        (1, "acrylic" | "refraction") => {
-            let theme = get("theme");
-            let t = theme::THEMES.iter().find(|t| t.key == theme).copied().unwrap_or(theme::THEMES[0]);
-            t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
-        }
         (0, "alt_tab_style") => on("alt_tab"),
         // Explorer snaps windows when it's the shell; Cascade does when it is.
         (0, "snap_drag") => on("shell_mode") || on("shell_active"),
@@ -1409,7 +1403,6 @@ fn fmt(v: f32, unit: Unit) -> String {
         Unit::Percent => format!("{:.0}%", v * 100.0),
         Unit::Count => format!("{v:.0}"),
         Unit::Seconds => format!("{v:.0} s"),
-        Unit::Degrees => format!("{v:.0}\u{b0}"),
         Unit::Db => format!("{v:.0} dB"),
     }
 }
@@ -1424,6 +1417,8 @@ enum Hit {
     Tile(usize, usize, usize),
     /// A theme in the gallery: row, theme.
     Swatch(usize, usize),
+    /// An accent colour's dot: row, dot (0 the Windows accent).
+    Accent(usize, usize),
 }
 
 /// The default for `key`, if the row should offer a reset button.
@@ -1888,7 +1883,7 @@ impl Settings {
     fn text_w(&self, i: usize, r: &Row) -> f32 {
         let cw = self.content_w();
         match r.ctl {
-            Ctl::Board(_) | Ctl::Gallery | Ctl::Note | Ctl::Heading => cw - 36.0,
+            Ctl::Board(_) | Ctl::Gallery | Ctl::Accents | Ctl::Note | Ctl::Heading => cw - 36.0,
             _ => {
                 let (rx, ..) = self.reset_rect(i, &r.ctl);
                 rx - 8.0 - (self.x0() + 18.0)
@@ -1903,6 +1898,15 @@ impl Settings {
             matches!(r.ctl, Ctl::Gallery).then(|| theme::THEMES.iter().find(|t| t.key == get(r.key))).flatten();
         let desc = if let Some(t) = picked {
             t.about.to_string()
+        } else if matches!(r.ctl, Ctl::Accents) {
+            // What's picked.
+            match theme::parse_accent(&get(r.key)) {
+                None => "Your Windows accent colour, followed when you change it.".to_string(),
+                Some(c) => match theme::PALETTE.iter().find(|(p, _)| *p == c) {
+                    Some((_, name)) => format!("{name}, picked here."),
+                    None => format!("#{c:06X}, from the config file."),
+                },
+            }
         } else if r.key == "about" && build > 0 {
             format!("{} Build {build}.", r.desc)
         } else if r.key == "screens_info" {
@@ -1962,7 +1966,7 @@ impl Settings {
             .enumerate()
             .map(|(i, r)| {
                 let base = row_h(r);
-                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Heading) {
+                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Accents | Ctl::Heading) {
                     return base;
                 }
                 let (desc, _, mark) = self.desc(r, get, build);
@@ -2029,6 +2033,13 @@ impl Settings {
                 y + BOARD_HEAD,
                 self.content_w() - 36.0,
                 gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP,
+            ),
+            // The dots, under the title.
+            Ctl::Accents => (
+                self.x0() + 18.0,
+                y + BOARD_HEAD,
+                self.content_w() - 36.0,
+                accent_rows() as f32 * (DOT + DOT_GAP) - DOT_GAP,
             ),
             // The lanes, under the title.
             Ctl::Board(b) => (
@@ -2131,6 +2142,17 @@ impl Settings {
                 }
                 continue;
             }
+            if let Ctl::Accents = r.ctl {
+                let area = self.ctl_rect(i, &r.ctl);
+                for k in 0..=theme::PALETTE.len() {
+                    let (dx, dy) = dot_at(area, k);
+                    let d = DOT / 2.0 + 3.0;
+                    if (lx - dx).abs() < d && (ly - dy).abs() < d && ly >= TOP - 8.0 {
+                        return Some(Hit::Accent(i, k));
+                    }
+                }
+                continue;
+            }
             if let Ctl::Board(b) = r.ctl {
                 let area = self.ctl_rect(i, &r.ctl);
                 for (j, lane) in b.read(get).iter().enumerate() {
@@ -2226,6 +2248,12 @@ impl Settings {
                 let value = theme::THEMES.get(k)?.key;
                 self.invalidate();
                 (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
+            }
+            Hit::Accent(i, k) => {
+                let r = self.rows().into_iter().nth(i)?;
+                let value = accent_value(k)?;
+                self.invalidate();
+                (get(r.key) != value).then_some(Change::Set(r.key, value))
             }
             Hit::Tile(i, j, k) => {
                 let r = self.rows().into_iter().nth(i)?;
@@ -2329,10 +2357,6 @@ impl Settings {
         }
         self.invalidate();
         let r = self.rows().into_iter().nth(i)?;
-        if r.key == "theme_hue" {
-            // Picking a colour means using it.
-            return Some(Change::Many(vec![(r.key, format!("{v}")), ("theme_color", "custom".to_string())]));
-        }
         Some(Change::Set(r.key, format!("{v}")))
     }
 
@@ -2495,7 +2519,7 @@ impl Settings {
                             dx += 15.0;
                         }
                         let dw = text_w - (dx - x0 - 18.0);
-                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery) {
+                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Accents) {
                             p.text(&desc, &f.small, dx, y + 34.0, dw, 18.0, Align::Left, tone);
                         } else {
                             // Wrapped onto as many lines as the row was sized for.
@@ -2549,20 +2573,9 @@ impl Settings {
                             let t = ((v - min) / (max - min)).clamp(0.0, 1.0);
                             let ty = cy + ch / 2.0;
                             let knob = if hovered || self.drag.is_some_and(|(d, _)| d == i) { 9.0 } else { 7.5 };
-                            if r.key == "theme_hue" {
-                                // The colour wheel, unrolled, with the knob in the colour picked.
-                                let stops: Vec<(f32, Color)> =
-                                    (0..=6).map(|k| (k as f32 / 6.0, hue_color(k as f32 * 60.0))).collect();
-                                if let Some(b) = p.linear(cx, ty, cx + cwid, ty, &stops) {
-                                    p.fill_rrect_with(cx, ty - 3.0, cwid, 6.0, 3.0, &b);
-                                }
-                                p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
-                                p.circle(cx + cwid * t, ty, knob - 2.5, hue_color(v));
-                            } else {
-                                p.rrect(cx, ty - 2.0, cwid, 4.0, 2.0, Color::white(0.18));
-                                p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, theme::accent());
-                                p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
-                            }
+                            p.rrect(cx, ty - 2.0, cwid, 4.0, 2.0, Color::white(0.18));
+                            p.rrect(cx, ty - 2.0, (cwid * t).max(4.0), 4.0, 2.0, theme::accent());
+                            p.circle(cx + cwid * t, ty, knob, Color::white(1.0));
                             p.text(&fmt(v, unit), &f.num, cx - 84.0, y, 70.0, h, Align::Right, Color::white(0.8));
                         }
                         Ctl::Text { .. } => {
@@ -2651,6 +2664,38 @@ impl Settings {
                                     Align::Center,
                                     Color::white(a),
                                 );
+                            }
+                        }
+                        Ctl::Accents => {
+                            let picked = accent_index(&get(r.key));
+                            let area = (cx, cy, cwid, ch);
+                            for k in 0..=theme::PALETTE.len() {
+                                let (dx, dy) = dot_at(area, k);
+                                let colour = match k {
+                                    0 => theme::windows_accent(),
+                                    k => {
+                                        let c = theme::PALETTE[k - 1].0;
+                                        let f = |s: u32| ((c >> s) & 0xFF) as f32 / 255.0;
+                                        Color(f(16), f(8), f(0), 1.0)
+                                    }
+                                };
+                                let over = self.hovered == Some(Hit::Accent(i, k));
+                                let on = picked == Some(k);
+                                let rad = DOT / 2.0 - if on { 3.0 } else { 0.0 } + if over && !on { 1.0 } else { 0.0 };
+                                p.circle(dx, dy, rad, colour);
+                                if on {
+                                    p.stroke_circle(dx, dy, DOT / 2.0 + 1.0, Color::white(0.95), 2.0);
+                                    // A tick in the middle.
+                                    let ink = Color(0.0, 0.0, 0.0, 0.75);
+                                    p.line(dx - 5.0, dy, dx - 1.5, dy + 3.5, ink, 2.0);
+                                    p.line(dx - 1.5, dy + 3.5, dx + 5.5, dy - 4.0, ink, 2.0);
+                                } else if k == 0 {
+                                    // The Windows accent: Windows' four panes on it.
+                                    let ink = Color::white(0.9);
+                                    for (ox, oy) in [(-5.0, -5.0), (0.5, -5.0), (-5.0, 0.5), (0.5, 0.5)] {
+                                        p.rrect(dx + ox, dy + oy, 4.5, 4.5, 0.5, ink);
+                                    }
+                                }
                             }
                         }
                         Ctl::Board(b) => {
@@ -2835,12 +2880,9 @@ mod tests {
         assert!(keys(8, &[("weather", "true"), ("weather_click", "custom")]).contains(&"weather_url"));
         assert!(!keys(8, &[("weather", "true"), ("weather_click", "google")]).contains(&"weather_url"));
         assert!(!keys(8, &[("weather", "false"), ("weather_click", "custom")]).contains(&"weather_location"));
-        assert!(!keys(1, &[("theme_color", "theme")]).contains(&"theme_hue"));
-        assert!(keys(1, &[("theme_color", "custom")]).contains(&"theme_hue"));
-        // Refraction only for clear glass that bends light, with the blur on.
-        assert!(keys(1, &[("theme", "liquid_glass"), ("acrylic", "true")]).contains(&"refraction"));
-        assert!(!keys(1, &[("theme", "acrylic"), ("acrylic", "true")]).contains(&"refraction"));
-        assert!(!keys(1, &[("theme", "obsidian")]).contains(&"acrylic"));
+        assert!(keys(1, &[("theme", "liquid_glass")]).contains(&"accent"));
+        assert_eq!(accent_index("windows"), Some(0));
+        assert_eq!(accent_value(accent_index("#0078D4").unwrap()).as_deref(), Some("#0078D4"));
         // Widget settings follow where the widgets are.
         assert!(!keys(6, &[("taskbar_left", ""), ("taskbar_right", ""), ("widgets_panel", "calendar")])
             .contains(&"widget_visualizer"));

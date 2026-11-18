@@ -29,8 +29,6 @@ mod ics;
 mod keyhook;
 mod lang;
 mod launcher;
-mod lens;
-mod lensmath;
 mod media;
 mod menu;
 mod mixer;
