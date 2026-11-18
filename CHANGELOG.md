@@ -4,6 +4,29 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-18 (later)
+
+**New**
+- **Appearance, made over**: two themes, **Acrylic** and a rebuilt **Liquid Glass** that's drawn rather than simulated (gradients painted once per pane size, nothing read from the screen, so it costs what Acrylic does). The other themes, the colour/hue/intensity controls and Refraction are gone; a config naming an old theme gets Acrylic.
+- **Accent colour, as Windows does it**: your Windows accent by default (followed when it changes), or one of Windows' own palette, picked from a grid of colour dots; *Accent colour on the glass* tints the glass with it. The glass itself is neutral grey: no more purple tone.
+- **Notch over fullscreen apps** (Settings > General): the notch stays on top of games and fullscreen apps while the taskbar still hides.
+- **Auto ducker, picked not typed**: choose the app that ducks and the apps that go down from a list of the apps with sound (or *Every other app*), and set how loud counts as sound (-60 to -10 dB).
+- **Scrolling** through the Notifications and Clipboard cards in the widgets panel.
+- **Animations**: shell mode's desktops slide from one to the next, to the side you're going; minimised windows shrink into their taskbar button (shell mode) and the button dips as it takes them in; window previews rise in from the taskbar and glide from app to app; the snip bar drops in.
+- **Task View's desktops** show your wallpaper with little windows on it (title bars, shadows, icons), in bigger boxes.
+
+**Snipping**
+- Every snip starts on **Rectangle**.
+- A snip is **really copied** to the clipboard now (it was put there after its window had closed, which Windows refuses), and the notch says so.
+- No more **flicker** while dragging out a rectangle: each frame is drawn off screen and put up in one go.
+- A proper bar: icons and labels in groups, the picked ones in the accent colour, a hint underneath, and a selection with handles and its size.
+
+**Fixed**
+- **Cascade hiding while Claude uses the computer** (or under any see-through, click-through overlay): an overlay over the whole screen is no longer taken for a fullscreen app.
+- **The taskbar not coming up with Start over a fullscreen app**: it's brought over the app now.
+- **"Windows wouldn't share" the clipboard history**: Cascade brings its menu forward and asks again, and if Windows still says no, shows its own history of what was copied while it ran.
+- **Picking a branch to update from** no longer offers to install it straight away: the choice is kept, and *Update now* installs it when you want.
+
 ## 2026-11-18
 
 **New**

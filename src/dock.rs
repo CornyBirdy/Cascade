@@ -1165,15 +1165,7 @@ impl Dock {
             return;
         }
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         for b in &self.backdrops {
             b.restack(self.hwnd);
@@ -1861,14 +1853,13 @@ impl Dock {
                 || !self.reveal.settled()
                 || !self.music_w.settled()
                 || self.chip_slide.iter().any(|s| !s.settled())
-                || self
-                    .apps
-                    .iter()
-                    .any(|a| !a.presence.settled()
+                || self.apps.iter().any(|a| {
+                    !a.presence.settled()
                         || !a.mag.settled()
                         || !a.bounce.settled()
                         || !a.dip.settled()
-                        || !a.slide.settled()))
+                        || !a.slide.settled()
+                }))
     }
 
     /// Steps springs; returns true while the size or position is changing.
@@ -2436,10 +2427,9 @@ impl Dock {
         self.reveal.settled()
             && self.music_w.settled()
             && self.chip_slide.iter().all(|s| s.settled())
-            && self
-                .apps
-                .iter()
-                .all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled() && a.dip.settled() && a.slide.settled())
+            && self.apps.iter().all(|a| {
+                a.presence.settled() && a.mag.settled() && a.bounce.settled() && a.dip.settled() && a.slide.settled()
+            })
     }
 
     /// Redraws only the music widget, for the visualizer's bars: its patch of

@@ -81,7 +81,12 @@ pub fn fullscreen_now() -> bool {
 pub fn fullscreen_screen() -> Option<RECT> {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() || is_desktop(fg) || is_overlay(fg) {
+        if fg.is_invalid()
+            || !IsWindowVisible(fg).as_bool()
+            || IsIconic(fg).as_bool()
+            || is_desktop(fg)
+            || is_overlay(fg)
+        {
             return None;
         }
         let mut pid = 0u32;

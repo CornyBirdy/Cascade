@@ -188,7 +188,8 @@ impl Preview {
         self.moving = (from != (x, y)).then(|| (from, (x, y), std::time::Instant::now()));
         self.at = from;
         unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), from.0, from.1, pw, ph, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ =
+                SetWindowPos(self.hwnd, Some(HWND_TOPMOST), from.0, from.1, pw, ph, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             if self.moving.is_some() {
                 SetTimer(Some(self.hwnd), TIMER_MOVE, 10, None);
             }
@@ -212,15 +213,8 @@ impl Preview {
         let lerp = |a: i32, b: i32| a + ((b - a) as f32 * e).round() as i32;
         self.at = (lerp(from.0, to.0), lerp(from.1, to.1));
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                None,
-                self.at.0,
-                self.at.1,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            let _ =
+                SetWindowPos(self.hwnd, None, self.at.0, self.at.1, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             if t >= 1.0 {
                 self.moving = None;
                 let _ = KillTimer(Some(self.hwnd), TIMER_MOVE);

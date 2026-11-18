@@ -10,10 +10,10 @@
 //! opens in the editor to mark up, crop, copy text out of, or save
 //! elsewhere (see `snipedit`). Esc or a right-click leaves without one.
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -329,7 +329,8 @@ fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
         };
         // Every snip starts on Rectangle, whatever the last one used (a
         // delayed one on what was picked before the wait).
-        let start_mode = if record && matches!(start_mode, Mode::Window | Mode::Free) { Mode::Rect } else { start_mode };
+        let start_mode =
+            if record && matches!(start_mode, Mode::Window | Mode::Free) { Mode::Rect } else { start_mode };
         set_mode(start_mode);
         layout_bar(&mut s);
         *snip() = Some(s);
@@ -424,7 +425,12 @@ fn bar_area(s: &Snip) -> RECT {
     let b = bar_rect(s);
     let k = s.scale;
     let side = (24.0 * k) as i32;
-    RECT { left: b.left - side, top: b.top - (TOP * k) as i32, right: b.right + side, bottom: b.bottom + (52.0 * k) as i32 }
+    RECT {
+        left: b.left - side,
+        top: b.top - (TOP * k) as i32,
+        right: b.right + side,
+        bottom: b.bottom + (52.0 * k) as i32,
+    }
 }
 
 fn label(s: &Snip, b: Button) -> String {
@@ -754,7 +760,13 @@ fn overlaps(a: &RECT, b: &RECT) -> bool {
 
 /// Draws with Direct2D into `area` (window pixels) of `back`, blended over
 /// what's there at `alpha`; `draw` gets the area's size in layout units.
-unsafe fn overlay(back: HDC, area: RECT, scale: f32, alpha: f32, draw: impl FnOnce(&crate::gfx::Painter, &crate::gfx::Fonts)) {
+unsafe fn overlay(
+    back: HDC,
+    area: RECT,
+    scale: f32,
+    alpha: f32,
+    draw: impl FnOnce(&crate::gfx::Painter, &crate::gfx::Fonts),
+) {
     let (w, h) = (area.right - area.left, area.bottom - area.top);
     if w <= 0 || h <= 0 || alpha <= 0.0 {
         return;

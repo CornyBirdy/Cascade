@@ -117,7 +117,8 @@ pub const THEMES: [Theme; 2] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Thick, lightly frosted glass: bright along its top, light gathered in its rounded edge, a glinting rim.",
+        about:
+            "Thick, lightly frosted glass: bright along its top, light gathered in its rounded edge, a glinting rim.",
         glass: Glass::Blur,
         tint: (0.10, 0.10, 0.11),
         tint_scale: 0.4,

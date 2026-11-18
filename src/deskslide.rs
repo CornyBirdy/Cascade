@@ -125,7 +125,8 @@ pub fn begin(forward: bool) {
         };
         RegisterClassExW(&wc);
         let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
-        let Ok(hwnd) = CreateWindowExW(ex, class, w!(""), WS_POPUP, x, y, w, h, None, None, Some(instance.into()), None)
+        let Ok(hwnd) =
+            CreateWindowExW(ex, class, w!(""), WS_POPUP, x, y, w, h, None, None, Some(instance.into()), None)
         else {
             let _ = DeleteObject(old.into());
             return;

@@ -1277,7 +1277,9 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
         (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
-        (0, "ducker_trigger" | "ducker_targets" | "ducker_threshold" | "ducker_level" | "ducker_release") => on("ducker"),
+        (0, "ducker_trigger" | "ducker_targets" | "ducker_threshold" | "ducker_level" | "ducker_release") => {
+            on("ducker")
+        }
         // Taskbar.
         (3, "dock") => true,
         (3, _) if !on("dock") => false,

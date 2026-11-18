@@ -1708,15 +1708,7 @@ impl App {
             return;
         }
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         self.notch_backdrop.restack(self.hwnd);
         self.dirty = true;
@@ -2207,7 +2199,8 @@ impl App {
             self.wifi_open = false;
             self.bt_open = false;
         }
-        let visible = (self.cfg.notch || self.summoned) && !(self.cfg.hide_in_fullscreen && self.fullscreen && !self.cfg.notch_fullscreen);
+        let visible = (self.cfg.notch || self.summoned)
+            && !(self.cfg.hide_in_fullscreen && self.fullscreen && !self.cfg.notch_fullscreen);
         if visible != self.shown {
             self.shown = visible;
             unsafe {
@@ -2918,7 +2911,11 @@ impl App {
                     self.on_menu(MenuCmd::Update);
                 } else {
                     let from = update::channel_label(&self.cfg.update_branch);
-                    self.notify(format!("Updates now come from {from} \u{2014} Update now installs it"), theme::accent(), true);
+                    self.notify(
+                        format!("Updates now come from {from} \u{2014} Update now installs it"),
+                        theme::accent(),
+                        true,
+                    );
                 }
             }
             update::AVAILABLE => {

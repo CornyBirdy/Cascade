@@ -212,10 +212,8 @@ fn own_id(id: &str) -> Option<u64> {
 }
 
 fn own_clips() -> Clips {
-    let items = own()
-        .iter()
-        .map(|c| Clip { id: format!("cascade:{}", c.n), text: c.text.clone(), kind: c.kind })
-        .collect();
+    let items =
+        own().iter().map(|c| Clip { id: format!("cascade:{}", c.n), text: c.text.clone(), kind: c.kind }).collect();
     Clips { state: State::Ready, items }
 }
 
@@ -238,11 +236,23 @@ fn record() {
         if !open {
             return;
         }
-        // Copies an app asked to keep out of history (passwords) aren't kept.
-        let private = ["ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory"].iter().any(|name| {
-            let f = RegisterClipboardFormatW(&HSTRING::from(*name));
-            f != 0 && IsClipboardFormatAvailable(f).is_ok()
-        });
+        // Copies an app asked to keep out of history (passwords) aren't kept:
+        // marked with ExcludeClipboardContentFromMonitorProcessing, or with
+        // CanIncludeInClipboardHistory set to 0.
+        let format = |name: &str| RegisterClipboardFormatW(&HSTRING::from(name));
+        let excluded = format("ExcludeClipboardContentFromMonitorProcessing");
+        let mut private = excluded != 0 && IsClipboardFormatAvailable(excluded).is_ok();
+        let include = format("CanIncludeInClipboardHistory");
+        if !private && include != 0 && IsClipboardFormatAvailable(include).is_ok() {
+            if let Ok(h) = GetClipboardData(include) {
+                let g = windows::Win32::Foundation::HGLOBAL(h.0);
+                let at = GlobalLock(g) as *const u32;
+                if !at.is_null() && GlobalSize(g) >= 4 {
+                    private = *at == 0;
+                }
+                let _ = GlobalUnlock(g);
+            }
+        }
         let read = |format: u32| -> Option<Vec<u8>> {
             let h = GetClipboardData(format).ok()?;
             let g = windows::Win32::Foundation::HGLOBAL(h.0);
@@ -317,7 +327,8 @@ fn paste_own(n: u64) -> bool {
             OwnData::Text(t) => package.SetText(&HSTRING::from(t.as_str()))?,
             OwnData::Picture(dib) => {
                 // A .bmp file: its 14-byte header, then the DIB.
-                let header_size = u32::from_le_bytes(dib.get(..4).and_then(|b| b.try_into().ok()).unwrap_or([40, 0, 0, 0]));
+                let header_size =
+                    u32::from_le_bytes(dib.get(..4).and_then(|b| b.try_into().ok()).unwrap_or([40, 0, 0, 0]));
                 let mut bmp = Vec::with_capacity(14 + dib.len());
                 bmp.extend_from_slice(b"BM");
                 bmp.extend_from_slice(&((14 + dib.len()) as u32).to_le_bytes());
