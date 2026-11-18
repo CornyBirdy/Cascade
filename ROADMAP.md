@@ -35,3 +35,27 @@ Tried once on a real PC (taskbar, Start, shortcuts and tray worked). Fixed since
 - [ ] **Win+P, Win+K, Win+. and Win+Space** stand-ins.
 - [ ] **Store apps' startup tasks** (the ones on Task Manager's Startup page that aren't in the registry or the Startup folder).
 - [ ] **Per-screen and slideshow wallpapers** (Cascade shows Windows' one picture on every screen).
+
+## Shell mode: as if Explorer never existed
+
+The goal before merging to `main`: nothing in daily use falls back to Windows' own UI, or needs Explorer.
+
+**First (gaps hit every day)**
+- [ ] **Cascade Settings for Windows**: Cascade's own pages for what Windows' Settings did. Display (resolution, scale, refresh rate, screen layout, night light), Sound (devices, levels), Network (Wi-Fi with password entry, Ethernet, VPN, mobile hotspot), Bluetooth (pairing new devices), Personalisation (wallpaper, accent colour, light/dark mode), Apps (installed list, uninstall), Power and battery, Date and time, About.
+- [ ] **Real notification pop-ups**: banners with the app's buttons and quick reply, plus Do Not Disturb.
+- [ ] **Window snapping**: drag to an edge or corner to snap, and a layout picker (Explorer did both).
+- [ ] **Win+P**: duplicate / extend / one screen only.
+- [ ] **Start searches files and settings** (Windows' search index works without Explorer).
+- [ ] **Keyboard language switcher** (Win+Space, Alt+Shift) with an indicator on the taskbar.
+
+**Next**
+- [ ] **More Controls toggles**: airplane mode, night light, mobile hotspot, battery saver, Do Not Disturb.
+- [ ] **Desktop icons**, and right-click New folder / drop files on the desktop.
+- [ ] **Emoji panel** (Win+.).
+- [ ] **Shut-down box** on Alt+F4 at the desktop.
+- [ ] **Stand-ins for Store-only tools**: Game Bar (Win+G), screen recording, dictation (Win+H), casting (Win+K).
+
+**Big**
+- [ ] **Cascade's own file manager** (File Explorer windows still open, but they're Windows' look).
+
+**Not possible**: the lock screen, sign-in, UAC prompts and the Ctrl+Alt+Del screen run on Windows' secure desktop, which no app can draw on. Pure Store apps (Calculator, Photos, Windows' Settings) only open through Explorer.
