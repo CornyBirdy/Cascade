@@ -15,6 +15,7 @@ mod config;
 mod deskicons;
 mod deskosd;
 mod desktops;
+mod deskslide;
 mod devices;
 mod dictate;
 mod dock;

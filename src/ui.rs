@@ -5312,6 +5312,7 @@ impl App {
         unsafe {
             match m {
                 WM_TIMER if wp.0 == preview::TIMER_PEEK => self.preview.on_timer(),
+                WM_TIMER if wp.0 == preview::TIMER_MOVE => self.preview.on_move_timer(),
                 WM_MOUSEMOVE => {
                     let _ = KillTimer(Some(dock), TIMER_PREVIEW_HIDE);
                     let _ = KillTimer(Some(dock), TIMER_DOCK_HIDE);

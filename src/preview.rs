@@ -30,6 +30,11 @@ const HEIGHT: f32 = PAD + TITLE_H + THUMB_H + PAD + 4.0;
 /// How long the pointer rests on a preview before its window is peeked at.
 const PEEK_MS: u32 = 400;
 pub const TIMER_PEEK: usize = 1;
+/// Moves it while it rises in, or glides from one app's button to another's.
+pub const TIMER_MOVE: usize = 2;
+/// How long that takes, and how far it rises (layout units).
+const MOVE_MS: f32 = 170.0;
+const RISE: f32 = 10.0;
 
 /// dwmapi's DwmpActivateLivePreview (ordinal 113): (on, the window to show,
 /// a window to keep on top, 3 = a window peek, reserved).
@@ -69,6 +74,9 @@ pub enum Action {
     Close(HWND),
 }
 
+/// A move from one place on screen to another, and when it started.
+type Move = ((i32, i32), (i32, i32), std::time::Instant);
+
 pub struct Preview {
     pub hwnd: HWND,
     pub app: Option<String>,
@@ -81,6 +89,11 @@ pub struct Preview {
     /// Peek at a window while the pointer rests on its preview (`taskbar_peek`).
     pub peek: bool,
     peeking: bool,
+    /// Where it is on screen, and the move under way: from, to, and when it
+    /// started (rising in from below as it opens, gliding sideways when the
+    /// pointer goes on to another app).
+    at: (i32, i32),
+    moving: Option<Move>,
 }
 
 impl Preview {
@@ -107,6 +120,8 @@ impl Preview {
             size: (0, 0),
             peek: true,
             peeking: false,
+            at: (0, 0),
+            moving: None,
         }
     }
 
@@ -165,14 +180,51 @@ impl Preview {
         let x = (anchor_x - pw / 2).clamp(monitor.left + 4, (monitor.right - pw - 4).max(monitor.left));
         let y = bottom - ph;
         self.size = (pw, ph);
+        let was_up = self.app.is_some() && unsafe { IsWindowVisible(self.hwnd).as_bool() };
         self.app = Some(app.to_string());
         self.hovered = None;
+        // Rises in from the taskbar, or glides over from the last app's.
+        let from = if was_up { self.at } else { (x, y + (RISE * k) as i32) };
+        self.moving = (from != (x, y)).then(|| (from, (x, y), std::time::Instant::now()));
+        self.at = from;
         unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, pw, ph, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), from.0, from.1, pw, ph, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            if self.moving.is_some() {
+                SetTimer(Some(self.hwnd), TIMER_MOVE, 10, None);
+            }
         }
         self.place_thumbs();
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// A step of the move under way (`TIMER_MOVE`).
+    pub fn on_move_timer(&mut self) {
+        let Some((from, to, start)) = self.moving else {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_MOVE);
+            }
+            return;
+        };
+        let t = (start.elapsed().as_secs_f32() * 1000.0 / MOVE_MS).min(1.0);
+        let e = 1.0 - (1.0 - t).powi(3);
+        let lerp = |a: i32, b: i32| a + ((b - a) as f32 * e).round() as i32;
+        self.at = (lerp(from.0, to.0), lerp(from.1, to.1));
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                self.at.0,
+                self.at.1,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            if t >= 1.0 {
+                self.moving = None;
+                let _ = KillTimer(Some(self.hwnd), TIMER_MOVE);
+            }
         }
     }
 
@@ -234,7 +286,9 @@ impl Preview {
         // afresh next time, or leaving it then would go unnoticed and it
         // would stay up.
         self.tracking = false;
+        self.moving = None;
         unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_MOVE);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }

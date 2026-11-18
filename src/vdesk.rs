@@ -326,6 +326,11 @@ fn go(s: &mut State, to: usize) -> Option<HWND> {
 
 /// Goes to desktop number `to` (0 is the first).
 pub fn switch(to: usize) {
+    // It slides there (see `deskslide`).
+    let (n, current) = with(|s| (s.hidden.len(), s.current));
+    if to != current && to < n {
+        crate::deskslide::begin(to > current);
+    }
     if let Some(front) = with(|s| go(s, to)) {
         crate::dock::focus_window(front);
     }

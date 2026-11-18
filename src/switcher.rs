@@ -81,15 +81,15 @@ struct Geom {
     max_rows: usize,
 }
 /// Task View's strip of desktops, under the cards.
-const STRIP_H: f32 = 136.0;
-const DESK_W: f32 = 176.0;
-const DESK_H: f32 = 112.0;
+const STRIP_H: f32 = 156.0;
+const DESK_W: f32 = 208.0;
+const DESK_H: f32 = 132.0;
 /// Room for a desktop's name under its picture.
 const DESK_LABEL: f32 = 22.0;
 /// The most windows drawn in a desktop's picture.
 const DESK_PIC_MAX: usize = 12;
 /// The icon in a window's place in a picture of a desktop.
-const MINI_ICON: f32 = 16.0;
+const MINI_ICON: f32 = 20.0;
 const DESK_GAP: f32 = 8.0;
 /// The × that closes a desktop, in the corner of its box (size, and gap from the corner).
 const CLOSE_SIZE: f32 = 20.0;
@@ -185,6 +185,11 @@ pub struct Switcher {
     /// The windows on each desktop (read as Task View opens), for the
     /// pictures of the desktops.
     desk_windows: Vec<Vec<DeskWindow>>,
+    /// The wallpaper, small, for the pictures of the desktops: what it is
+    /// (`wallpaper::picture_key`), its size in pixels and pixels, and the
+    /// bitmap made of it (with the render target's generation it's for).
+    wall: Option<(String, (i32, i32), Vec<u8>)>,
+    wall_bmp: Option<(u32, ID2D1Bitmap)>,
     drag: Option<Drag>,
     style: Style,
     /// Fading out after a pick (or Esc): still drawn until `open` reaches 0.
@@ -235,6 +240,8 @@ impl Switcher {
             desks: Desktops::default(),
             desk_hover: None,
             desk_windows: Vec::new(),
+            wall: None,
+            wall_bmp: None,
             drag: None,
             style: Style::Cards,
             closing: false,
@@ -294,6 +301,7 @@ impl Switcher {
         self.desks = desks;
         self.desk_hover = None;
         self.desk_windows.clear();
+        self.load_wallpaper();
         let fg = unsafe { GetForegroundWindow() };
         self.selected = self.items.iter().position(|i| i.window == fg).unwrap_or(0);
         self.start();
@@ -304,6 +312,19 @@ impl Switcher {
         }
         self.show_now();
         crate::launcher::force_foreground(self.overlay);
+    }
+
+    /// The wallpaper at the size of a desktop's picture, made again only
+    /// when it (or the size) changed.
+    fn load_wallpaper(&mut self) {
+        let (_, _, pw, ph) = self.desk_picture(0.0, 0.0, DESK_W);
+        let size = ((pw * self.k).round() as i32, (ph * self.k).round() as i32);
+        let key = crate::wallpaper::picture_key();
+        if self.wall.as_ref().is_some_and(|(k, s, _)| *k == key && *s == size) {
+            return;
+        }
+        self.wall_bmp = None;
+        self.wall = crate::wallpaper::thumbnail(size.0, size.1).map(|px| (key, size, px));
     }
 
     /// What is open on each desktop, for the list that comes up over a desktop.
@@ -908,6 +929,15 @@ impl Switcher {
         let icons: Vec<Option<ID2D1Bitmap>> =
             self.items.iter().map(|it| it.id.as_ref().and_then(|id| dock.icon(id, gfx, icon_px))).collect();
 
+        // The wallpaper under the pictures of the desktops.
+        if self.view && self.wall_bmp.as_ref().is_none_or(|(g, _)| *g != gfx.generation) {
+            self.wall_bmp = self
+                .wall
+                .as_ref()
+                .and_then(|(_, (w, h), px)| gfx.bitmap(*w as u32, *h as u32, px).ok())
+                .map(|b| (gfx.generation, b));
+        }
+        let wall = self.wall_bmp.as_ref().map(|(_, b)| b.clone());
         // The small icons in the pictures of the desktops.
         let mini_px = (MINI_ICON * k).round() as u32;
         let desk_icons: Vec<Vec<Option<ID2D1Bitmap>>> = if self.view {
@@ -1046,20 +1076,36 @@ impl Switcher {
                     } else if target {
                         p.stroke_rrect(bx + 1.0, by + 1.0, bw - 2.0, DESK_H - 2.0, r, theme::accent().alpha(0.9), 2.0);
                     }
-                    // The desktop itself: where its windows are.
+                    // The desktop itself: its wallpaper, and its windows where they are.
                     let (px, py, pw, ph) = self.desk_picture(bx, by, bw);
-                    p.rrect(px, py, pw, ph, 4.0, Color::white(0.07));
+                    match &wall {
+                        Some(bmp) => {
+                            p.clip(px, py, pw, ph);
+                            p.image(bmp, px, py, pw, ph, if current || hot { 1.0 } else { 0.8 });
+                            p.unclip();
+                        }
+                        None => p.rrect(px, py, pw, ph, 4.0, Color::white(0.07)),
+                    }
+                    p.stroke_rrect(px + 0.5, py + 0.5, pw - 1.0, ph - 1.0, 4.0, Color::white(0.16), 1.0);
                     let windows = self.desk_windows.get(i).map(Vec::as_slice).unwrap_or(&[]);
                     // The one in front is first: draw the others under it.
                     for (n, d) in windows.iter().enumerate().take(DESK_PIC_MAX).rev() {
                         let (wx, wy) = (px + d.at.0 * pw, py + d.at.1 * ph);
-                        let (ww, wh) = ((d.at.2 * pw).max(6.0), (d.at.3 * ph).max(6.0));
-                        p.rrect(wx, wy, ww, wh, 3.0, Color(0.22, 0.24, 0.29, 0.96));
-                        p.stroke_rrect(wx + 0.5, wy + 0.5, ww - 1.0, wh - 1.0, 3.0, Color::white(0.22), 1.0);
+                        let (ww, wh) = ((d.at.2 * pw).max(8.0), (d.at.3 * ph).max(7.0));
+                        let front = n == 0;
+                        // A small window: a soft shadow, the body, a title bar, its edge.
+                        p.rrect(wx + 0.5, wy + 1.5, ww, wh, 3.0, Color(0.0, 0.0, 0.0, 0.35));
+                        p.rrect(wx, wy, ww, wh, 3.0, Color(0.16, 0.17, 0.19, 0.97));
+                        let bar = (wh * 0.16).clamp(3.0, 7.0);
+                        p.clip(wx, wy, ww, bar);
+                        p.rrect(wx, wy, ww, wh, 3.0, Color(0.25, 0.26, 0.29, 1.0));
+                        p.unclip();
+                        let edge = if front { Color::white(0.42) } else { Color::white(0.2) };
+                        p.stroke_rrect(wx + 0.5, wy + 0.5, ww - 1.0, wh - 1.0, 3.0, edge, 1.0);
                         if let (Some(Some(bmp)), true) =
-                            (desk_icons.get(i).and_then(|v| v.get(n)), ww >= MINI_ICON && wh >= MINI_ICON)
+                            (desk_icons.get(i).and_then(|v| v.get(n)), ww >= MINI_ICON + 4.0 && wh >= MINI_ICON + bar)
                         {
-                            p.icon(bmp, wx + ww / 2.0, wy + wh / 2.0, 1.0);
+                            p.icon(bmp, wx + ww / 2.0, wy + bar + (wh - bar) / 2.0, 1.0);
                         }
                     }
                     // The × to close it, while the pointer is over the desktop.
