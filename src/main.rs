@@ -142,6 +142,9 @@ pub mod msg {
     pub const SNIP_NOW: u32 = WM_APP + 44;
     /// Shell mode: rename the selected desktop icon (its menu's Rename).
     pub const DESK_RENAME: u32 = WM_APP + 45;
+    /// The clipboard reader was refused: bring Cascade's clipboard menu (or the
+    /// widgets panel) to the front so Windows hands the history over.
+    pub const CLIP_FRONT: u32 = WM_APP + 46;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

@@ -1261,6 +1261,10 @@ impl App {
             );
         }
         devices::listen(hwnd);
+        // Cascade's own clipboard history, for when Windows won't share its own.
+        unsafe {
+            let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
+        }
         let brightness_tx = brightness::spawn_setter();
         let radio_tx = radios::spawn();
         if cfg.weather {
@@ -2552,6 +2556,16 @@ impl App {
                 self.dirty = true;
             }
             msg::UPDATE => self.on_update(wp.0, lp.0 as u32),
+            WM_CLIPBOARDUPDATE => {
+                let _ = self.clip_tx.send(ClipCmd::Record);
+            }
+            msg::CLIP_FRONT => {
+                if let Some(c) = self.clips.as_ref().filter(|c| c.open) {
+                    crate::launcher::force_foreground(c.hwnd);
+                } else if self.widgets.open {
+                    crate::launcher::force_foreground(self.widgets.hwnd);
+                }
+            }
             msg::CLIP_PASTE => {
                 // The item is on the clipboard: back to the app, then paste.
                 if wp.0 == 1 && !self.clip_target.is_invalid() {
@@ -2849,6 +2863,9 @@ impl App {
                 self.reload_config();
                 if build == 1 {
                     self.on_menu(MenuCmd::Update);
+                } else {
+                    let from = update::channel_label(&self.cfg.update_branch);
+                    self.notify(format!("Updates now come from {from} \u{2014} Update now installs it"), theme::accent(), true);
                 }
             }
             update::AVAILABLE => {

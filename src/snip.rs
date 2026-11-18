@@ -5,14 +5,17 @@
 //! and switches to recording (Win+Shift+R starts there): drag an area or
 //! click a screen, with or without the PC's sound (see `recorder`).
 //!
-//! A snip goes on the clipboard, is saved in Pictures\Screenshots, and
+//! It always opens on Rectangle. A snip goes on the clipboard, is saved in
+//! Pictures\Screenshots, and
 //! opens in the editor to mark up, crop, copy text out of, or save
 //! elsewhere (see `snipedit`). Esc or a right-click leaves without one.
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::cell::RefCell;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::*;
@@ -22,10 +25,12 @@ use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_RETURN};
 use windows::Win32::UI::Shell::{FOLDERID_Screenshots, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::gfx::{Align, Color, Gfx};
 use crate::{config, msg};
 
 const CF_DIB: u32 = 8;
@@ -38,7 +43,8 @@ enum Mode {
     Free,
 }
 
-/// Remembered between snips, as the Snipping Tool does.
+/// The mode picked on the bar (each snip starts on Rectangle; a delayed one
+/// keeps what was picked).
 static MODE: AtomicU32 = AtomicU32::new(0);
 static SOUND: AtomicBool = AtomicBool::new(true);
 
@@ -107,6 +113,10 @@ struct Snip {
     to: POINT,
     /// The freeform outline being drawn.
     path: Vec<POINT>,
+    /// Pixels per layout unit on the screen the bar is on.
+    scale: f32,
+    /// When it opened: the bar drops in from the top edge.
+    opened: Instant,
 }
 
 unsafe impl Send for Snip {}
@@ -116,6 +126,25 @@ static SNIP: Mutex<Option<Snip>> = Mutex::new(None);
 fn snip() -> std::sync::MutexGuard<'static, Option<Snip>> {
     SNIP.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+thread_local! {
+    /// Direct2D for the bar and the size label, made on the first snip.
+    static GFX: RefCell<Option<Gfx>> = const { RefCell::new(None) };
+}
+
+fn with_gfx<R>(f: impl FnOnce(&mut Gfx) -> R) -> Option<R> {
+    GFX.with(|g| {
+        let mut g = g.borrow_mut();
+        if g.is_none() {
+            *g = Gfx::new().ok();
+        }
+        g.as_mut().map(f)
+    })
+}
+
+/// How long the bar takes to drop in.
+const OPEN_MS: f32 = 220.0;
+const TIMER_OPEN: usize = 1;
 
 /// A top-down 32-bit bitmap and its pixels.
 pub(crate) unsafe fn dib(w: i32, h: i32) -> Option<(HBITMAP, &'static mut [u32])> {
@@ -225,6 +254,10 @@ unsafe fn window_rects(origin: (i32, i32)) -> Vec<RECT> {
 
 /// Starts a snip (or, with `record`, picking what to record).
 pub fn start(instance: HINSTANCE, record: bool) {
+    open(instance, record, Mode::Rect);
+}
+
+fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
     if snip().is_some() || crate::recorder::recording() {
         return;
     }
@@ -291,12 +324,16 @@ pub fn start(instance: HINSTANCE, record: bool) {
             from: None,
             to: POINT::default(),
             path: Vec::new(),
+            scale: 1.0,
+            opened: Instant::now(),
         };
-        if record && matches!(mode(), Mode::Window | Mode::Free) {
-            set_mode(Mode::Rect);
-        }
+        // Every snip starts on Rectangle, whatever the last one used (a
+        // delayed one on what was picked before the wait).
+        let start_mode = if record && matches!(start_mode, Mode::Window | Mode::Free) { Mode::Rect } else { start_mode };
+        set_mode(start_mode);
         layout_bar(&mut s);
         *snip() = Some(s);
+        SetTimer(Some(window), TIMER_OPEN, 15, None);
         let _ = ShowWindow(window, SW_SHOW);
         crate::launcher::force_foreground(window);
         let _ = SetFocus(Some(window));
@@ -307,55 +344,137 @@ pub fn start(instance: HINSTANCE, record: bool) {
 unsafe fn layout_bar(s: &mut Snip) {
     let mut p = POINT::default();
     let _ = GetCursorPos(&mut p);
+    let (mut dx, mut dy) = (96u32, 96u32);
+    let _ = GetDpiForMonitor(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+    s.scale = dx.max(96) as f32 / 96.0;
+    let k = s.scale;
     let local = POINT { x: p.x - s.origin.0, y: p.y - s.origin.1 };
     let m = screen_at(s, local);
-    let mut buttons: Vec<(Button, i32)> = Vec::new();
-    buttons.push((Button::Mode(Mode::Rect), 92));
+    let mut buttons: Vec<Button> = vec![Button::Mode(Mode::Rect)];
     if !s.record {
-        buttons.push((Button::Mode(Mode::Window), 80));
+        buttons.push(Button::Mode(Mode::Window));
     }
-    buttons.push((Button::Mode(Mode::Screen), 98));
+    buttons.push(Button::Mode(Mode::Screen));
     if !s.record {
-        buttons.push((Button::Mode(Mode::Free), 86));
-        buttons.push((Button::Delay, 92));
+        buttons.push(Button::Mode(Mode::Free));
+        buttons.push(Button::Delay);
     } else {
-        buttons.push((Button::Sound, 96));
+        buttons.push(Button::Sound);
     }
-    buttons.push((Button::Record, 96));
-    buttons.push((Button::Close, 40));
-    let total: i32 = buttons.iter().map(|b| b.1 + 4).sum::<i32>() + 8;
-    let mut x = (m.left + m.right) / 2 - total / 2 + 8;
-    let y = m.top + 18;
+    buttons.push(Button::Record);
+    buttons.push(Button::Close);
+    // Each button fits its icon and label (layout units, then pixels).
+    let widths: Vec<i32> = buttons
+        .iter()
+        .map(|b| {
+            let text = label(s, *b);
+            let w = if text.is_empty() {
+                BUTTON_H
+            } else {
+                let tw = with_gfx(|g| g.measure(&text, &g.fonts.body)).unwrap_or(text.len() as f32 * 7.0);
+                14.0 + 16.0 + 8.0 + tw.ceil() + 14.0
+            };
+            (w * k).round() as i32
+        })
+        .collect();
+    let gap = (GAP * k).round() as i32;
+    let group = (GROUP_GAP * k).round() as i32;
+    let total: i32 = widths.iter().sum::<i32>()
+        + buttons.iter().skip(1).map(|b| if starts_group(*b) { group } else { gap }).sum::<i32>();
+    let mut x = (m.left + m.right) / 2 - total / 2;
+    let y = m.top + (TOP * k).round() as i32;
+    let h = (BUTTON_H * k).round() as i32;
     s.buttons = buttons
         .into_iter()
-        .map(|(b, w)| {
-            let r = RECT { left: x, top: y, right: x + w, bottom: y + 36 };
-            x += w + 4;
+        .zip(widths)
+        .enumerate()
+        .map(|(i, (b, w))| {
+            if i > 0 {
+                x += if starts_group(b) { group } else { gap };
+            }
+            let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+            x += w;
             (b, r)
         })
         .collect();
 }
 
+/// The bar's measurements, in layout units.
+const BUTTON_H: f32 = 34.0;
+const GAP: f32 = 2.0;
+const GROUP_GAP: f32 = 13.0;
+const PAD: f32 = 5.0;
+const TOP: f32 = 16.0;
+
+/// Buttons that start a new group on the bar, with a divider before them.
+fn starts_group(b: Button) -> bool {
+    matches!(b, Button::Delay | Button::Sound | Button::Record | Button::Close)
+}
+
 fn bar_rect(s: &Snip) -> RECT {
     let first = s.buttons.first().map(|b| b.1).unwrap_or_default();
     let last = s.buttons.last().map(|b| b.1).unwrap_or_default();
-    RECT { left: first.left - 8, top: first.top - 6, right: last.right + 8, bottom: last.bottom + 6 }
+    let pad = (PAD * s.scale).round() as i32;
+    RECT { left: first.left - pad, top: first.top - pad, right: last.right + pad, bottom: last.bottom + pad }
+}
+
+/// Everything the bar paints: its shadow, the hint under it, and the room it
+/// slides in from.
+fn bar_area(s: &Snip) -> RECT {
+    let b = bar_rect(s);
+    let k = s.scale;
+    let side = (24.0 * k) as i32;
+    RECT { left: b.left - side, top: b.top - (TOP * k) as i32, right: b.right + side, bottom: b.bottom + (52.0 * k) as i32 }
 }
 
 fn label(s: &Snip, b: Button) -> String {
     match b {
-        Button::Mode(Mode::Rect) => "\u{25AD} Rectangle".into(),
-        Button::Mode(Mode::Window) => "\u{29C9} Window".into(),
-        Button::Mode(Mode::Screen) => "\u{25A3} Full screen".into(),
-        Button::Mode(Mode::Free) => "\u{270E} Freeform".into(),
-        Button::Delay if s.delay == 0 => "\u{23F1} No delay".into(),
-        Button::Delay => format!("\u{23F1} {} s delay", s.delay),
-        Button::Sound if SOUND.load(Ordering::Relaxed) => "\u{266A} Sound on".into(),
-        Button::Sound => "\u{266A} Sound off".into(),
-        Button::Record if s.record => "\u{2702} Snip".into(),
-        Button::Record => "\u{25CF} Record".into(),
-        Button::Close => "\u{2715}".into(),
+        Button::Mode(Mode::Rect) => "Rectangle".into(),
+        Button::Mode(Mode::Window) => "Window".into(),
+        Button::Mode(Mode::Screen) => "Full screen".into(),
+        Button::Mode(Mode::Free) => "Freeform".into(),
+        Button::Delay if s.delay == 0 => "No delay".into(),
+        Button::Delay => format!("{} s delay", s.delay),
+        Button::Sound if SOUND.load(Ordering::Relaxed) => "Sound on".into(),
+        Button::Sound => "Sound off".into(),
+        Button::Record if s.record => "Snip".into(),
+        Button::Record => "Record".into(),
+        Button::Close => String::new(),
     }
+}
+
+/// Each button's glyph in Windows' icon font, and a plain one if it's missing.
+fn glyph(s: &Snip, b: Button) -> (char, &'static str) {
+    match b {
+        Button::Mode(Mode::Rect) => ('\u{E8B3}', "\u{25AD}"),
+        Button::Mode(Mode::Window) => ('\u{E8A7}', "\u{29C9}"),
+        Button::Mode(Mode::Screen) => ('\u{E7F4}', "\u{25A3}"),
+        Button::Mode(Mode::Free) => ('\u{E70F}', "\u{270E}"),
+        Button::Delay => ('\u{E916}', "\u{23F1}"),
+        Button::Sound if SOUND.load(Ordering::Relaxed) => ('\u{E767}', "\u{266A}"),
+        Button::Sound => ('\u{E74F}', "\u{266A}"),
+        Button::Record if s.record => ('\u{E722}', "\u{2702}"),
+        Button::Record => ('\u{E714}', "\u{25CF}"),
+        Button::Close => ('\u{E711}', "\u{2715}"),
+    }
+}
+
+/// What to do next, under the bar.
+fn hint(s: &Snip) -> String {
+    let what = match mode() {
+        Mode::Rect if s.record => "Drag round what to record, or click for a whole screen",
+        Mode::Rect => "Drag round what to snip, or click for a whole screen",
+        Mode::Window => "Click a window",
+        Mode::Screen if s.record => "Click the screen to record",
+        Mode::Screen => "Click a screen",
+        Mode::Free => "Draw round what to snip",
+    };
+    format!("{what}   \u{b7}   Enter: every screen   \u{b7}   Esc to leave")
+}
+
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// Closes the snip window and frees the capture.
@@ -417,9 +536,14 @@ unsafe fn keep(r: RECT, outline: Option<Vec<POINT>>) {
         (out, w, h)
     });
     let owner = snip().as_ref().map(|s| s.window);
-    finish();
-    let Some((pixels, w, h)) = picture else { return };
+    let Some((pixels, w, h)) = picture else { return finish() };
+    // Onto the clipboard while the snip window is still there to own it:
+    // the clipboard can't be opened for a window that's gone.
     let copied = copy_image(owner, &pixels, w, h);
+    finish();
+    if copied {
+        msg::note("Snip copied to the clipboard");
+    }
     let saved = screenshots_path().and_then(|p| save_image(&p, &pixels, w, h).then_some(p));
     config::log(&format!("snip: {w}x{h}, copied: {copied}, saved: {saved:?}"));
     crate::snipedit::open(pixels, w, h, saved);
@@ -479,12 +603,25 @@ pub(crate) unsafe fn copy_image(owner: Option<HWND>, pixels: &[u32], w: i32, h: 
         }
     }
     let _ = GlobalUnlock(global);
-    if OpenClipboard(owner).is_err() {
+    // Another program may have the clipboard open for a moment.
+    let mut open = OpenClipboard(owner).is_ok();
+    for _ in 0..10 {
+        if open {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        open = OpenClipboard(owner).is_ok();
+    }
+    if !open {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(global));
         return false;
     }
     let _ = EmptyClipboard();
     let ok = SetClipboardData(CF_DIB, Some(HANDLE(global.0))).is_ok();
     let _ = CloseClipboard();
+    if !ok {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(global));
+    }
     ok
 }
 
@@ -608,72 +745,233 @@ unsafe fn done(r: RECT, outline: Option<Vec<POINT>>) {
 
 /// Snips again after a delay (`msg::SNIP_NOW`).
 pub fn again(instance: usize) {
-    start(HINSTANCE(instance as *mut c_void), false);
+    open(HINSTANCE(instance as *mut c_void), false, mode());
 }
 
-unsafe fn draw_bar(dc: HDC, s: &Snip) {
-    let bar = bar_rect(s);
-    let bg = CreateSolidBrush(COLORREF(0x00282020));
-    let rgn = CreateRoundRectRgn(bar.left, bar.top, bar.right, bar.bottom, 14, 14);
-    let _ = FillRgn(dc, rgn, bg);
-    let _ = DeleteObject(rgn.into());
-    let _ = DeleteObject(bg.into());
-    SetBkMode(dc, TRANSPARENT);
-    let font = CreateFontW(
-        -13,
-        0,
-        0,
-        0,
-        500,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        0,
-        w!("Segoe UI"),
-    );
-    let old = SelectObject(dc, font.into());
-    let accent = crate::theme::accent();
-    let accent =
-        COLORREF(((accent.2 * 255.0) as u32) << 16 | ((accent.1 * 255.0) as u32) << 8 | (accent.0 * 255.0) as u32);
-    for (b, r) in &s.buttons {
-        let on = match b {
-            Button::Mode(m) => *m == mode(),
-            Button::Record => s.record,
-            Button::Sound => SOUND.load(Ordering::Relaxed),
-            Button::Delay => s.delay > 0,
-            Button::Close => false,
-        };
-        let fill = if on {
-            Some(accent)
-        } else if s.hot == Some(*b) {
-            Some(COLORREF(0x00483E3E))
-        } else {
-            None
-        };
-        if let Some(c) = fill {
-            let br = CreateSolidBrush(c);
-            let rgn = CreateRoundRectRgn(r.left, r.top, r.right, r.bottom, 10, 10);
-            let _ = FillRgn(dc, rgn, br);
-            let _ = DeleteObject(rgn.into());
-            let _ = DeleteObject(br.into());
-        }
-        SetTextColor(dc, COLORREF(0x00FFFFFF));
-        let mut text: Vec<u16> = label(s, *b).encode_utf16().collect();
-        let mut tr = *r;
-        DrawTextW(dc, &mut text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+fn overlaps(a: &RECT, b: &RECT) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
+/// Draws with Direct2D into `area` (window pixels) of `back`, blended over
+/// what's there at `alpha`; `draw` gets the area's size in layout units.
+unsafe fn overlay(back: HDC, area: RECT, scale: f32, alpha: f32, draw: impl FnOnce(&crate::gfx::Painter, &crate::gfx::Fonts)) {
+    let (w, h) = (area.right - area.left, area.bottom - area.top);
+    if w <= 0 || h <= 0 || alpha <= 0.0 {
+        return;
     }
-    SelectObject(dc, old);
-    let _ = DeleteObject(font.into());
+    let Some((bitmap, _)) = dib(w, h) else { return };
+    let mem = CreateCompatibleDC(Some(back));
+    let old = SelectObject(mem, bitmap.into());
+    let drawn = with_gfx(|g| {
+        if g.begin_dc(mem, w, h, scale, Color(0.0, 0.0, 0.0, 0.0)).is_err() {
+            return false;
+        }
+        draw(&g.painter(), &g.fonts);
+        g.end().is_ok()
+    })
+    .unwrap_or(false);
+    if drawn {
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: (alpha.clamp(0.0, 1.0) * 255.0) as u8,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = AlphaBlend(back, area.left, area.top, w, h, mem, 0, 0, w, h, blend);
+    }
+    SelectObject(mem, old);
+    let _ = DeleteDC(mem);
+    let _ = DeleteObject(bitmap.into());
 }
 
-unsafe fn frame(dc: HDC, r: RECT) {
+/// The bar: dark glass with a soft shadow, icon-and-label buttons in groups,
+/// the picked ones in the accent colour, and a hint underneath. It drops in
+/// from the top edge as the snip opens.
+unsafe fn draw_bar(back: HDC, s: &Snip, paint: &RECT) {
+    let area = bar_area(s);
+    if !overlaps(&area, paint) {
+        return;
+    }
+    let k = s.scale;
+    let e = ease(s.opened.elapsed().as_secs_f32() * 1000.0 / OPEN_MS);
+    let slide = (1.0 - e) * -18.0;
+    let unit = |r: RECT| {
+        (
+            (r.left - area.left) as f32 / k,
+            (r.top - area.top) as f32 / k + slide,
+            (r.right - r.left) as f32 / k,
+            (r.bottom - r.top) as f32 / k,
+        )
+    };
+    let accent = crate::theme::accent();
+    let hint = hint(s);
+    let hint_w = with_gfx(|g| g.measure(&hint, &g.fonts.small)).unwrap_or(hint.len() as f32 * 5.5) + 28.0;
+    overlay(back, area, k, e, |p, f| {
+        let (bx, by, bw, bh) = unit(bar_rect(s));
+        let r = bh / 2.0;
+        // A soft shadow, then the glass and its edge.
+        for i in 1..=8 {
+            let d = i as f32 * 1.6;
+            p.rrect(bx - d, by - d + 3.0, bw + 2.0 * d, bh + 2.0 * d, r + d, Color(0.0, 0.0, 0.0, 0.045));
+        }
+        p.rrect(bx, by, bw, bh, r, Color(0.11, 0.11, 0.12, 0.96));
+        p.gradient_rrect(
+            bx,
+            by,
+            bw,
+            bh,
+            r,
+            &[(0.0, Color::white(0.07)), (0.5, Color::white(0.015)), (1.0, Color::white(0.0))],
+        );
+        p.stroke_rrect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, r - 0.5, Color::white(0.12), 1.0);
+        for (i, (b, rect)) in s.buttons.iter().enumerate() {
+            let (x, y, w, h) = unit(*rect);
+            if i > 0 && starts_group(*b) {
+                let dx = x - GROUP_GAP / 2.0;
+                p.line(dx, y + 9.0, dx, y + h - 9.0, Color::white(0.14), 1.0);
+            }
+            let on = match b {
+                Button::Mode(m) => *m == mode(),
+                Button::Record => s.record,
+                Button::Sound => SOUND.load(Ordering::Relaxed),
+                Button::Delay => s.delay > 0,
+                Button::Close => false,
+            };
+            let hot = s.hot == Some(*b);
+            let br = h / 2.0;
+            if on {
+                p.rrect(x, y, w, h, br, accent.alpha(if hot { 1.0 } else { 0.88 }));
+                p.gradient_rrect(x, y, w, h, br, &[(0.0, Color::white(0.18)), (1.0, Color::white(0.0))]);
+            } else if hot {
+                p.rrect(x, y, w, h, br, Color::white(if *b == Button::Close { 0.0 } else { 0.09 }));
+                if *b == Button::Close {
+                    p.rrect(x, y, w, h, br, Color(0.77, 0.17, 0.11, 0.9));
+                }
+            }
+            let ink = Color::white(if on || hot { 1.0 } else { 0.86 });
+            let text = label(s, *b);
+            let (icon, plain) = glyph(s, *b);
+            let icon_x = if text.is_empty() { x } else { x + 12.0 };
+            let icon_w = if text.is_empty() { w } else { 20.0 };
+            match &f.icons {
+                Some(font) => p.text(&icon.to_string(), font, icon_x, y, icon_w, h, Align::Center, ink),
+                None => p.text(plain, &f.body, icon_x, y, icon_w, h, Align::Center, ink),
+            }
+            if !text.is_empty() {
+                p.text(&text, &f.body, x + 38.0, y, w - 38.0 - 10.0, h, Align::Left, ink);
+            }
+        }
+        // The hint, in a small pill under the bar.
+        let tw = hint_w;
+        let (hx, hy, hh) = (bx + bw / 2.0 - tw / 2.0, by + bh + 8.0, 24.0);
+        p.rrect(hx, hy, tw, hh, hh / 2.0, Color(0.08, 0.08, 0.09, 0.82));
+        p.text(&hint, &f.small, hx, hy, tw, hh, Align::Center, Color::white(0.78));
+    });
+}
+
+/// The selection's outline: a thin white edge with handles at its corners
+/// and the middle of each side.
+unsafe fn frame(dc: HDC, r: RECT, scale: f32) {
     let edge = CreateSolidBrush(COLORREF(0x00FFFFFF));
     let _ = FrameRect(dc, &grown(r, 1), edge);
+    let shade = CreateSolidBrush(COLORREF(0x00303030));
+    let _ = FrameRect(dc, &grown(r, 2), shade);
+    let k = (3.0 * scale).round() as i32;
+    let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    let big = r.right - r.left > 12 * k && r.bottom - r.top > 12 * k;
+    for (x, y) in [(r.left, r.top), (r.right, r.top), (r.left, r.bottom), (r.right, r.bottom)]
+        .into_iter()
+        .chain(big.then_some([(cx, r.top), (cx, r.bottom), (r.left, cy), (r.right, cy)]).into_iter().flatten())
+    {
+        let dot = RECT { left: x - k, top: y - k, right: x + k, bottom: y + k };
+        let _ = FillRect(dc, &grown(dot, 1), shade);
+        let _ = FillRect(dc, &dot, edge);
+    }
     let _ = DeleteObject(edge.into());
+    let _ = DeleteObject(shade.into());
+}
+
+/// Where the size of what's lit is shown: under its bottom right corner, or
+/// inside it when that's off the screen.
+fn size_rect(s: &Snip, r: RECT) -> RECT {
+    let k = s.scale;
+    let (w, h) = ((96.0 * k) as i32, (24.0 * k) as i32);
+    let gap = (8.0 * k) as i32;
+    let mut top = r.bottom + gap;
+    if top + h > s.h {
+        top = r.bottom - gap - h;
+    }
+    let left = (r.right - w).max(0);
+    RECT { left, top, right: left + w, bottom: top + h }
+}
+
+/// Everything drawn for a lit area: its outline, handles and size label.
+fn lit_area(s: &Snip, r: RECT) -> [RECT; 2] {
+    [grown(r, (4.0 * s.scale) as i32 + 2), size_rect(s, r)]
+}
+
+unsafe fn draw_size(back: HDC, s: &Snip, r: RECT, paint: &RECT) {
+    let at = size_rect(s, r);
+    if !overlaps(&at, paint) {
+        return;
+    }
+    let text = format!("{} \u{d7} {}", r.right - r.left, r.bottom - r.top);
+    overlay(back, at, s.scale, 1.0, |p, f| {
+        let (w, h) = (96.0, 24.0);
+        p.rrect(0.0, 0.0, w, h, h / 2.0, Color(0.08, 0.08, 0.09, 0.88));
+        p.stroke_rrect(0.5, 0.5, w - 1.0, h - 1.0, h / 2.0 - 0.5, Color::white(0.12), 1.0);
+        p.text(&text, &f.label, 0.0, 0.0, w, h, Align::Center, Color::white(0.95));
+    });
+}
+
+/// What's lit up, bright on the dimmed capture.
+fn lit(s: &Snip) -> Option<RECT> {
+    match mode() {
+        Mode::Rect => selection(s),
+        Mode::Window => s.hover_window,
+        _ => None,
+    }
+}
+
+/// Paints `paint` (window pixels) off screen, then puts it up in one go, so
+/// nothing flickers while a selection is dragged.
+unsafe fn paint(dc: HDC, s: &Snip, paint: RECT) {
+    let (pw, ph) = (paint.right - paint.left, paint.bottom - paint.top);
+    if pw <= 0 || ph <= 0 {
+        return;
+    }
+    let back = CreateCompatibleDC(Some(dc));
+    let buffer = CreateCompatibleBitmap(dc, pw, ph);
+    let old_buffer = SelectObject(back, buffer.into());
+    // Draw in window pixels.
+    let _ = SetViewportOrgEx(back, -paint.left, -paint.top, None);
+    let src = CreateCompatibleDC(Some(dc));
+    let old = SelectObject(src, s.dim.into());
+    let _ = BitBlt(back, paint.left, paint.top, pw, ph, Some(src), paint.left, paint.top, SRCCOPY);
+    let lit = lit(s);
+    if let Some(r) = lit {
+        SelectObject(src, s.bright.into());
+        let _ = BitBlt(back, r.left, r.top, r.right - r.left, r.bottom - r.top, Some(src), r.left, r.top, SRCCOPY);
+    }
+    SelectObject(src, old);
+    let _ = DeleteDC(src);
+    if mode() == Mode::Free && s.path.len() > 1 {
+        let pen = CreatePen(PS_SOLID, (2.0 * s.scale).round() as i32, COLORREF(0x00FFFFFF));
+        let op = SelectObject(back, pen.into());
+        let _ = Polyline(back, &s.path);
+        SelectObject(back, op);
+        let _ = DeleteObject(pen.into());
+    }
+    if let Some(r) = lit {
+        frame(back, r, s.scale);
+        draw_size(back, s, r, &paint);
+    }
+    draw_bar(back, s, &paint);
+    let _ = SetViewportOrgEx(back, 0, 0, None);
+    let _ = BitBlt(dc, paint.left, paint.top, pw, ph, Some(back), 0, 0, SRCCOPY);
+    SelectObject(back, old_buffer);
+    let _ = DeleteObject(buffer.into());
+    let _ = DeleteDC(back);
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -683,42 +981,7 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             let mut ps = PAINTSTRUCT::default();
             let dc = BeginPaint(hwnd, &mut ps);
             if let Some(s) = snip().as_ref() {
-                let mem = CreateCompatibleDC(Some(dc));
-                let p = ps.rcPaint;
-                let old = SelectObject(mem, s.dim.into());
-                let _ =
-                    BitBlt(dc, p.left, p.top, p.right - p.left, p.bottom - p.top, Some(mem), p.left, p.top, SRCCOPY);
-                // What would be taken, bright.
-                let lit = match mode() {
-                    Mode::Rect => selection(s),
-                    Mode::Window if s.hover_window.is_some() => s.hover_window,
-                    _ => None,
-                };
-                if let Some(r) = lit {
-                    SelectObject(mem, s.bright.into());
-                    let _ = BitBlt(
-                        dc,
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        Some(mem),
-                        r.left,
-                        r.top,
-                        SRCCOPY,
-                    );
-                    frame(dc, r);
-                }
-                SelectObject(mem, old);
-                let _ = DeleteDC(mem);
-                if mode() == Mode::Free && s.path.len() > 1 {
-                    let pen = CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF));
-                    let op = SelectObject(dc, pen.into());
-                    let _ = Polyline(dc, &s.path);
-                    SelectObject(dc, op);
-                    let _ = DeleteObject(pen.into());
-                }
-                draw_bar(dc, s);
+                paint(dc, s, ps.rcPaint);
             }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
@@ -744,31 +1007,30 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             let mut redraw: Vec<RECT> = Vec::new();
             if hot != s.hot {
                 s.hot = hot;
-                redraw.push(bar_rect(s));
+                redraw.push(bar_area(s));
             }
+            let before = lit(s);
             match mode() {
-                Mode::Rect if s.from.is_some() => {
-                    redraw.extend(selection(s).map(|r| grown(r, 3)));
-                    s.to = p;
-                    redraw.extend(selection(s).map(|r| grown(r, 3)));
-                    redraw.push(bar_rect(s));
-                }
+                Mode::Rect if s.from.is_some() => s.to = p,
                 Mode::Free if s.from.is_some() => {
                     if let Some(last) = s.path.last().copied() {
-                        redraw.push(grown(rect_of(last, p, s.w, s.h), 3));
+                        redraw.push(grown(rect_of(last, p, s.w, s.h), (3.0 * s.scale) as i32 + 2));
                     }
                     s.path.push(p);
                 }
-                Mode::Window => {
-                    let under = s.windows.iter().find(|r| contains(r, p)).copied();
-                    if under != s.hover_window {
-                        redraw.extend(s.hover_window.map(|r| grown(r, 3)));
-                        redraw.extend(under.map(|r| grown(r, 3)));
-                        s.hover_window = under;
-                        redraw.push(bar_rect(s));
-                    }
-                }
+                Mode::Window => s.hover_window = s.windows.iter().find(|r| contains(r, p)).copied(),
                 _ => {}
+            }
+            let after = lit(s);
+            if before != after {
+                let area = bar_area(s);
+                for r in [before, after].into_iter().flatten() {
+                    let parts = lit_area(s, r);
+                    if parts.iter().any(|q| overlaps(q, &area)) {
+                        redraw.push(area);
+                    }
+                    redraw.extend(parts);
+                }
             }
             drop(guard);
             for r in redraw {
@@ -812,6 +1074,16 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                 None => {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_OPEN => {
+            let done = snip().as_ref().map(|s| {
+                let _ = InvalidateRect(Some(hwnd), Some(&bar_area(s)), false);
+                s.opened.elapsed().as_secs_f32() * 1000.0 > OPEN_MS
+            });
+            if done != Some(false) {
+                let _ = KillTimer(Some(hwnd), TIMER_OPEN);
             }
             LRESULT(0)
         }

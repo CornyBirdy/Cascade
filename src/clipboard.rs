@@ -4,7 +4,12 @@
 //! the app you were in.
 //!
 //! The history is read through Windows' clipboard API on a thread of its
-//! own, and only while the menu is open; nothing watches the clipboard.
+//! own, and only while the menu is open. Windows only hands it to the app in
+//! front, so when it still says no after Cascade has brought its menu
+//! forward, Cascade's own history is shown instead: the last few things
+//! copied while it was running (text and pictures), kept in memory only.
+//! Windows says when the clipboard changes (`record`); nothing is polled,
+//! and copies an app marks as private (password managers) are skipped.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -69,6 +74,8 @@ pub struct Clips {
 
 pub enum ClipCmd {
     Refresh,
+    /// The clipboard changed: keep what's on it in Cascade's own history.
+    Record,
     /// Put the item back on the clipboard; posts `msg::CLIP_PASTE` when it's there.
     Paste(String),
     Delete(String),
@@ -99,6 +106,15 @@ fn run(rx: Receiver<ClipCmd>) {
         let find = |id: &str| items.iter().find(|(i, _)| i == id).map(|(_, item)| item.clone());
         match cmd {
             ClipCmd::Refresh => {}
+            ClipCmd::Record => {
+                record();
+                continue;
+            }
+            ClipCmd::Paste(id) if own_id(&id).is_some() => {
+                let ok = own_id(&id).is_some_and(paste_own);
+                msg::post(msg::CLIP_PASTE, ok as usize, 0);
+                continue;
+            }
             ClipCmd::Paste(id) => {
                 let ok = find(&id).is_some_and(|item| {
                     Clipboard::SetHistoryItemAsContent(&item).is_ok_and(|s| s == SetHistoryItemAsContentStatus::Success)
@@ -107,16 +123,34 @@ fn run(rx: Receiver<ClipCmd>) {
                 continue;
             }
             ClipCmd::Delete(id) => {
+                if let Some(n) = own_id(&id) {
+                    own().retain(|c| c.n != n);
+                }
                 if let Some(item) = find(&id) {
                     let _ = Clipboard::DeleteItemFromHistory(&item);
                 }
             }
             ClipCmd::Clear => {
+                own().clear();
                 let _ = Clipboard::ClearHistory();
             }
         }
-        let (clips, list) =
-            read().unwrap_or_else(|_| (Clips { state: State::Unavailable, items: Vec::new() }, Vec::new()));
+        let mut got = read();
+        // Windows only shares it with the app in front: bring Cascade's menu
+        // forward and ask again, a couple of times.
+        for _ in 0..2 {
+            if !matches!(got, Err(_) | Ok((Clips { state: State::Unavailable, .. }, _))) {
+                break;
+            }
+            msg::post(msg::CLIP_FRONT, 0, 0);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            got = read();
+        }
+        let (clips, list) = match got {
+            Ok(r) if r.0.state != State::Unavailable => r,
+            // Still no: Cascade's own history.
+            _ => (own_clips(), Vec::new()),
+        };
         items = list;
         send(clips);
     }
@@ -145,6 +179,178 @@ fn read() -> Result<(Clips, Vec<(String, ClipboardHistoryItem)>)> {
         items.push((id.to_string(), item));
     }
     Ok((Clips { state: State::Ready, items: clips }, items))
+}
+
+// ------------------------------------------------- Cascade's own history --
+
+/// Something copied while Cascade was running.
+struct OwnClip {
+    n: u64,
+    kind: Kind,
+    text: String,
+    /// The text in full, or the picture (a CF_DIB: header and pixels).
+    data: OwnData,
+}
+
+enum OwnData {
+    Text(String),
+    Picture(Vec<u8>),
+}
+
+static OWN: std::sync::Mutex<Vec<OwnClip>> = std::sync::Mutex::new(Vec::new());
+static OWN_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Pictures kept (they're big: none over 16 MB, a 1440p screen), up to `MAX` items in all.
+const OWN_PICTURES: usize = 3;
+const OWN_PICTURE_BYTES: usize = 16 << 20;
+
+fn own() -> std::sync::MutexGuard<'static, Vec<OwnClip>> {
+    OWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn own_id(id: &str) -> Option<u64> {
+    id.strip_prefix("cascade:")?.parse().ok()
+}
+
+fn own_clips() -> Clips {
+    let items = own()
+        .iter()
+        .map(|c| Clip { id: format!("cascade:{}", c.n), text: c.text.clone(), kind: c.kind })
+        .collect();
+    Clips { state: State::Ready, items }
+}
+
+/// Keeps what's on the clipboard now (called as it changes), newest first;
+/// copying something already there moves it to the top.
+fn record() {
+    use windows::Win32::System::DataExchange::*;
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_DIB: u32 = 8;
+    let data = unsafe {
+        let mut open = OpenClipboard(None).is_ok();
+        for _ in 0..5 {
+            if open {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            open = OpenClipboard(None).is_ok();
+        }
+        if !open {
+            return;
+        }
+        // Copies an app asked to keep out of history (passwords) aren't kept.
+        let private = ["ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory"].iter().any(|name| {
+            let f = RegisterClipboardFormatW(&HSTRING::from(*name));
+            f != 0 && IsClipboardFormatAvailable(f).is_ok()
+        });
+        let read = |format: u32| -> Option<Vec<u8>> {
+            let h = GetClipboardData(format).ok()?;
+            let g = windows::Win32::Foundation::HGLOBAL(h.0);
+            let size = GlobalSize(g);
+            let at = GlobalLock(g) as *const u8;
+            if at.is_null() || size == 0 || size > OWN_PICTURE_BYTES {
+                let _ = GlobalUnlock(g);
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(at, size).to_vec();
+            let _ = GlobalUnlock(g);
+            Some(bytes)
+        };
+        let data = if private {
+            None
+        } else if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+            read(CF_UNICODETEXT).map(|b| {
+                let wide: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                OwnData::Text(String::from_utf16_lossy(&wide[..end]))
+            })
+        } else if IsClipboardFormatAvailable(CF_DIB).is_ok() {
+            read(CF_DIB).map(OwnData::Picture)
+        } else {
+            None
+        };
+        let _ = CloseClipboard();
+        data
+    };
+    let Some(data) = data else { return };
+    let (kind, text) = match &data {
+        OwnData::Text(t) if t.trim().is_empty() => return,
+        OwnData::Text(t) => (Kind::Text, one_line(t)),
+        OwnData::Picture(_) => (Kind::Image, "Image".into()),
+    };
+    let mut list = own();
+    let same = |c: &OwnClip| match (&c.data, &data) {
+        (OwnData::Text(a), OwnData::Text(b)) => a == b,
+        (OwnData::Picture(a), OwnData::Picture(b)) => a == b,
+        _ => false,
+    };
+    list.retain(|c| !same(c));
+    let n = OWN_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    list.insert(0, OwnClip { n, kind, text, data });
+    let mut pictures = 0;
+    list.retain(|c| {
+        if matches!(c.data, OwnData::Picture(_)) {
+            pictures += 1;
+            pictures <= OWN_PICTURES
+        } else {
+            true
+        }
+    });
+    list.truncate(MAX);
+}
+
+/// Puts one of Cascade's own items back on the clipboard.
+fn paste_own(n: u64) -> bool {
+    use windows::ApplicationModel::DataTransfer::DataPackage;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference};
+    let data = {
+        let list = own();
+        let Some(c) = list.iter().find(|c| c.n == n) else { return false };
+        match &c.data {
+            OwnData::Text(t) => OwnData::Text(t.clone()),
+            OwnData::Picture(p) => OwnData::Picture(p.clone()),
+        }
+    };
+    let set = || -> Result<()> {
+        let package = DataPackage::new()?;
+        match &data {
+            OwnData::Text(t) => package.SetText(&HSTRING::from(t.as_str()))?,
+            OwnData::Picture(dib) => {
+                // A .bmp file: its 14-byte header, then the DIB.
+                let header_size = u32::from_le_bytes(dib.get(..4).and_then(|b| b.try_into().ok()).unwrap_or([40, 0, 0, 0]));
+                let mut bmp = Vec::with_capacity(14 + dib.len());
+                bmp.extend_from_slice(b"BM");
+                bmp.extend_from_slice(&((14 + dib.len()) as u32).to_le_bytes());
+                bmp.extend_from_slice(&[0; 4]);
+                let colours = bitfields(dib);
+                bmp.extend_from_slice(&(14 + header_size + colours).to_le_bytes());
+                bmp.extend_from_slice(dib);
+                let stream = InMemoryRandomAccessStream::new()?;
+                let writer = DataWriter::CreateDataWriter(&stream.GetOutputStreamAt(0)?)?;
+                writer.WriteBytes(&bmp)?;
+                writer.StoreAsync()?.get()?;
+                writer.FlushAsync()?.get()?;
+                let _ = writer.DetachStream();
+                stream.Seek(0)?;
+                package.SetBitmap(&RandomAccessStreamReference::CreateFromStream(&stream)?)?;
+            }
+        }
+        Clipboard::SetContent(&package)?;
+        Clipboard::Flush()
+    };
+    set().is_ok()
+}
+
+/// The bytes of colour masks (BI_BITFIELDS) after a BITMAPINFOHEADER.
+fn bitfields(dib: &[u8]) -> u32 {
+    let at = |i: usize| dib.get(i..i + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes).unwrap_or(0);
+    let header = at(0);
+    let compression = at(16);
+    if header == 40 && compression == 3 {
+        12
+    } else {
+        0
+    }
 }
 
 /// What's in an item: its text on one line, or what it is.
