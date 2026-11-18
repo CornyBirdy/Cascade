@@ -1360,6 +1360,7 @@ impl App {
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         desktops::watch();
         if self.cfg.launcher && self.cfg.start_show_recent {
@@ -1488,7 +1489,7 @@ impl App {
             let ranges = [
                 (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
                 // A window dragged to another screen (its taskbar shows it).
-                (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
+                (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
                 (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
                 (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
             ];
@@ -3022,6 +3023,11 @@ impl App {
         if event == EVENT_SYSTEM_FOREGROUND || event == EVENT_SYSTEM_MOVESIZEEND || event == EVENT_SYSTEM_MINIMIZEEND {
             self.sync_fullscreen();
         }
+        // A window began moving: in shell mode, it can be snapped by dragging it to an edge.
+        if event == EVENT_SYSTEM_MOVESIZESTART {
+            crate::snapdrag::on_start(hwnd);
+            return;
+        }
         // A window was minimised: Windows may leave a stub of it on the screen; once it has, move it off.
         if event == EVENT_SYSTEM_MINIMIZESTART && shellmode::active() {
             shellmode::park_minimized();
@@ -3333,6 +3339,7 @@ impl App {
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         self.perf = Perf::new(self.cfg.perf_log);
         self.apply_calendar();

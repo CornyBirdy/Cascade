@@ -827,8 +827,11 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
             reload_wallpaper();
             LRESULT(0)
         }
-        // Alt+F4 on the desktop shows the shut-down box, as on Explorer's (Cascade's power menu here).
-        WM_CLOSE => LRESULT(0),
+        // Alt+F4 on the desktop: shut down, restart and the rest, as on Explorer's.
+        WM_CLOSE => {
+            shutdown_menu(hwnd);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, m, wp, lp),
     }
 }
@@ -951,6 +954,35 @@ unsafe fn create_desktop(instance: HINSTANCE) -> Option<HWND> {
     let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
     let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
     Some(hwnd)
+}
+
+/// Alt+F4 on the desktop: what to do with the PC, in the middle of the main screen.
+unsafe fn shutdown_menu(owner: HWND) {
+    use crate::shell::Power;
+    const ITEMS: [(&str, Power); 5] = [
+        ("Shut down", Power::ShutDown),
+        ("Restart", Power::Restart),
+        ("Sleep", Power::Sleep),
+        ("Sign out", Power::SignOut),
+        ("Lock", Power::Lock),
+    ];
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("What do you want the PC to do?"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    for (i, (name, _)) in ITEMS.iter().enumerate() {
+        let _ = AppendMenuW(menu, MF_STRING, i + 1, &HSTRING::from(*name));
+    }
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let _ = GetMonitorInfoW(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
+    let (x, y) = ((mi.rcWork.left + mi.rcWork.right) / 2, (mi.rcWork.top + mi.rcWork.bottom) / 2);
+    let _ = SetForegroundWindow(owner);
+    let flags = TPM_RETURNCMD | TPM_CENTERALIGN | TPM_VCENTERALIGN | TPM_NONOTIFY;
+    let id = TrackPopupMenu(menu, flags, x, y, Some(0), owner, None);
+    let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+    let _ = DestroyMenu(menu);
+    if let Some((_, p)) = (id.0 as usize).checked_sub(1).and_then(|i| ITEMS.get(i)) {
+        shell::power(*p);
+    }
 }
 
 /// The desktop's right-click menu.
@@ -1115,6 +1147,7 @@ pub fn init(instance: HINSTANCE, main: HWND) {
         DESKTOP.store(h.0 as isize, Ordering::Release);
     }
     register_hotkeys(main);
+    crate::snapdrag::create(instance);
     signal_ready();
     ensure_guard();
     trial();
@@ -1747,7 +1780,7 @@ fn screen_of(h: HWND) -> Option<Screen> {
     }
 }
 
-fn window_rect(h: HWND) -> RECT {
+pub(crate) fn window_rect(h: HWND) -> RECT {
     let mut r = RECT::default();
     unsafe {
         let _ = GetWindowRect(h, &mut r);
@@ -1776,7 +1809,7 @@ fn visible_rect(h: HWND) -> RECT {
 }
 
 /// Moves `h` so that what you see of it fills `to`.
-fn place(h: HWND, to: RECT) {
+pub(crate) fn place(h: HWND, to: RECT) {
     let (win, vis) = (window_rect(h), visible_rect(h));
     let (l, t, r, b) = (vis.left - win.left, vis.top - win.top, win.right - vis.right, win.bottom - vis.bottom);
     unsafe {
@@ -1810,7 +1843,7 @@ fn half(work: RECT, left: bool) -> RECT {
 /// (window, where it was before it was snapped, where it was snapped to).
 static SNAPPED: Mutex<Vec<(isize, RECT, RECT)>> = Mutex::new(Vec::new());
 
-fn snapped() -> std::sync::MutexGuard<'static, Vec<(isize, RECT, RECT)>> {
+pub(crate) fn snapped() -> std::sync::MutexGuard<'static, Vec<(isize, RECT, RECT)>> {
     SNAPPED.lock().unwrap_or_else(|e| e.into_inner())
 }
 

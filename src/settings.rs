@@ -486,6 +486,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row(
+                "snap_drag",
+                "Snap by dragging",
+                "Drag a window to a screen's edge to snap it to that half, a corner for a quarter, the top to maximise.",
+                Toggle,
+            ),
+            row(
                 "battery_saver",
                 "Battery saver",
                 "On battery, turn off refraction and the visualizer bars and read stats less often.",
@@ -1158,6 +1164,8 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             t.glass != theme::Glass::Solid && (key == "acrylic" || (on("acrylic") && t.refract.is_some()))
         }
         (0, "alt_tab_style") => on("alt_tab"),
+        // Explorer snaps windows when it's the shell; Cascade does when it is.
+        (0, "snap_drag") => on("shell_mode") || on("shell_active"),
         // As the shell, Windows starts Cascade itself.
         (0, "autostart") => !on("shell_active"),
         (0, "battery_saver") => on("battery"),

@@ -47,6 +47,8 @@ hide_in_fullscreen = true
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
 super_drag = true
+# Shell mode: drag a window to a screen edge or corner to snap it.
+snap_drag = true
 # Auto ducker: while one app is making sound (Discord, with friends talking),
 # turn the others down, and bring them back a moment after it stops.
 ducker = false
@@ -308,6 +310,7 @@ pub struct Config {
     pub hide_in_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
+    pub snap_drag: bool,
     pub ducker: bool,
     pub ducker_trigger: String,
     pub ducker_targets: String,
@@ -428,6 +431,7 @@ impl Default for Config {
             hide_in_fullscreen: true,
             battery_saver: false,
             super_drag: true,
+            snap_drag: true,
             ducker: false,
             ducker_trigger: "Discord".into(),
             ducker_targets: String::new(),
@@ -694,6 +698,7 @@ impl Config {
                 "hide_in_fullscreen" => set_b(&mut c.hide_in_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
+                "snap_drag" => set_b(&mut c.snap_drag),
                 "ducker" => set_b(&mut c.ducker),
                 "ducker_trigger" => c.ducker_trigger = v.trim_matches('"').to_string(),
                 "ducker_targets" => c.ducker_targets = v.trim_matches('"').to_string(),
@@ -853,6 +858,7 @@ impl Config {
             "hide_in_fullscreen" => b(self.hide_in_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
+            "snap_drag" => b(self.snap_drag),
             "ducker" => b(self.ducker),
             "ducker_trigger" => self.ducker_trigger.clone(),
             "ducker_targets" => self.ducker_targets.clone(),

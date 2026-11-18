@@ -41,6 +41,7 @@ mod settings;
 mod shell;
 mod shellmode;
 mod smart;
+mod snapdrag;
 mod snip;
 mod spring;
 mod superdrag;
