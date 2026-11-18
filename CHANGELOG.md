@@ -15,6 +15,7 @@ Settings > Updates > What's new opens the list.
 - **Apps from the Microsoft Store**, like the Claude app, did nothing when clicked (or, run as administrator, gave an error). Cascade now tries Windows' activation, then the app's own command, then the program straight from its package; apps that only Explorer can open say so in the notch.
 - **Virtual desktops of Cascade's own**: Task View's desktops, the desktops widget, Ctrl+Win+Left / Right / D / F4. (Making a desktop opened Control Panel before: that was Win+I's Settings fallback, landing late.)
 - **Switching without signing out**: turning the setting on offers to switch now, closing Explorer and taking over on the spot; turning it off offers to bring Explorer back now.
+- **Minimised windows** left a stub (a small title bar) along the bottom of the screen: Cascade now tells Windows it's the taskbar, and moves any stub Windows leaves anyway off the screen.
 - **Snips** with Win+Shift+S, Cascade's own (Windows' Snipping Tool is a Store app): on the clipboard and in Pictures\Screenshots.
 
 ## 2026-11-09

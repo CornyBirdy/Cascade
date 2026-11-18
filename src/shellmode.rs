@@ -1002,6 +1002,7 @@ fn hide_minimized(hide: bool) {
             return;
         }
         if hide {
+            config::log(&format!("shell mode: minimised windows were arranged as {}", mm.iArrange.0));
             if mm.iArrange.0 & ARW_HIDE != 0 {
                 return;
             }
@@ -1020,6 +1021,56 @@ fn hide_minimized(hide: bool) {
             Some(&mut mm as *mut MINIMIZEDMETRICS as *mut c_void),
             none,
         );
+    }
+}
+
+/// Windows still leaves a stub of some minimised windows on the screen (the
+/// setting above isn't always heeded without Explorer): moves any it finds
+/// off the screen, as Windows does for a shell's. Their place when restored
+/// isn't touched. Asked, not waited for, so a program that's stuck can't
+/// hold Cascade up.
+pub fn park_minimized() {
+    if !active() {
+        return;
+    }
+    for h in app_windows_any_state() {
+        unsafe {
+            if !IsIconic(h).as_bool() {
+                continue;
+            }
+            let r = window_rect(h);
+            if r.left > -10000 && r.top > -10000 {
+                let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+                let _ = SetWindowPos(h, None, -32000, -32000, 0, 0, flags);
+            }
+        }
+    }
+}
+
+/// Every visible top-level window that isn't Cascade's.
+fn app_windows_any_state() -> Vec<HWND> {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
+    }
+    let own = unsafe { GetCurrentProcessId() };
+    all.retain(|&h| unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        pid != own && IsWindowVisible(h).as_bool()
+    });
+    all
+}
+
+/// Tells Windows which window is the "task manager" (the taskbar, to it):
+/// how a shell says it looks after minimised windows. Not in the headers.
+unsafe fn set_taskman(window: HWND) {
+    type SetTaskmanWindow = unsafe extern "system" fn(HWND) -> BOOL;
+    let Ok(user32) = GetModuleHandleW(w!("user32.dll")) else { return };
+    if let Some(f) = GetProcAddress(user32, PCSTR(c"SetTaskmanWindow".as_ptr() as *const u8)) {
+        let f = std::mem::transmute::<unsafe extern "system" fn() -> isize, SetTaskmanWindow>(f);
+        let ok = f(window).as_bool();
+        config::log(&format!("shell mode: taskbar registered with Windows: {ok}"));
     }
 }
 
@@ -1046,6 +1097,8 @@ pub fn init(instance: HINSTANCE, main: HWND) {
         }
     }
     hide_minimized(true);
+    unsafe { set_taskman(main) };
+    park_minimized();
     crate::vdesk::load();
     if let Some(h) = unsafe { create_desktop(instance) } {
         DESKTOP.store(h.0 as isize, Ordering::Release);

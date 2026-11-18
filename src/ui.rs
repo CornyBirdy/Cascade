@@ -117,6 +117,8 @@ const TIMER_FULLSCREEN: usize = 26;
 /// Shell mode: looks now and then whether a fullscreen app is in front (one
 /// that went fullscreen without any window changing hands says nothing).
 const TIMER_SHELLPOLL: usize = 27;
+/// Shell mode: moves the stubs of minimised windows off the screen (see `shellmode::park_minimized`).
+const TIMER_PARK: usize = 28;
 
 /// Not exported by the `windows` crate features we enable.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -2869,6 +2871,12 @@ impl App {
             TIMER_TICK => self.dirty = true,
             TIMER_WAKE | TIMER_WAKE2 => self.refresh_after_wake(),
             TIMER_FULLSCREEN => self.check_fullscreen(),
+            TIMER_PARK => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_PARK);
+                }
+                shellmode::park_minimized();
+            }
             TIMER_SHELLPOLL => {
                 self.sync_fullscreen();
                 // Windows' notification pop-ups are Explorer's: read the list
@@ -2961,6 +2969,13 @@ impl App {
         }
         if event == EVENT_SYSTEM_FOREGROUND || event == EVENT_SYSTEM_MOVESIZEEND || event == EVENT_SYSTEM_MINIMIZEEND {
             self.sync_fullscreen();
+        }
+        // A window was minimised: Windows may leave a stub of it on the screen; once it has, move it off.
+        if event == EVENT_SYSTEM_MINIMIZESTART && shellmode::active() {
+            shellmode::park_minimized();
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PARK, 150, None);
+            }
         }
         // Windows opened its own Start menu: the Win key reached it without
         // passing our hook (an elevated app such as Task Manager was in
@@ -4228,7 +4243,13 @@ impl App {
             self.dock.dirty = true;
             self.switcher.set_desktops(self.desks.clone());
         }
-        // Cascade's own desktops hide and show windows: the taskbars look again once that has happened.
+        // Cascade's own desktops hide and show windows: the taskbars look
+        // again once that has happened, and minimised ones shown again go off the screen.
+        if shellmode::active() {
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PARK, 150, None);
+            }
+        }
         if shellmode::active() && self.cfg.dock {
             unsafe {
                 SetTimer(Some(self.dock.hwnd), TIMER_SCAN, 80, None);
