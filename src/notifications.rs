@@ -17,6 +17,7 @@ pub enum NotifCmd {
     Clear,
 }
 
+#[derive(Clone)]
 pub struct Notif {
     pub id: u32,
     /// The sending app's AppUserModelID, to open it when the notification is

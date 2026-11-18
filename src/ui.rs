@@ -442,6 +442,8 @@ struct App {
     quick: QuickMenu,
     /// The pop-up showing your desktops as you switch between them.
     deskosd: DeskOsd,
+    /// Shell mode: notification pop-ups (made the first time one's needed).
+    banner: Option<crate::banner::Banner>,
     /// The Win+V menu (made the first time it's opened), its reader, and the
     /// window it pastes into.
     clips: Option<ClipMenu>,
@@ -1289,6 +1291,7 @@ impl App {
             flyout: Flyout::new(flyout_hwnd, flyout_backdrop),
             quick: QuickMenu::new(quick_hwnd, quick_backdrop),
             deskosd: DeskOsd::new(osd_hwnd, osd_backdrop),
+            banner: None,
             clips: None,
             widget_clips: clipboard::Clips::default(),
             clip_tx: clipboard::spawn(),
@@ -1538,6 +1541,9 @@ impl App {
         self.flyout.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.quick.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
         self.deskosd.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        if let Some(b) = &mut self.banner {
+            b.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+        }
         if let Some(c) = &mut self.clips {
             c.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
             if !self.cfg.shortcut_win_v {
@@ -1665,13 +1671,56 @@ impl App {
         let ids: Vec<u32> = n.items.iter().map(|i| i.id).collect();
         if let Some(known) = self.notif_ids.replace(ids) {
             if let Some(new) = n.items.iter().find(|i| !known.contains(&i.id)) {
-                let from =
-                    if new.app.is_empty() || new.app == new.title { String::new() } else { format!("{}: ", new.app) };
-                let body = if new.body.is_empty() { String::new() } else { format!(" \u{2014} {}", new.body) };
-                let text: String = format!("{from}{}{body}", new.title).chars().take(90).collect();
-                self.notify(text, theme::accent(), false);
+                if !crate::winset::dnd() {
+                    self.show_banner(new.clone());
+                }
             }
         }
+    }
+
+    /// Shows a notification pop-up (see `banner`).
+    fn show_banner(&mut self, n: notifications::Notif) {
+        if self.banner.is_none() {
+            let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            let (Ok(hwnd), Ok(backdrop)) =
+                (create_window(w!("CascadeWindow"), self.instance, ex), Backdrop::create(self.instance))
+            else {
+                return;
+            };
+            let mut b = crate::banner::Banner::new(hwnd, backdrop);
+            b.configure(self.cfg.acrylic, self.cfg.taskbar_opacity, self.cfg.corner_radius());
+            self.banner = Some(b);
+        }
+        let work = shell::work_area_of(self.dock.monitor());
+        let k = self.dock.k();
+        if let Some(b) = &mut self.banner {
+            b.show(n, work, k);
+        }
+    }
+
+    fn handle_banner(&mut self, m: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let b = self.banner.as_mut()?;
+        match m {
+            WM_TIMER if wp.0 == crate::banner::TIMER_HIDE => b.on_timer(),
+            WM_MOUSEMOVE => {
+                let (x, y) = lparam_xy(lp);
+                b.on_move(x, y);
+            }
+            WM_MOUSELEAVE => b.on_leave(),
+            WM_LBUTTONUP => {
+                let (x, y) = lparam_xy(lp);
+                if let Some(crate::banner::Action::Open(n)) = b.on_click(x, y) {
+                    // As clicking Windows' own: the app opens and the notification goes.
+                    if !n.aumid.is_empty() {
+                        shell::open(&format!("shell:AppsFolder\\{}", n.aumid));
+                    }
+                    self.notifs.items.retain(|i| i.id != n.id);
+                    let _ = self.notif_tx.send(NotifCmd::Remove(n.id));
+                }
+            }
+            _ => return None,
+        }
+        Some(LRESULT(0))
     }
 
     /// Shell mode: the desktop was clicked and has the focus now. Nothing
@@ -2050,6 +2099,9 @@ impl App {
         }
         if hwnd == self.quick.hwnd {
             return self.handle_quick(m, wp, lp);
+        }
+        if self.banner.as_ref().is_some_and(|b| b.hwnd == hwnd) {
+            return self.handle_banner(m, wp, lp);
         }
         if hwnd == self.deskosd.hwnd {
             if m == WM_TIMER && wp.0 == deskosd::TIMER_HIDE {
@@ -4959,6 +5011,7 @@ impl App {
             || self.flyout.wants_frame()
             || self.quick.wants_frame()
             || self.deskosd.wants_frame()
+            || self.banner.as_ref().is_some_and(|b| b.wants_frame())
             || self.clips.as_ref().is_some_and(|c| c.wants_frame())
             || self.widgets.wants_frame()
             || self.switcher.wants_frame()
@@ -5076,6 +5129,10 @@ impl App {
         if self.deskosd.wants_frame() {
             fast |= self.deskosd.step(dt);
             let _ = self.deskosd.render(&mut self.gfx);
+        }
+        if let Some(b) = self.banner.as_mut().filter(|b| b.wants_frame()) {
+            fast |= b.step(dt);
+            let _ = b.render(&mut self.gfx);
         }
         if let Some(c) = self.clips.as_mut().filter(|c| c.wants_frame()) {
             fast |= c.step(dt);
