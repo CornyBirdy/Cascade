@@ -4813,6 +4813,15 @@ impl App {
                 self.widgets.on_move(x, y);
             }
             WM_MOUSELEAVE => self.widgets.on_leave(),
+            WM_MOUSEWHEEL => {
+                // Screen coordinates: the panel's own, for the card under it.
+                let (x, y) = lparam_xy(lp);
+                let mut at = POINT { x, y };
+                unsafe {
+                    let _ = ScreenToClient(self.widgets.hwnd, &mut at);
+                }
+                self.widgets.on_wheel(at.x, at.y, ((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+            }
             WM_LBUTTONDOWN => {
                 // A card may be picked up here and carried to a new place.
                 let (x, y) = lparam_xy(lp);

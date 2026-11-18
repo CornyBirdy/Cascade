@@ -207,6 +207,13 @@ pub struct Widgets {
     cal_ev: Spring,
     /// Which way the month went (-1 earlier, 1 later), so its days slide in from that side.
     cal_dir: f32,
+    /// The Notifications and Clipboard cards scroll (the mouse wheel over
+    /// them): the row at their top, easing to where the wheel sent it, and
+    /// how many rows they had when last drawn.
+    notif_top: Spring,
+    clip_top: Spring,
+    notif_count: usize,
+    clip_count: usize,
 }
 
 /// How long after opening the cards' data is still arriving.
@@ -265,6 +272,17 @@ fn spark(p: &Painter, hist: &VecDeque<f32>, x: f32, y: f32, w: f32, h: f32, max:
     for w in pts.windows(2) {
         p.line(w[0].0, w[0].1, w[1].0, w[1].1, c, 1.3);
     }
+}
+
+/// A thin scroll thumb at `x` down a list `h` tall, showing `shown` of
+/// `count` rows from row `top`; nothing when they all fit.
+fn scrollbar(p: &Painter, x: f32, y: f32, h: f32, top: f32, shown: usize, count: usize) {
+    if count <= shown {
+        return;
+    }
+    let thumb = (h * shown as f32 / count as f32).max(16.0);
+    let at = y + (h - thumb) * top / (count - shown) as f32;
+    p.rrect(x - 1.5, at, 3.0, thumb, 1.5, Color::white(0.28));
 }
 
 fn card_height(card: Card, ctx: &Ctx, cal_rows: usize) -> f32 {
@@ -348,6 +366,10 @@ impl Widgets {
             cal_in: Spring::new(1.0, 110.0, 21.0),
             cal_ev: Spring::new(1.0, 130.0, 22.0),
             cal_dir: 0.0,
+            notif_top: Spring::new(0.0, 420.0, 40.0),
+            clip_top: Spring::new(0.0, 420.0, 40.0),
+            notif_count: 0,
+            clip_count: 0,
         }
     }
 
@@ -372,6 +394,8 @@ impl Widgets {
         k: f32,
     ) {
         self.cards = parse_cards(cards);
+        self.notif_top.snap(0.0);
+        self.clip_top.snap(0.0);
         self.cards.retain(|&c| c != Card::Notifications);
         if notifications {
             self.cards.insert(0, Card::Notifications);
@@ -574,12 +598,46 @@ impl Widgets {
     }
 
     pub fn wants_frame(&self) -> bool {
-        self.visible && (self.dirty || !self.reveal.settled() || !self.cal_in.settled() || !self.cal_ev.settled())
+        self.visible
+            && (self.dirty
+                || !self.reveal.settled()
+                || !self.cal_in.settled()
+                || !self.cal_ev.settled()
+                || !self.notif_top.settled()
+                || !self.clip_top.settled())
     }
 
     pub fn step(&mut self, dt: f32) -> bool {
         let calendar = self.cal_in.step(dt) | self.cal_ev.step(dt);
-        self.reveal.step(dt) | calendar
+        let lists = self.notif_top.step(dt) | self.clip_top.step(dt);
+        self.reveal.step(dt) | calendar | lists
+    }
+
+    /// The mouse wheel at (x, y) (window pixels): scrolls the Notifications
+    /// or Clipboard card under it, a row per notch.
+    pub fn on_wheel(&mut self, x: i32, y: i32, delta: i16) {
+        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+        let Some(card) = self
+            .rects
+            .iter()
+            .find(|(_, cx, cy, ch)| lx >= *cx && lx < cx + CARD_W && ly >= *cy && ly < cy + ch)
+            .map(|r| r.0)
+        else {
+            return;
+        };
+        let rows = -(delta as f32) / 120.0;
+        let (top, count, shown) = match card {
+            Card::Notifications => (&mut self.notif_top, self.notif_count, NOTIF_MAX),
+            Card::Clipboard => (&mut self.clip_top, self.clip_count, CLIP_MAX),
+            _ => return,
+        };
+        let last = count.saturating_sub(shown) as f32;
+        let to = (top.target.round() + rows.signum() * rows.abs().max(1.0).round()).clamp(0.0, last);
+        if to != top.target {
+            top.set(to);
+            self.hovered = None;
+            self.dirty = true;
+        }
     }
 
     /// The calendar card's month comes in again (`dir`: which way it moved).
@@ -784,8 +842,26 @@ impl Widgets {
                 p.text("Clear all", &f.small, bx, by, cw, ch, Align::Center, Color::white(0.75));
                 self.hits.push((Target::NotifClear, bx, by, cw, ch));
                 let tw = CARD_W - 28.0 - 30.0;
-                for (i, item) in n.items.iter().take(NOTIF_MAX).enumerate() {
-                    let ry = top + i as f32 * NOTIF_ROW;
+                self.notif_count = n.items.len();
+                let last = n.items.len().saturating_sub(NOTIF_MAX) as f32;
+                if self.notif_top.target > last {
+                    self.notif_top.set(last);
+                }
+                let scroll = self.notif_top.value.clamp(0.0, last.max(0.0));
+                let view = NOTIF_MAX as f32 * NOTIF_ROW;
+                if n.items.len() > NOTIF_MAX {
+                    // How many there are, by the title.
+                    let count = format!("{}", n.items.len());
+                    p.text(&count, &f.small, x + 108.0, y + 6.0, 40.0, 26.0, Align::Left, Color::white(0.45));
+                }
+                p.clip(x, top, CARD_W, view);
+                for (i, item) in n.items.iter().enumerate() {
+                    let ry = top + (i as f32 - scroll) * NOTIF_ROW;
+                    if ry + NOTIF_ROW <= top || ry >= top + view {
+                        continue;
+                    }
+                    // Only rows that are (nearly) all showing take clicks.
+                    let whole = ry >= top - 4.0 && ry + NOTIF_ROW <= top + view + 4.0;
                     let open = Target::NotifOpen(item.id);
                     let remove = Target::NotifRemove(item.id);
                     if matches!(self.hovered, Some(t) if t == open || t == remove) {
@@ -804,10 +880,14 @@ impl Widgets {
                     let c = Color::white(0.7);
                     p.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, c, 1.3);
                     p.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, c, 1.3);
-                    self.hits.push((remove, cx - 12.0, cy - 12.0, 24.0, 24.0));
-                    // The rest of the row opens it.
-                    self.hits.push((open, x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0));
+                    if whole {
+                        self.hits.push((remove, cx - 12.0, cy - 12.0, 24.0, 24.0));
+                        // The rest of the row opens it.
+                        self.hits.push((open, x + 6.0, ry + 1.0, CARD_W - 12.0, NOTIF_ROW - 2.0));
+                    }
                 }
+                p.unclip();
+                scrollbar(p, x + CARD_W - 5.0, top + 2.0, view - 4.0, scroll, NOTIF_MAX, n.items.len());
             }
         }
     }
@@ -831,8 +911,20 @@ impl Widgets {
                 }
                 p.text("Clear", &f.small, bx, by, cw, ch, Align::Center, Color::white(0.75));
                 self.hits.push((Target::ClipClear, bx, by, cw, ch));
-                for (i, item) in ctx.clips.items.iter().take(CLIP_MAX).enumerate() {
-                    let ry = top + i as f32 * CLIP_ROW;
+                let items = &ctx.clips.items;
+                self.clip_count = items.len();
+                let last = items.len().saturating_sub(CLIP_MAX) as f32;
+                if self.clip_top.target > last {
+                    self.clip_top.set(last);
+                }
+                let scroll = self.clip_top.value.clamp(0.0, last.max(0.0));
+                let view = CLIP_MAX as f32 * CLIP_ROW;
+                p.clip(x, top, CARD_W, view);
+                for (i, item) in items.iter().enumerate() {
+                    let ry = top + (i as f32 - scroll) * CLIP_ROW;
+                    if ry + CLIP_ROW <= top || ry >= top + view {
+                        continue;
+                    }
                     let target = Target::ClipItem(i);
                     if self.hovered == Some(target) {
                         p.rrect(x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0, 8.0, Color::white(0.08));
@@ -845,8 +937,12 @@ impl Widgets {
                     if copied {
                         p.text("Copied", &f.small, x + CARD_W - 66.0, ry, 52.0, CLIP_ROW, Align::Right, GREEN);
                     }
-                    self.hits.push((target, x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0));
+                    if ry >= top - 3.0 && ry + CLIP_ROW <= top + view + 3.0 {
+                        self.hits.push((target, x + 6.0, ry + 1.0, CARD_W - 12.0, CLIP_ROW - 2.0));
+                    }
                 }
+                p.unclip();
+                scrollbar(p, x + CARD_W - 5.0, top + 2.0, view - 4.0, scroll, CLIP_MAX, items.len());
             }
         }
     }
