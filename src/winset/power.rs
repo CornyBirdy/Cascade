@@ -146,7 +146,7 @@ fn plan_name(g: &GUID) -> String {
             return format!("{g:?}");
         }
         let wide: Vec<u16> =
-            buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+            buf.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).take_while(|&c| c != 0).collect();
         String::from_utf16_lossy(&wide)
     }
 }
