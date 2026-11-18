@@ -823,6 +823,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             });
             return LRESULT(0);
         }
+        msg::SNIP_NOW => {
+            crate::snip::again(wp.0);
+            return LRESULT(0);
+        }
         msg::DESK_ITEMS => {
             let items = Box::from_raw(lp.0 as *mut Vec<crate::deskicons::Item>);
             with_app(move |a| {
@@ -1976,7 +1980,10 @@ impl App {
         use shellmode::Hotkey;
         match shellmode::on_hotkey(id) {
             Some(Hotkey::Search | Hotkey::Start) if self.cfg.launcher => self.toggle_launcher(),
-            Some(Hotkey::Snip) => crate::snip::start(self.instance),
+            Some(Hotkey::Snip) => crate::snip::start(self.instance, false),
+            // Win+Shift+R again while recording stops it.
+            Some(Hotkey::Record) if crate::recorder::recording() => crate::recorder::stop(),
+            Some(Hotkey::Record) => crate::snip::start(self.instance, true),
             Some(Hotkey::Emoji) => self.toggle_emoji(),
             Some(Hotkey::Language) => {
                 if let Some(name) = crate::lang::next() {

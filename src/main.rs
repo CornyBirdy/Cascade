@@ -41,12 +41,14 @@ mod pomodoro;
 mod preview;
 mod quickmenu;
 mod radios;
+mod recorder;
 mod settings;
 mod shell;
 mod shellmode;
 mod smart;
 mod snapdrag;
 mod snip;
+mod snipedit;
 mod spring;
 mod superdrag;
 mod switcher;
@@ -135,6 +137,8 @@ pub mod msg {
     pub const DESK_ICONS: u32 = WM_APP + 42;
     /// Shell mode: show a desktop icon's menu (see `ui::DESK_MENU_FOR`).
     pub const DESK_MENU: u32 = WM_APP + 43;
+    /// Snip now, after the delay that was asked for (wParam: the instance).
+    pub const SNIP_NOW: u32 = WM_APP + 44;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

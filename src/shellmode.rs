@@ -1244,6 +1244,10 @@ pub enum Hotkey {
     Emoji,
     /// Win+H: dictation.
     Dictate,
+    /// Win+Shift+R: pick what to record.
+    Record,
+    /// Win+Alt+R: record the screen the pointer is on now (or stop).
+    RecordNow,
     Snip,
     Magnifier,
     TaskManager,
@@ -1295,6 +1299,10 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
         (WIN, 0xBE, Hotkey::Emoji),
         (WIN, 0xBA, Hotkey::Emoji),
         (WIN, b'H' as u32, Hotkey::Dictate),
+        (WIN | SHIFT, b'R' as u32, Hotkey::Record),
+        (WIN | 0x1, b'R' as u32, Hotkey::RecordNow),
+        // Print Screen opens the snip, as Windows 11 sets it to.
+        (0, 0x2C, Hotkey::Snip),
     ];
     for n in 0..9u32 {
         keys.push((WIN, b'1' as u32 + n, Hotkey::App(n as usize)));
@@ -1341,6 +1349,19 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::TaskManager => shell::open("taskmgr.exe"),
         Hotkey::DeskStep(right) => crate::vdesk::step(right),
         Hotkey::Dictate => crate::dictate::toggle(),
+        Hotkey::RecordNow => {
+            if crate::recorder::recording() {
+                crate::recorder::stop();
+            } else {
+                let mut p = POINT::default();
+                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                unsafe {
+                    let _ = GetCursorPos(&mut p);
+                    let _ = GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mut mi);
+                }
+                crate::recorder::start(mi.rcMonitor, true);
+            }
+        }
         Hotkey::DeskNew => crate::vdesk::create(true),
         Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
         // Windows' Snipping Tool is a Store app: Cascade's own snip instead.
@@ -1350,7 +1371,8 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         | Hotkey::Snip
         | Hotkey::Language
         | Hotkey::Project
-        | Hotkey::Emoji => return Some(key),
+        | Hotkey::Emoji
+        | Hotkey::Record => return Some(key),
     }
     None
 }
