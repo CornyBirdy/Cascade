@@ -507,8 +507,8 @@ fn app_window(h: HWND, own_pid: u32, any_desktop: bool) -> bool {
         let class = String::from_utf16_lossy(&class[..n]);
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
-        // Cascade's own settings window is a normal app window.
-        if pid == own_pid && class != "CascadeSettings" {
+        // Cascade's own settings and snip editor windows are normal app windows.
+        if pid == own_pid && !matches!(class.as_str(), "CascadeSettings" | "CascadeSnipEditor") {
             return false;
         }
         !matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")

@@ -990,47 +990,108 @@ pub(crate) fn desktop_menu(owner: HWND) {
 }
 
 unsafe fn desktop_menu_(owner: HWND) {
+    use crate::deskicons::{self, Sort, WINDOWS_ICONS};
+    use crate::menu::{self, check, item, sub, Entry, Item};
     use crate::wallpaper::{self, Fit};
-    let Ok(menu) = CreatePopupMenu() else { return };
-    let Ok(fits) = CreatePopupMenu() else { return };
-    let now = wallpaper::fit();
-    for (i, (f, name)) in Fit::ALL.iter().enumerate() {
-        let flags = if *f == now { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(fits, flags, 100 + i, &HSTRING::from(*name));
+    // Windows 11's desktop menu, with Cascade's wallpaper and settings.
+    const REFRESH: usize = 1;
+    const PASTE: usize = 2;
+    const PASTE_LINK: usize = 3;
+    const NEW_FOLDER: usize = 4;
+    const NEW_SHORTCUT: usize = 5;
+    const NEW_TEXT: usize = 6;
+    const DISPLAY: usize = 7;
+    const PERSONALISE: usize = 8;
+    const TERMINAL: usize = 9;
+    const WALLPAPER: usize = 10;
+    const TASKMGR: usize = 11;
+    const SETTINGS: usize = 12;
+    const SHOW_ICONS: usize = 13;
+    const ICON: usize = 20; // + WINDOWS_ICONS index
+    const SORT: usize = 40; // + Sort::ALL index
+    const FIT: usize = 100; // + Fit::ALL index
+
+    let mut view =
+        vec![check(SHOW_ICONS, "Show desktop icons", deskicons::shown()), Entry::Header("Desktop icons".into())];
+    for (i, (guid, name, _)) in WINDOWS_ICONS.iter().enumerate() {
+        view.push(check(ICON + i, *name, deskicons::windows_icon_shown(guid)));
     }
-    let _ = AppendMenuW(menu, MF_STRING, 10, w!("New folder"));
-    let icons = if crate::deskicons::shown() { MF_STRING | MF_CHECKED } else { MF_STRING };
-    let _ = AppendMenuW(menu, icons, 11, w!("Show desktop icons"));
-    let _ = AppendMenuW(menu, MF_STRING, 12, w!("Refresh"));
-    let _ = AppendMenuW(menu, MF_STRING, 13, w!("Paste\tCtrl+V"));
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, 1, w!("Change wallpaper\u{2026}"));
-    let _ = AppendMenuW(menu, MF_POPUP, fits.0 as usize, w!("Wallpaper fit"));
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, 2, w!("Task Manager"));
-    let _ = AppendMenuW(menu, MF_STRING, 3, w!("Cascade settings\u{2026}"));
-    let id = crate::menu::track(owner, menu, crate::menu::Place::Cursor);
-    let _ = DestroyMenu(menu);
-    match id {
-        1 => {
+    let now_sort = Sort::current();
+    let sort: Vec<Entry> =
+        Sort::ALL.iter().enumerate().map(|(i, (s, _, name))| check(SORT + i, *name, *s == now_sort)).collect();
+    let new = vec![
+        item(NEW_FOLDER, "Folder"),
+        item(NEW_SHORTCUT, "Shortcut"),
+        Entry::Separator,
+        item(NEW_TEXT, "Text Document"),
+    ];
+    let now_fit = wallpaper::fit();
+    let mut wall = vec![item(WALLPAPER, "Change wallpaper\u{2026}"), Entry::Header("Fit".into())];
+    for (i, (f, name)) in Fit::ALL.iter().enumerate() {
+        wall.push(check(FIT + i, *name, *f == now_fit));
+    }
+    let paste_ok = deskicons::can_paste();
+    let entries = vec![
+        sub("View", view),
+        sub("Sort by", sort),
+        item(REFRESH, "Refresh"),
+        Entry::Separator,
+        Entry::Item(Item {
+            id: PASTE,
+            text: "Paste".into(),
+            hint: "Ctrl+V".into(),
+            enabled: paste_ok,
+            ..Default::default()
+        }),
+        Entry::Item(Item { id: PASTE_LINK, text: "Paste shortcut".into(), enabled: paste_ok, ..Default::default() }),
+        Entry::Separator,
+        sub("New", new),
+        Entry::Separator,
+        item(DISPLAY, "Display settings"),
+        item(PERSONALISE, "Personalise"),
+        sub("Wallpaper", wall),
+        Entry::Separator,
+        item(TERMINAL, "Open in Terminal"),
+        item(TASKMGR, "Task Manager"),
+        item(SETTINGS, "Cascade settings\u{2026}"),
+    ];
+    match menu::show(owner, entries, menu::Place::Cursor) {
+        REFRESH => {
+            msg::post(msg::DESK_ICONS, 0, 0);
+            reload_wallpaper();
+        }
+        PASTE => deskicons::paste(owner),
+        PASTE_LINK => deskicons::paste_shortcut(owner),
+        NEW_FOLDER => deskicons::new_folder(),
+        NEW_SHORTCUT => deskicons::new_shortcut(),
+        NEW_TEXT => deskicons::new_text_document(),
+        DISPLAY => open_settings("ms-settings:display"),
+        PERSONALISE => open_settings("ms-settings:personalization"),
+        TERMINAL => {
+            let dir = deskicons::user_desktop().map(|d| d.display().to_string()).unwrap_or_default();
+            // Windows Terminal where it's installed, the command prompt where it isn't.
+            if !shell::launch("wt.exe", &format!("-d \"{dir}\""), false) {
+                shell::launch("cmd.exe", &format!("/k cd /d \"{dir}\""), false);
+            }
+        }
+        WALLPAPER => {
             if let Some(path) = wallpaper::choose(owner) {
                 wallpaper::set_picture(&path);
                 reload_wallpaper();
             }
         }
-        2 => shell::open("taskmgr.exe"),
-        10 => crate::deskicons::new_folder(),
-        13 => crate::deskicons::paste(owner),
-        11 => crate::deskicons::set_shown(!crate::deskicons::shown()),
-        12 => {
-            msg::post(msg::DESK_ICONS, 0, 0);
-            reload_wallpaper();
-        }
-        3 => {
+        TASKMGR => shell::open("taskmgr.exe"),
+        SETTINGS => {
             msg::post(msg::OPEN_SETTINGS, 0, 0);
         }
-        n @ 100..=105 => {
-            wallpaper::set_fit(Fit::ALL[n - 100].0);
+        SHOW_ICONS => deskicons::set_shown(!deskicons::shown()),
+        n if (ICON..ICON + WINDOWS_ICONS.len()).contains(&n) => {
+            let guid = WINDOWS_ICONS[n - ICON].0;
+            deskicons::set_windows_icon_shown(guid, !deskicons::windows_icon_shown(guid));
+        }
+        n if (SORT..SORT + Sort::ALL.len()).contains(&n) => Sort::ALL[n - SORT].0.set(),
+        n if (FIT..FIT + Fit::ALL.len()).contains(&n) => {
+            wallpaper::set_fit(Fit::ALL[n - FIT].0);
             reload_wallpaper();
         }
         _ => {}

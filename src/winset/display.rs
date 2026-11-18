@@ -180,6 +180,7 @@ pub fn set_layout(i: usize) {
     let Some((name, flag)) = LAYOUTS.get(i) else { return };
     let r = unsafe { SetDisplayConfig(None, None, SDC_APPLY | *flag) };
     config::log(&format!("display: {name} (result {r})"));
+    STALE.store(true, Ordering::Release);
     changed();
 }
 
@@ -346,6 +347,7 @@ pub fn make_primary() {
         config::log(&format!("display: {} is now the main screen (result {})", s.name, r.0));
     }
     SCREEN.store(0, Ordering::Relaxed);
+    STALE.store(true, Ordering::Release);
     changed();
 }
 
@@ -487,5 +489,225 @@ pub fn pick(key: &str, owner: HWND) {
             }
         }
         _ => {}
+    }
+}
+
+// ------------------------------------------------------------ arranging --
+
+/// Where each screen sits on the desktop now (desktop pixels), in
+/// `screens` order (the main one first), and which one the page is on.
+/// Read at most once a second (the page asks on every frame).
+pub fn arrangement() -> (Vec<(String, RECT)>, usize) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    type Arrangement = Vec<(String, RECT)>;
+    static CACHE: Mutex<Option<(Instant, Arrangement)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh =
+        c.as_ref().is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(1)) && !STALE.swap(false, Ordering::AcqRel);
+    if !fresh {
+        let list = screens()
+            .into_iter()
+            .filter_map(|s| {
+                let m = current_mode(&s.gdi)?;
+                let (x, y) = unsafe { (m.Anonymous1.Anonymous2.dmPosition.x, m.Anonymous1.Anonymous2.dmPosition.y) };
+                let r = RECT { left: x, top: y, right: x + m.dmPelsWidth as i32, bottom: y + m.dmPelsHeight as i32 };
+                Some((s.name, r))
+            })
+            .collect();
+        *c = Some((Instant::now(), list));
+    }
+    let list = c.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+    let i = SCREEN.load(Ordering::Relaxed).min(list.len().saturating_sub(1));
+    (list, i)
+}
+
+/// Set when Cascade moved the screens: the next `arrangement` reads them again.
+static STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The page now shows screen `i` (a click on it in the arrangement).
+pub fn select(i: usize) {
+    SCREEN.store(i, Ordering::Relaxed);
+    changed();
+}
+
+fn overlaps(a: &RECT, b: &RECT) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
+/// Where screen `i` lands when dropped at `left, top`: touching another
+/// screen along an edge (Windows needs them joined), lined up with its edge
+/// when that's close, overlapping none. None if there's nowhere near.
+pub fn snap(rects: &[RECT], i: usize, left: i32, top: i32) -> Option<(i32, i32)> {
+    let me = rects.get(i)?;
+    let (w, h) = (me.right - me.left, me.bottom - me.top);
+    // Lining up edges within this far (a tenth of the screen).
+    let (near_x, near_y) = (w / 10, h / 10);
+    let align = |v: i32, targets: [i32; 3], near: i32| {
+        targets.into_iter().filter(|t| (v - t).abs() <= near).min_by_key(|t| (v - t).abs()).unwrap_or(v)
+    };
+    let mut best: Option<((i32, i32), i64)> = None;
+    for (j, o) in rects.iter().enumerate() {
+        if j == i {
+            continue;
+        }
+        // Beside it (left or right), sliding along its side; above or below it, along its top or bottom.
+        let ys =
+            align(top.clamp(o.top - h + 1, o.bottom - 1), [o.top, o.bottom - h, (o.top + o.bottom - h) / 2], near_y);
+        let xs =
+            align(left.clamp(o.left - w + 1, o.right - 1), [o.left, o.right - w, (o.left + o.right - w) / 2], near_x);
+        for (x, y) in [(o.left - w, ys), (o.right, ys), (xs, o.top - h), (xs, o.bottom)] {
+            let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+            if rects.iter().enumerate().any(|(k, other)| k != i && overlaps(&r, other)) {
+                continue;
+            }
+            let d = (x - left) as i64 * (x - left) as i64 + (y - top) as i64 * (y - top) as i64;
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some(((x, y), d));
+            }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+/// Moves screen `i` to `left, top` (desktop pixels, snapped first), the
+/// others staying where they are; the main screen stays at 0,0, as Windows
+/// needs, so moving it moves the rest the other way.
+pub fn move_screen(i: usize, left: i32, top: i32) {
+    let all = screens();
+    let mut rects: Vec<RECT> = arrangement().0.into_iter().map(|(_, r)| r).collect();
+    if rects.len() != all.len() || i >= rects.len() {
+        return;
+    }
+    let Some((x, y)) = snap(&rects, i, left, top) else { return };
+    let r = &mut rects[i];
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    *r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+    let (ox, oy) = (rects[0].left, rects[0].top);
+    unsafe {
+        for (s, r) in all.iter().zip(&rects) {
+            let Some(mut dm) = current_mode(&s.gdi) else { continue };
+            dm.Anonymous1.Anonymous2.dmPosition.x = r.left - ox;
+            dm.Anonymous1.Anonymous2.dmPosition.y = r.top - oy;
+            dm.dmFields = DM_POSITION;
+            let _ = ChangeDisplaySettingsExW(
+                &HSTRING::from(s.gdi.as_str()),
+                Some(&dm),
+                None,
+                CDS_UPDATEREGISTRY | CDS_NORESET,
+                None,
+            );
+        }
+        let r = ChangeDisplaySettingsExW(windows::core::PCWSTR::null(), None, None, CDS_TYPE(0), None);
+        config::log(&format!("display: moved {} to {}, {} (result {})", all[i].name, x - ox, y - oy, r.0));
+    }
+    STALE.store(true, Ordering::Release);
+    changed();
+}
+
+/// Identify: each screen's number, big, in its middle for a few seconds.
+pub fn identify() {
+    use windows::core::w;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match m {
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(h, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(h, &mut rc);
+                let bg = CreateSolidBrush(COLORREF(0x00302820));
+                FillRect(dc, &rc, bg);
+                let _ = DeleteObject(bg.into());
+                let mut buf = [0u16; 8];
+                let n = GetWindowTextW(h, &mut buf) as usize;
+                let font = CreateFontW(
+                    rc.bottom * 3 / 4,
+                    0,
+                    0,
+                    0,
+                    600,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    0,
+                    w!("Segoe UI Variable Display"),
+                );
+                let old = SelectObject(dc, font.into());
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, COLORREF(0x00FFFFFF));
+                DrawTextW(dc, &mut buf[..n], &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(dc, old);
+                let _ = DeleteObject(font.into());
+                let _ = EndPaint(h, &ps);
+                LRESULT(0)
+            }
+            WM_TIMER | WM_LBUTTONDOWN => {
+                let _ = DestroyWindow(h);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(h, m, wp, lp),
+        }
+    }
+    let (list, _) = arrangement();
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else { return };
+        let instance = HINSTANCE(module.0);
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(proc),
+            hInstance: instance,
+            lpszClassName: w!("CascadeIdentify"),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        for (n, (_, r)) in list.iter().enumerate() {
+            let size = ((r.bottom - r.top) / 4).clamp(120, 360);
+            let (x, y) = (r.left + 40, r.bottom - size - 80);
+            let Ok(h) = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("CascadeIdentify"),
+                &HSTRING::from((n + 1).to_string()),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                size,
+                size,
+                None,
+                None,
+                Some(instance),
+                None,
+            ) else {
+                continue;
+            };
+            let rgn = CreateRoundRectRgn(0, 0, size + 1, size + 1, size / 6, size / 6);
+            SetWindowRgn(h, Some(rgn), true);
+            SetTimer(Some(h), 1, 3000, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(l: i32, t: i32, w: i32, h: i32) -> RECT {
+        RECT { left: l, top: t, right: l + w, bottom: t + h }
+    }
+
+    #[test]
+    fn snaps_beside_and_lines_up() {
+        let rects = [r(0, 0, 1920, 1080), r(1920, 0, 1920, 1080)];
+        // Dragged a little up and away to the left: lands left of the main screen, tops lined up.
+        assert_eq!(snap(&rects, 1, -1980, -60), Some((-1920, 0)));
+        // Dropped on top of the main screen: pushed out beside it, never overlapping.
+        let (x, y) = snap(&rects, 1, 300, 50).unwrap();
+        assert!(!overlaps(&r(x, y, 1920, 1080), &rects[0]));
+        // Above it, centred when close to centred.
+        assert_eq!(snap(&rects, 1, 30, -1100), Some((0, -1080)));
     }
 }

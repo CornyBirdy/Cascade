@@ -219,6 +219,7 @@ pub fn get(key: &str) -> String {
         "win_bt" => b(net::radio(net::RadioKind::Bluetooth).unwrap_or(false)),
         "win_airplane" => b(net::airplane()),
         "win_hotspot" => b(net::hotspot_on()),
+        k if k.starts_with("win_hotspot_") => net::hotspot_value(k),
         "win_join_ssid" => net::join_ssid(),
         "win_join_pw" => String::new(),
         "win_dark_apps" | "win_dark_windows" | "win_transparency" | "win_accent_bars" => b(look::flag(key)),
@@ -244,6 +245,8 @@ pub fn desc(key: &str) -> Option<String> {
         }
         "win_net_info" => Some(net::info()),
         "win_hotspot" => Some(net::hotspot_desc()),
+        "win_hotspot_devices" => Some(net::hotspot_devices()),
+        "win_known" => Some(net::known_desc()),
         "win_about" => Some(system::about()),
         "win_storage" => Some(system::storage()),
         "win_layouts" => Some(system::layouts()),
@@ -257,9 +260,10 @@ pub fn desc(key: &str) -> Option<String> {
 pub fn shown(key: &str) -> bool {
     match key {
         "win_hdr" => display::hdr().is_some(),
-        "win_screen" | "win_layout" | "win_primary" => display::count() > 1,
+        "win_screen" | "win_layout" | "win_primary" | "win_arrange" | "win_identify" => display::count() > 1,
         "win_screen_dc" | "win_sleep_dc" | "win_battery" => system::battery().is_some(),
         "win_hotspot" => net::hotspot_available(),
+        k if k.starts_with("win_hotspot_") => net::hotspot_row_shown(k),
         _ => true,
     }
 }
@@ -284,6 +288,9 @@ pub fn set(key: &str, v: &str) {
         "win_bt" => net::set_radio(net::RadioKind::Bluetooth, on),
         "win_airplane" => net::set_airplane(on),
         "win_hotspot" => net::set_hotspot(on),
+        "win_hotspot_name" => net::set_hotspot_name(v),
+        "win_hotspot_pw" => net::set_hotspot_password(v),
+        "win_hotspot_saver" => net::set_hotspot_saver(on),
         "win_join_pw" => net::set_join_password(v),
         "win_dark_apps" | "win_dark_windows" | "win_transparency" | "win_accent_bars" => look::set_flag(key, on),
         "win_camera" | "win_mic_access" | "win_location" | "win_toasts" => system::set_flag(key, on),
@@ -301,11 +308,14 @@ pub fn action(key: &str, owner: HWND) {
             display::pick(key, owner)
         }
         "win_primary" => display::make_primary(),
+        "win_identify" => display::identify(),
         "win_night_schedule" => night::pick_schedule(owner),
         "win_output" | "win_input" => audio::pick(key, owner),
         "win_sound_cpl" => open("mmsys.cpl"),
         "win_mixer" => open("sndvol.exe"),
         "win_join_ssid" => net::pick_ssid(owner),
+        "win_known" => net::pick_forget(owner),
+        "win_hotspot_band" | "win_hotspot_security" | "win_hotspot_from" => net::pick_hotspot(key, owner),
         "win_join" => net::join(),
         "win_bt_add" => open("DevicePairingWizard.exe"),
         "win_printers" => {

@@ -1,11 +1,12 @@
 //! Desktop icons in shell mode: what Explorer's desktop shows (your Desktop
 //! folder and the public one, and the icons Windows is set to show there,
-//! like This PC and the Recycle Bin), in columns from the top left of the
-//! main screen. Double-click one to open it; right-click it for its own
-//! menu, the one Explorer shows (open with, cut, copy, delete, properties
-//! and whatever programs add); drop files on the desktop to put them there.
-//! Right-click the desktop for New folder, and to hide or show the icons
-//! (Windows' own setting for it).
+//! like This PC and the Recycle Bin; not the rest of the desktop's
+//! namespace, which only File Explorer's sidebar shows), in columns from
+//! the top left of the main screen, sorted as `desktop_sort` says.
+//! Double-click one to open it; right-click it for its own menu, the one
+//! Explorer shows (open with, cut, copy, delete, properties and whatever
+//! programs add); drop files on the desktop to put them there. The
+//! desktop's own menu is `shellmode::desktop_menu`.
 //!
 //! The icons sit in a see-through window just above the desktop (below
 //! every app), so a wallpaper app's picture shows behind them.
@@ -54,6 +55,75 @@ pub struct Item {
     pixels: Vec<u8>,
 }
 
+/// The icons Windows lets you put on the desktop (Settings, Personalisation,
+/// Themes, Desktop icon settings), and whether each shows when it was never
+/// set: only the Recycle Bin does.
+pub const WINDOWS_ICONS: [(&str, &str, bool); 5] = [
+    ("{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "This PC", false),
+    ("{59031a47-3f72-44a7-89c5-5595fe6b30ee}", "User's files", false),
+    ("{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}", "Network", false),
+    ("{645FF040-5081-101B-9F08-00AA002F954E}", "Recycle Bin", true),
+    ("{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}", "Control Panel", false),
+];
+const HIDE_ICONS: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\HideDesktopIcons";
+
+/// Whether Windows' icon `guid` ("{...}") shows on the desktop, as Explorer
+/// decides it: its HideDesktopIcons value, or (never set) only the Recycle Bin.
+/// Anything else from the desktop's namespace (Libraries, Linux, a phone,
+/// Home, Gallery) shows only when that value says 0, as in Explorer, where
+/// they're only in the navigation pane.
+pub fn windows_icon_shown(guid: &str) -> bool {
+    let key = format!("{HIDE_ICONS}\\NewStartPanel");
+    match crate::winset::reg_dword(HKEY_CURRENT_USER, &key, guid) {
+        Some(v) => v == 0,
+        None => WINDOWS_ICONS.iter().any(|(g, _, on)| g.eq_ignore_ascii_case(guid) && *on),
+    }
+}
+
+pub fn set_windows_icon_shown(guid: &str, on: bool) {
+    for start in ["NewStartPanel", "ClassicStartMenu"] {
+        let key = format!("{HIDE_ICONS}\\{start}");
+        crate::winset::set_reg_dword(HKEY_CURRENT_USER, &key, guid, (!on) as u32);
+    }
+    msg::post(msg::DESK_ICONS, 0, 0);
+}
+
+/// The `{GUID}` in a namespace item's path ("::{GUID}"), if it is one.
+fn regitem(path: &str) -> Option<&str> {
+    let g = path.strip_prefix("::")?;
+    (g.starts_with('{') && g.ends_with('}') && !g.contains('\\')).then_some(g)
+}
+
+/// How the desktop is sorted (`desktop_sort`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    Name,
+    Size,
+    Type,
+    Date,
+}
+
+impl Sort {
+    pub const ALL: [(Sort, &'static str, &'static str); 4] = [
+        (Sort::Name, "name", "Name"),
+        (Sort::Size, "size", "Size"),
+        (Sort::Type, "type", "Item type"),
+        (Sort::Date, "date", "Date modified"),
+    ];
+
+    pub fn current() -> Sort {
+        let v = config::Config::load().desktop_sort;
+        Sort::ALL.iter().find(|(_, k, _)| *k == v).map_or(Sort::Name, |(s, _, _)| *s)
+    }
+
+    pub fn set(self) {
+        if let Some((_, k, _)) = Sort::ALL.iter().find(|(s, _, _)| *s == self) {
+            config::Config::set("desktop_sort", k);
+        }
+        msg::post(msg::DESK_ICONS, 0, 0);
+    }
+}
+
 /// Whether Windows is set to show desktop icons.
 pub fn shown() -> bool {
     crate::winset::reg_dword(HKEY_CURRENT_USER, ADVANCED, "HideIcons") != Some(1)
@@ -64,25 +134,32 @@ pub fn set_shown(on: bool) {
     msg::post(msg::DESK_ICONS, 0, 0);
 }
 
+/// The folders the desktop shows: yours and the public one (wherever
+/// they've been moved to, OneDrive included).
 fn desktop_dirs() -> Vec<PathBuf> {
-    [
-        std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("Desktop")),
-        std::env::var_os("PUBLIC").map(|u| PathBuf::from(u).join("Desktop")),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|p| p.is_dir())
-    .collect()
+    [known_folder(&FOLDERID_Desktop), known_folder(&FOLDERID_PublicDesktop)]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
-/// The user's own Desktop folder (where new folders and dropped files go).
-fn user_desktop() -> Option<PathBuf> {
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None).ok()?;
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
         let s = p.to_string().ok();
         CoTaskMemFree(Some(p.0 as *const _));
         s.map(PathBuf::from)
     }
+}
+
+/// The user's own Desktop folder (where new folders and dropped files go).
+pub fn user_desktop() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Desktop)
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.to_string_lossy().trim_end_matches('\\').eq_ignore_ascii_case(b.to_string_lossy().trim_end_matches('\\'))
 }
 
 unsafe fn take(p: PWSTR) -> String {
@@ -104,7 +181,11 @@ pub fn spawn_load() {
 }
 
 unsafe fn load() -> Vec<Item> {
-    let mut out: Vec<(u8, Item)> = Vec::new();
+    let dirs = desktop_dirs();
+    let profile = known_folder(&FOLDERID_Profile);
+    let sort = Sort::current();
+    // (rank, sort key, item): the key is a number for size and date.
+    let mut out: Vec<(u8, String, u64, Item)> = Vec::new();
     let wic: Option<IWICImagingFactory> = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
     let Ok(desktop) = SHGetDesktopFolder() else { return Vec::new() };
     let mut list: Option<IEnumIDList> = None;
@@ -130,6 +211,22 @@ unsafe fn load() -> Vec<Item> {
         };
         let (name, path) = (take(name), take(path));
         let attrs = item.GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM).unwrap_or_default();
+        // What Explorer's desktop shows of the desktop's namespace (which also
+        // has everything the navigation pane lists under Desktop): the two
+        // Desktop folders' contents, and Windows' icons that are turned on.
+        let fs = attrs.0 & SFGAO_FILESYSTEM.0 != 0;
+        let wanted = match regitem(&path) {
+            Some(guid) => windows_icon_shown(guid),
+            // Your user folder can come as its path rather than its GUID.
+            None if fs && profile.as_deref().is_some_and(|p| same_dir(p, std::path::Path::new(&path))) => {
+                windows_icon_shown(WINDOWS_ICONS[1].0)
+            }
+            None if fs => PathBuf::from(&path).parent().is_some_and(|p| dirs.iter().any(|d| same_dir(d, p))),
+            None => false,
+        };
+        if !wanted {
+            continue;
+        }
         // Windows' own icons (This PC, the Recycle Bin) first, then folders, then files.
         let rank = if attrs.0 & SFGAO_FILESYSTEM.0 == 0 {
             0
@@ -139,10 +236,26 @@ unsafe fn load() -> Vec<Item> {
             2
         };
         let pixels = wic.as_ref().and_then(|w| crate::icons::load_icon(&item, w).ok()).unwrap_or_default();
-        out.push((rank, Item { path, name, pixels }));
+        let meta = if fs { std::fs::metadata(&path).ok() } else { None };
+        let (key, num) = match sort {
+            Sort::Name => (String::new(), 0),
+            Sort::Size => (String::new(), meta.as_ref().map_or(0, |m| m.len())),
+            Sort::Type => {
+                let ext = std::path::Path::new(&path).extension().map(|e| e.to_string_lossy().to_lowercase());
+                (if rank == 2 { ext.unwrap_or_default() } else { String::new() }, 0)
+            }
+            Sort::Date => {
+                let t = meta.and_then(|m| m.modified().ok());
+                let secs = t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+                // Newest first, as Explorer does.
+                (String::new(), u64::MAX - secs)
+            }
+        };
+        out.push((rank, key, num, Item { path, name, pixels }));
     }
-    out.sort_by_key(|(rank, item)| (*rank, item.name.to_lowercase()));
-    out.into_iter().map(|(_, i)| i).collect()
+    // Windows' icons first, then folders, then files; within each, by the sort and then the name.
+    out.sort_by_key(|(rank, key, num, item)| (*rank, key.clone(), *num, item.name.to_lowercase()));
+    out.into_iter().map(|(_, _, _, i)| i).collect()
 }
 
 /// Watches the desktop folders, and says when something in them changed.
@@ -248,6 +361,22 @@ impl DeskIcons {
         self.anchor = self.anchor.filter(|&a| a < self.items.len());
         self.hovered = None;
         self.dirty = true;
+        // Something just made from the menu (New folder...): selected, with its name ready to type, as in Explorer.
+        let made = MADE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((path, when)) = made {
+            let at = self.items.iter().position(|i| same_dir(std::path::Path::new(&i.path), &path));
+            match at {
+                Some(i) => {
+                    self.select_only(Some(i));
+                    self.rename(i);
+                }
+                // Not read yet: wait for the next read, for a while.
+                None if when.elapsed().as_secs() < 5 => {
+                    *MADE.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, when));
+                }
+                None => {}
+            }
+        }
     }
 
     pub fn place(&mut self, area: RECT, k: f32) {
@@ -444,7 +573,7 @@ impl DeskIcons {
         let paths = self.selected_paths();
         match VIRTUAL_KEY(vk) {
             VK_RETURN => self.open_selected(),
-            VK_DELETE if !paths.is_empty() => verb(self.hwnd, &paths, "delete", shift),
+            VK_DELETE if !paths.is_empty() => delete(self.hwnd, &paths, shift),
             VK_F2 => {
                 if let Some(i) = self.anchor.filter(|&a| self.sel.get(a) == Some(&true)) {
                     self.rename(i);
@@ -717,6 +846,49 @@ fn verb(owner: HWND, paths: &[String], name: &str, shift: bool) {
     }
 }
 
+/// Delete: files and folders go to the Recycle Bin (for good with Shift, after
+/// Windows asks), through Windows' own file operation with its progress and
+/// questions, on a thread of its own. Windows' icons (This PC, the Recycle
+/// Bin...) picked on their own are taken off the desktop instead, as
+/// unticking them in Desktop icon settings does; View brings them back.
+pub fn delete(owner: HWND, paths: &[String], for_good: bool) {
+    let (icons, files): (Vec<String>, Vec<String>) = paths.iter().cloned().partition(|p| regitem(p).is_some());
+    // Only when they're all that's picked: Ctrl+A and Delete clears the files, not the Recycle Bin.
+    if files.is_empty() {
+        for p in &icons {
+            if let Some(g) = regitem(p) {
+                set_windows_icon_shown(g, false);
+            }
+        }
+    }
+    if files.is_empty() {
+        return;
+    }
+    let owner = owner.0 as isize;
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(op) = CoCreateInstance::<_, IFileOperation>(&FileOperation, None, CLSCTX_ALL) else { return };
+        let mut flags = FOF_NOCONFIRMMKDIR.0;
+        if !for_good {
+            // To the Recycle Bin, without asking (as Explorer does by default).
+            flags |= FOF_ALLOWUNDO.0 | FOFX_RECYCLEONDELETE.0 | FOF_NOCONFIRMATION.0;
+        }
+        let _ = op.SetOperationFlags(FILEOPERATION_FLAGS(flags));
+        let _ = op.SetOwnerWindow(HWND(owner as *mut _));
+        let mut n = 0;
+        for p in &files {
+            if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(p.as_str()), None) {
+                if op.DeleteItem(&item, None).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        let r = op.PerformOperations();
+        config::log(&format!("desktop: deleted {n} of {} item(s) (for good: {for_good}): {r:?}", files.len()));
+        msg::post(msg::DESK_ICONS, 0, 0);
+    });
+}
+
 /// Ctrl+V: what's on the clipboard, into the Desktop folder.
 pub fn paste(owner: HWND) {
     if let Some(dir) = user_desktop() {
@@ -743,22 +915,28 @@ pub fn item_menu(owner: HWND, paths: &[String]) {
             }
         });
         let id = crate::menu::show(owner, entries, crate::menu::Place::Cursor) as u32;
-        // Rename only works in a folder view: the desktop does it itself (F2).
-        let rename = id >= FIRST && {
-            let mut buf = [0u8; 64];
-            cm.GetCommandString(
-                (id - FIRST) as usize,
-                GCS_VERBA,
-                None,
-                windows::core::PSTR(buf.as_mut_ptr()),
-                buf.len() as u32,
-            )
-            .is_ok()
-                && buf.starts_with(b"rename\0")
-        };
+        let mut buf = [0u8; 64];
+        let verb_ok = id >= FIRST
+            && cm
+                .GetCommandString(
+                    (id - FIRST) as usize,
+                    GCS_VERBA,
+                    None,
+                    windows::core::PSTR(buf.as_mut_ptr()),
+                    buf.len() as u32,
+                )
+                .is_ok();
+        let is = |v: &[u8]| verb_ok && buf.starts_with(v);
         let _ = DestroyMenu(menu);
-        if rename {
+        // Rename only works in a folder view: the desktop does it itself (F2).
+        if is(b"rename\0") {
             msg::post(msg::DESK_RENAME, 0, 0);
+            return;
+        }
+        // The shell's Delete expects Explorer's view to carry it out: Cascade does it.
+        if is(b"delete\0") {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
+            delete(owner, paths, GetKeyState(VK_SHIFT.0 as i32) < 0);
             return;
         }
         if id >= FIRST {
@@ -788,17 +966,58 @@ impl DeskIcons {
     }
 }
 
-/// Makes a new folder on the desktop ("New folder", or "New folder (2)" and on).
+/// What the desktop's menu just made, to select and rename once it's read.
+static MADE: std::sync::Mutex<Option<(PathBuf, Instant)>> = std::sync::Mutex::new(None);
+
+/// A free name on the desktop: "New folder", then "New folder (2)" and on.
+fn free_name(dir: &std::path::Path, stem: &str, ext: &str) -> Option<PathBuf> {
+    (1..1000)
+        .map(|n| if n == 1 { format!("{stem}{ext}") } else { format!("{stem} ({n}){ext}") })
+        .map(|f| dir.join(f))
+        .find(|p| !p.exists())
+}
+
+fn made(path: PathBuf, ok: bool) {
+    config::log(&format!("desktop: made {} ({ok})", path.display()));
+    if ok {
+        *MADE.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, Instant::now()));
+        msg::post(msg::DESK_ICONS, 0, 0);
+    }
+}
+
+/// Makes a new folder on the desktop, ready to name.
 pub fn new_folder() {
-    let Some(dir) = user_desktop() else { return };
-    for n in 1..100 {
-        let name = if n == 1 { "New folder".to_string() } else { format!("New folder ({n})") };
-        let path = dir.join(name);
-        if !path.exists() {
-            let ok = std::fs::create_dir(&path).is_ok();
-            config::log(&format!("desktop: made {} ({ok})", path.display()));
-            break;
-        }
+    let Some(path) = user_desktop().and_then(|d| free_name(&d, "New folder", "")) else { return };
+    let ok = std::fs::create_dir(&path).is_ok();
+    made(path, ok);
+}
+
+/// Makes a new, empty text document on the desktop, ready to name.
+pub fn new_text_document() {
+    let Some(path) = user_desktop().and_then(|d| free_name(&d, "New Text Document", ".txt")) else { return };
+    let ok = std::fs::write(&path, b"").is_ok();
+    made(path, ok);
+}
+
+/// Windows' Create Shortcut wizard, making it on the desktop.
+pub fn new_shortcut() {
+    if let Some(dir) = user_desktop() {
+        let args = format!("appwiz.cpl,NewLinkHere {}\\", dir.display());
+        crate::shell::launch("rundll32.exe", &args, false);
+    }
+}
+
+/// Whether there are files on the clipboard to paste.
+pub fn can_paste() -> bool {
+    use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+    const CF_HDROP: u32 = 15;
+    unsafe { IsClipboardFormatAvailable(CF_HDROP).is_ok() }
+}
+
+/// Paste shortcut: shortcuts to what's on the clipboard, on the desktop.
+pub fn paste_shortcut(owner: HWND) {
+    if let Some(dir) = user_desktop() {
+        verb(owner, &[dir.to_string_lossy().into_owned()], "pastelink", false);
     }
 }
 

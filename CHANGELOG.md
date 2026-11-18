@@ -7,6 +7,10 @@ Settings > Updates > What's new opens the list.
 ## 2026-11-18
 
 **New**
+- **The desktop's menu, as Windows 11's**: View (show icons, and which of This PC, your user folder, Network, the Recycle Bin and Control Panel are on the desktop), Sort by, Refresh, Paste, Paste shortcut, New (folder, shortcut, text document, ready to name), Display settings, Personalise, the wallpaper, Open in Terminal, Task Manager.
+- **Arrange your screens** (Settings > Display): drag them to where they sit on your desk (they snap together), click one to choose it, and Identify shows each one's number.
+- **Mobile hotspot, in full** (Settings > Network & Bluetooth): its name and password, band, security, which connection it shares, power saving, and the devices connected.
+- **Known networks**: forget a Wi-Fi network Windows remembers.
 - **Settings, rebuilt** after Windows 11's: bigger and resizable, a sidebar with an icon for each page in two groups (Cascade, Windows) that scrolls, roomier cards with group headings, Windows-style buttons, drop-downs and On/Off toggles. And it moves: pages slide in, the sidebar's marker glides to the page, scrolling eases, toggles slide, hovers fade.
 - **Menus, Cascade's own** everywhere (taskbar, desktop, a file's menu, every picker): animated, scrolling, with a filter box for long lists (the installed apps) and keyboard control; pickers drop down from their box.
 - **Desktop**: drag to select icons, Ctrl/Shift+click, Delete, F2 rename, Ctrl+A/C/X/V, arrows, F5, the menu key; Paste on the desktop's menu; one menu for several selected icons.
@@ -14,6 +18,10 @@ Settings > Updates > What's new opens the list.
 - **Update from a branch** (Settings > Updates > Update from).
 
 **Fixed**
+- Right-clicking the desktop showed Cascade's menu instead of the desktop's (or the icon's own); Cascade's menu now only comes up on the taskbar and the notch.
+- Deleting desktop icons did nothing: Delete (and the menu's Delete) now sends them to the Recycle Bin.
+- The desktop showed everything under Desktop in File Explorer's sidebar (Libraries, Linux, a linked phone, two Control Panels...): now only what Explorer's desktop shows.
+- Cascade's snip editor didn't show on the taskbar.
 - Desktop icons coming up over apps (and staying there): they now stay just above the wallpaper whatever happens.
 - The busy cursor over Wallpaper Engine's wallpaper.
 - Power mode not changing on a High performance or Ultimate plan: picking a mode moves to Balanced first, the only plan Windows applies modes on.

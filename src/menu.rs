@@ -52,9 +52,13 @@ pub struct Item {
 }
 
 /// An item: `id` and `text`, enabled.
-#[cfg(test)]
 pub fn item(id: usize, text: impl Into<String>) -> Entry {
     Entry::Item(Item { id, text: text.into(), enabled: true, ..Default::default() })
+}
+
+/// An item with a submenu.
+pub fn sub(text: impl Into<String>, entries: Vec<Entry>) -> Entry {
+    Entry::Item(Item { text: text.into(), enabled: true, sub: entries, ..Default::default() })
 }
 
 /// An item with a tick when `on`.

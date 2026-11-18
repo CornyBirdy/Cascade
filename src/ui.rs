@@ -791,7 +791,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
         }
         msg::WIN_CHANGED => {
             with_app(|a| {
-                if let Some(s) = &a.settings {
+                let cfg = &a.cfg;
+                if let Some(s) = &mut a.settings {
+                    s.refresh_edits(&|k: &str| setting_value(cfg, k));
                     s.invalidate();
                 }
             });
@@ -885,7 +887,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(move |a| a.launcher.set_apps(*list));
             return LRESULT(0);
         }
-        WM_RBUTTONUP => {
+        // The desktop's icons have menus of their own (see `handle_deskicons`).
+        WM_RBUTTONUP if !with_app(|a| a.deskicons.as_ref().is_some_and(|d| d.hwnd == hwnd)).unwrap_or(false) => {
             right_click(hwnd);
             return LRESULT(0);
         }
@@ -3575,7 +3578,15 @@ impl App {
                 return target;
             }
         }
-        RightClick::General
+        // Cascade's own menu belongs to the notch and the taskbar (and its
+        // tray icon, which comes here as the notch's window). Anywhere else
+        // (previews, pop-ups, the desktop) has a menu of its own, or none.
+        let on_trigger = hwnd == self.dock.trigger || self.screens.iter().any(|d| d.trigger == hwnd);
+        if hwnd == self.hwnd || on_dock.is_some() || on_trigger {
+            RightClick::General
+        } else {
+            RightClick::Nothing
+        }
     }
 
     fn menu_state(&self) -> MenuState {

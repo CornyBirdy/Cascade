@@ -255,6 +255,8 @@ enum Ctl {
     Gallery,
     /// Tiles to drag between lanes (which widgets show, where and in what order).
     Board(Board),
+    /// The screens as they sit on the desk, to drag into place and click to choose.
+    Arrange,
     Note,
     /// A group title with no control.
     Heading,
@@ -281,6 +283,7 @@ fn row_h(r: &Row) -> f32 {
         Ctl::Heading => HEAD_H,
         Ctl::Gallery => BOARD_HEAD + gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP + 16.0,
         Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
+        Ctl::Arrange => BOARD_HEAD + ARRANGE_H + 16.0,
         Ctl::Note => ROW_H,
         _ if r.desc.is_empty() => COMPACT_H,
         _ => ROW_H,
@@ -293,6 +296,40 @@ fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
 
 /// Room for a board row's title and description, above its lanes.
 const BOARD_HEAD: f32 = 58.0;
+/// The screen arrangement's height, and the room around the screens in it.
+const ARRANGE_H: f32 = 230.0;
+const ARRANGE_PAD: f32 = 20.0;
+
+/// The screens of an arrangement filling `area` (logical units): how many
+/// desktop pixels a unit is, and each screen's box.
+fn screen_boxes(area: (f32, f32, f32, f32), rects: &[RECT]) -> (f32, Vec<(f32, f32, f32, f32)>) {
+    let (l, t) = rects.iter().fold((i32::MAX, i32::MAX), |(l, t), r| (l.min(r.left), t.min(r.top)));
+    let (rr, b) = rects.iter().fold((i32::MIN, i32::MIN), |(rr, b), r| (rr.max(r.right), b.max(r.bottom)));
+    if rects.is_empty() {
+        return (1.0, Vec::new());
+    }
+    let (bw, bh) = ((rr - l).max(1) as f32, (b - t).max(1) as f32);
+    let k = ((area.2 - 2.0 * ARRANGE_PAD) / bw).min((area.3 - 2.0 * ARRANGE_PAD) / bh).min(0.1);
+    let (ox, oy) = (area.0 + (area.2 - bw * k) / 2.0, area.1 + (area.3 - bh * k) / 2.0);
+    let boxes = rects
+        .iter()
+        .map(|r| {
+            let (x, y) = (ox + (r.left - l) as f32 * k, oy + (r.top - t) as f32 * k);
+            (x + 2.0, y + 2.0, (r.right - r.left) as f32 * k - 4.0, (r.bottom - r.top) as f32 * k - 4.0)
+        })
+        .collect();
+    (1.0 / k, boxes)
+}
+
+/// A screen being dragged in the arrangement (layout units).
+#[derive(Clone, Copy)]
+struct ScreenDrag {
+    row: usize,
+    screen: usize,
+    start: (f32, f32),
+    at: (f32, f32),
+    moved: bool,
+}
 const LANE_H: f32 = 52.0;
 const LANE_GAP: f32 = 6.0;
 /// The lane's name, left of its tiles.
@@ -1083,6 +1120,13 @@ fn rows(section: usize) -> Vec<Row> {
         ],
         page::DISPLAY => vec![
             heading("h_screens", "Screens"),
+            row(
+                "win_arrange",
+                "Arrange your screens",
+                "Drag a screen to where it sits on your desk; click one to choose it for the settings below.",
+                Ctl::Arrange,
+            ),
+            row("win_identify", "Identify", "Shows each screen's number on it, for a few seconds.", Button("Identify")),
             row("win_screen", "Screen", "Which screen the settings below are for.", Pick),
             row("win_layout", "Multiple screens", "Extend, duplicate, or show on one screen only (Win+P).", Pick),
             row("win_primary", "Main screen", "Make this the main screen.", Button("Make main")),
@@ -1118,11 +1162,20 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_net_info", "Connection", "What you're connected through.", Note),
             row("win_wifi", "Wi-Fi", "", Toggle),
             row("win_airplane", "Airplane mode", "Turns every radio off: Wi-Fi, Bluetooth and mobile data.", Toggle),
+            heading("h_hotspot", "Mobile hotspot"),
             row("win_hotspot", "Mobile hotspot", "Share this PC's internet over Wi-Fi.", Toggle),
+            row("win_hotspot_from", "Share my internet connection from", "The connection devices on the hotspot use.", Pick),
+            row("win_hotspot_name", "Network name", "What devices see when they look for Wi-Fi (1 to 32 characters).", Text { secret: false }),
+            row("win_hotspot_pw", "Network password", "8 to 63 characters.", Text { secret: false }),
+            row("win_hotspot_band", "Network band", "5 GHz is faster; 2.4 GHz reaches further and suits older devices.", Pick),
+            row("win_hotspot_security", "Security", "WPA3 is stronger; some older devices only know WPA2.", Pick),
+            row("win_hotspot_saver", "Power saving", "Turns the hotspot off when no device has been connected for a while.", Toggle),
+            row("win_hotspot_devices", "Connected devices", "", Note),
             heading("h_join", "Join a network"),
             row("win_join_ssid", "Network", "One in range (with a lock if it needs a password).", Pick),
             row("win_join_pw", "Password", "For a network that needs one.", Text { secret: true }),
             row("win_join", "Join", "Joins it, and remembers it for next time, as Windows does.", Button("Join")),
+            row("win_known", "Known networks", "Networks Windows remembers.", Button("Manage\u{2026}")),
             heading("h_bt", "Bluetooth & devices"),
             row("win_bt", "Bluetooth", "", Toggle),
             row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
@@ -1420,6 +1473,8 @@ enum Hit {
     Tile(usize, usize, usize),
     /// A theme in the gallery: row, theme.
     Swatch(usize, usize),
+    /// A screen in the arrangement: row, screen.
+    Screen(usize, usize),
 }
 
 /// The default for `key`, if the row should offer a reset button.
@@ -1461,6 +1516,7 @@ pub struct Settings {
     tracking: bool,
     drag: Option<(usize, f32)>,
     tile_drag: Option<TileDrag>,
+    screen_drag: Option<ScreenDrag>,
     /// Text boxes: window, row key, and the text they were loaded with (only
     /// a box the user actually edited is written back). Every text row of the
     /// section has one; those of rows left out are hidden.
@@ -1651,6 +1707,7 @@ impl Settings {
                 tracking: false,
                 drag: None,
                 tile_drag: None,
+                screen_drag: None,
                 edits: Vec::new(),
                 font: HFONT::default(),
                 brush: CreateSolidBrush(COLORREF(0x002B2B2B)),
@@ -1884,7 +1941,7 @@ impl Settings {
     fn text_w(&self, i: usize, r: &Row) -> f32 {
         let cw = self.content_w();
         match r.ctl {
-            Ctl::Board(_) | Ctl::Gallery | Ctl::Note | Ctl::Heading => cw - 36.0,
+            Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Note | Ctl::Heading => cw - 36.0,
             _ => {
                 let (rx, ..) = self.reset_rect(i, &r.ctl);
                 rx - 8.0 - (self.x0() + 18.0)
@@ -1958,7 +2015,7 @@ impl Settings {
             .enumerate()
             .map(|(i, r)| {
                 let base = row_h(r);
-                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Heading) {
+                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Heading) {
                     return base;
                 }
                 let (desc, _, mark) = self.desc(r, get, build);
@@ -2033,6 +2090,8 @@ impl Settings {
                 self.content_w() - 36.0,
                 b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP,
             ),
+            // The screens, under the title.
+            Ctl::Arrange => (self.x0() + 18.0, y + BOARD_HEAD, self.content_w() - 36.0, ARRANGE_H),
             Ctl::Note | Ctl::Heading => (x1, y, 0.0, 0.0),
         }
     }
@@ -2089,6 +2148,30 @@ impl Settings {
         self.place_edits();
     }
 
+    /// Windows' settings were read again: boxes for them that haven't been
+    /// touched show the new values (the hotspot's name arrives a moment after
+    /// the page opens).
+    pub fn refresh_edits(&mut self, get: &dyn Fn(&str) -> String) {
+        let focus = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        for (h, key, loaded) in &mut self.edits {
+            if !key.starts_with("win_") || *h == focus {
+                continue;
+            }
+            let (now, shown) = (get(key), edit_text(*h));
+            // A value typed here that Windows now has: it's no longer a change to send.
+            if shown == now {
+                *loaded = now;
+                continue;
+            }
+            if shown == *loaded && now != *loaded {
+                unsafe {
+                    let _ = SetWindowTextW(*h, &windows::core::HSTRING::from(now.as_str()));
+                }
+                *loaded = now;
+            }
+        }
+    }
+
     /// A text box lost focus: returns its new value.
     pub fn commit_edit(&self, edit: HWND) -> Option<Change> {
         let (_, key, loaded) = self.edits.iter().find(|(h, _, _)| *h == edit)?;
@@ -2123,6 +2206,16 @@ impl Settings {
                     let (sx, sy, sw) = swatch_rect(area, k);
                     if lx >= sx && lx < sx + sw && ly >= sy && ly < sy + SWATCH_H && ly >= TOP - 8.0 {
                         return Some(Hit::Swatch(i, k));
+                    }
+                }
+                continue;
+            }
+            if let Ctl::Arrange = r.ctl {
+                let rects: Vec<RECT> = crate::winset::display::arrangement().0.into_iter().map(|(_, r)| r).collect();
+                let (_, boxes) = screen_boxes(self.ctl_rect(i, &r.ctl), &rects);
+                for (j, (bx, by, bw, bh)) in boxes.into_iter().enumerate() {
+                    if lx >= bx && lx < bx + bw && ly >= by && ly < by + bh && ly >= TOP - 8.0 {
+                        return Some(Hit::Screen(i, j));
                     }
                 }
                 continue;
@@ -2178,6 +2271,15 @@ impl Settings {
             self.invalidate();
             return;
         }
+        if let Some(d) = &mut self.screen_drag {
+            let at = (x as f32 / self.k, y as f32 / self.k);
+            d.at = at;
+            if (at.0 - d.start.0).hypot(at.1 - d.start.1) > 4.0 {
+                d.moved = true;
+            }
+            self.invalidate();
+            return;
+        }
         if let Some((i, _)) = self.drag {
             if let Some(v) = self.slider_value(i, x) {
                 self.drag = Some((i, v));
@@ -2222,6 +2324,15 @@ impl Settings {
                 let value = theme::THEMES.get(k)?.key;
                 self.invalidate();
                 (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
+            }
+            Hit::Screen(i, j) => {
+                let at = (x as f32 / self.k, y as f32 / self.k);
+                self.screen_drag = Some(ScreenDrag { row: i, screen: j, start: at, at, moved: false });
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+                self.invalidate();
+                None
             }
             Hit::Tile(i, j, k) => {
                 let r = self.rows().into_iter().nth(i)?;
@@ -2294,6 +2405,28 @@ impl Settings {
     }
 
     pub fn on_up(&mut self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Change> {
+        if let Some(d) = self.screen_drag.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            self.invalidate();
+            if !d.moved {
+                // A click: the settings below are for that screen now.
+                crate::winset::display::select(d.screen);
+                return None;
+            }
+            let r = self.rows().into_iter().nth(d.row)?;
+            let rects: Vec<RECT> = crate::winset::display::arrangement().0.into_iter().map(|(_, r)| r).collect();
+            let (px, _) = screen_boxes(self.ctl_rect(d.row, &r.ctl), &rects);
+            let me = rects.get(d.screen)?;
+            let (nx, ny) = (x as f32 / self.k - d.start.0, y as f32 / self.k - d.start.1);
+            let (left, top) = (me.left + (nx * px) as i32, me.top + (ny * px) as i32);
+            let screen = d.screen;
+            // Moving the screens tells every window (Cascade's too) as it
+            // happens, so it's done away from this window's handler.
+            std::thread::spawn(move || crate::winset::display::move_screen(screen, left, top));
+            return None;
+        }
         if let Some(d) = self.tile_drag.take() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -2491,7 +2624,7 @@ impl Settings {
                             dx += 15.0;
                         }
                         let dw = text_w - (dx - x0 - 18.0);
-                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery) {
+                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange) {
                             p.text(&desc, &f.small, dx, y + 34.0, dw, 18.0, Align::Left, tone);
                         } else {
                             // Wrapped onto as many lines as the row was sized for.
@@ -2742,6 +2875,87 @@ impl Settings {
                                     theme::accent(),
                                     1.5,
                                 );
+                            }
+                        }
+                        Ctl::Arrange => {
+                            let area = (cx, cy, cwid, ch);
+                            p.rrect(cx, cy, cwid, ch, 10.0, Color::white(0.025));
+                            p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 10.0, Color::white(0.06), 1.0);
+                            let (list, chosen) = crate::winset::display::arrangement();
+                            let rects: Vec<RECT> = list.iter().map(|(_, r)| *r).collect();
+                            let (px, boxes) = screen_boxes(area, &rects);
+                            let drag = self.screen_drag.filter(|d| d.row == i && d.moved);
+                            let screen = |p: &Painter,
+                                          j: usize,
+                                          (bx, by, bw, bh): (f32, f32, f32, f32),
+                                          lifted: bool| {
+                                let picked = j == chosen;
+                                let hovered = self.hovered == Some(Hit::Screen(i, j));
+                                let fill = if lifted {
+                                    Color(0.22, 0.22, 0.25, 1.0)
+                                } else if picked {
+                                    theme::accent().alpha(0.30)
+                                } else {
+                                    Color::white(if hovered { 0.12 } else { 0.08 })
+                                };
+                                if lifted {
+                                    p.rrect(bx + 3.0, by + 5.0, bw, bh, 6.0, Color(0.0, 0.0, 0.0, 0.35));
+                                }
+                                p.rrect(bx, by, bw, bh, 6.0, fill);
+                                let (edge, thick) =
+                                    if picked || lifted { (theme::accent(), 2.0) } else { (Color::white(0.22), 1.0) };
+                                p.stroke_rrect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 6.0, edge, thick);
+                                p.text(
+                                    &(j + 1).to_string(),
+                                    &f.big,
+                                    bx,
+                                    by,
+                                    bw,
+                                    bh - 6.0,
+                                    Align::Center,
+                                    Color::white(0.95),
+                                );
+                                if bh > 70.0 {
+                                    let name = if j == 0 { format!("{} (main)", list[j].0) } else { list[j].0.clone() };
+                                    p.text(
+                                        &name,
+                                        &f.small,
+                                        bx + 6.0,
+                                        by + bh - 24.0,
+                                        bw - 12.0,
+                                        18.0,
+                                        Align::Center,
+                                        Color::white(0.7),
+                                    );
+                                }
+                            };
+                            for (j, b) in boxes.iter().enumerate() {
+                                if drag.is_some_and(|d| d.screen == j) {
+                                    continue;
+                                }
+                                screen(&p, j, *b, false);
+                            }
+                            if let Some(d) = drag {
+                                let (dx, dy) = (d.at.0 - d.start.0, d.at.1 - d.start.1);
+                                if let (Some(b), Some(me)) = (boxes.get(d.screen), rects.get(d.screen)) {
+                                    // Where it will land, outlined, under the one being dragged.
+                                    let (left, top) = (me.left + (dx * px) as i32, me.top + (dy * px) as i32);
+                                    if let Some((sx, sy)) = crate::winset::display::snap(&rects, d.screen, left, top) {
+                                        let (gx, gy) =
+                                            (b.0 + (sx - me.left) as f32 / px, b.1 + (sy - me.top) as f32 / px);
+                                        p.rrect(gx, gy, b.2, b.3, 6.0, theme::accent().alpha(0.12));
+                                        p.stroke_rrect(
+                                            gx + 0.75,
+                                            gy + 0.75,
+                                            b.2 - 1.5,
+                                            b.3 - 1.5,
+                                            6.0,
+                                            theme::accent().alpha(0.7),
+                                            1.5,
+                                        );
+                                    }
+                                    screen(&p, d.screen, (b.0 + dx, b.1 + dy, b.2, b.3), true);
+                                }
                             }
                         }
                         Ctl::Note | Ctl::Heading => {}
