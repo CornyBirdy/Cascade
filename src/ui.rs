@@ -297,7 +297,19 @@ enum Hot {
     MediaSource,
     /// The battery's level (Home and Media): click to swap it for the time left.
     Battery,
+    /// Controls' quick toggles (see `QUICK`).
+    Quick(usize),
 }
+
+/// Controls' row of quick toggles: (label, the Windows setting it flips; see `winset`).
+const QUICK: [(&str, &str); 4] = [
+    ("Airplane", "win_airplane"),
+    ("Night light", "win_night"),
+    ("Hotspot", "win_hotspot"),
+    ("Do not disturb", "win_dnd"),
+];
+/// Their row's height (Controls' sliders and mixer sit below it).
+const QUICK_H: f32 = 44.0;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -1926,7 +1938,7 @@ impl App {
                 Mode::Media => (420.0, 102.0 + TAB_BAR, 28.0),
                 Mode::Controls if self.wifi_open => (420.0, self.wifi_layout().total + TAB_BAR, 30.0),
                 Mode::Controls if self.bt_open => (420.0, self.bt_layout().total + TAB_BAR, 30.0),
-                Mode::Controls => (420.0, 154.0 + TAB_BAR + self.mixer_h(), 30.0),
+                Mode::Controls => (420.0, 154.0 + QUICK_H + TAB_BAR + self.mixer_h(), 30.0),
                 Mode::Calendar => (420.0, 194.0 + TAB_BAR + self.agenda_h(), 30.0),
             },
         };
@@ -2929,6 +2941,12 @@ impl App {
                 // (Cascade lets an injected Win+A through even when it takes the key).
                 shell::win_combo(b'A' as u16);
                 self.expanded = false;
+            }
+            Hot::Quick(i) => {
+                let (_, key) = QUICK[i];
+                let on = crate::winset::get(key) == "true";
+                crate::winset::set(key, if on { "false" } else { "true" });
+                self.dirty = true;
             }
             Hot::VolumeBar | Hot::BrightnessBar | Hot::AppBar(_) => {}
         }
@@ -5473,8 +5491,12 @@ impl App {
                 for (i, h) in [Hot::Wifi, Hot::Bluetooth, Hot::Notifications].into_iter().enumerate() {
                     out.push((h, 18.0 + i as f32 * (tile_w + 8.0), 14.0, tile_w, 54.0));
                 }
-                out.push((Hot::VolumeBar, 44.0, 84.0, tw - 98.0, 24.0));
-                out.push((Hot::BrightnessBar, 44.0, 118.0, tw - 98.0, 24.0));
+                let qw = (tw - 36.0 - 3.0 * 8.0) / QUICK.len() as f32;
+                for i in 0..QUICK.len() {
+                    out.push((Hot::Quick(i), 18.0 + i as f32 * (qw + 8.0), 76.0, qw, 32.0));
+                }
+                out.push((Hot::VolumeBar, 44.0, 84.0 + QUICK_H, tw - 98.0, 24.0));
+                out.push((Hot::BrightnessBar, 44.0, 118.0 + QUICK_H, tw - 98.0, 24.0));
                 for (hot, y, h) in self.mixer_rows() {
                     let (x, w) = match hot {
                         Hot::AppMute(_) => (18.0, MIX_SLIDER_X - 26.0),
@@ -6196,10 +6218,24 @@ impl App {
                 p.line(cx + 2.5, cy, cx - 2.5, cy + 5.0, c, 1.6);
             }
         }
+        // Quick toggles: airplane mode, night light, hotspot, Do Not Disturb.
+        let qw = (tw - 36.0 - 3.0 * 8.0) / QUICK.len() as f32;
+        for (i, (label, key)) in QUICK.iter().enumerate() {
+            let x = ox + 18.0 + i as f32 * (qw + 8.0);
+            let on = crate::winset::get(key) == "true";
+            let hovered = self.hovered == Some(Hot::Quick(i));
+            let fill = if on {
+                theme::accent().alpha(alpha * if hovered { 1.0 } else { 0.9 })
+            } else {
+                Color::white(if hovered { 0.13 } else { 0.08 } * alpha)
+            };
+            p.rrect(x, 76.0, qw, 32.0, 10.0, fill);
+            p.text(label, &fonts.small, x + 4.0, 76.0, qw - 8.0, 32.0, Align::Center, Color::white(0.92 * alpha));
+        }
         // Sliders.
         let rows = [
-            (Hot::VolumeBar, 96.0, self.vol.0, self.vol.1),
-            (Hot::BrightnessBar, 130.0, self.brightness as f32 / 100.0, !self.brightness_ok),
+            (Hot::VolumeBar, 96.0 + QUICK_H, self.vol.0, self.vol.1),
+            (Hot::BrightnessBar, 130.0 + QUICK_H, self.brightness as f32 / 100.0, !self.brightness_ok),
         ];
         for (hot, cy, value, dim) in rows {
             let white = Color::white(if dim { 0.4 } else { 0.95 } * alpha);
@@ -6500,7 +6536,7 @@ struct WifiLayout {
     total: f32,
 }
 
-const MIX_TOP: f32 = 148.0;
+const MIX_TOP: f32 = 148.0 + QUICK_H;
 const MIX_GAP: f32 = 10.0;
 const MIX_ROW: f32 = 28.0;
 const MIX_ITEM_H: f32 = 26.0;
