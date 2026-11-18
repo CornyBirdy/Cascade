@@ -367,6 +367,7 @@ pub fn action(key: &str, owner: HWND) {
         "win_cleanup" => open("cleanmgr.exe"),
         "win_update" => system::check_updates(),
         "win_taskmgr" => open("taskmgr.exe"),
+        "update_branch" => crate::update::pick_channel(owner),
         _ => {}
     }
 }

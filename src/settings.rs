@@ -1019,6 +1019,7 @@ fn rows(section: usize) -> Vec<Row> {
         ],
         9 => vec![
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
+            row("update_branch", "Update from", "Stable releases, or the newest build of a branch.", Pick),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("changelog", "What's new", "What changed in each build.", Button("Open changelog")),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),

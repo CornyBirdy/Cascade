@@ -4,8 +4,16 @@
 //! `cascade.exe` attached, and stamps N into the exe (`CASCADE_BUILD`). The
 //! updater compares numbers, downloads the newer exe next to the running one,
 //! swaps the files (Windows allows renaming a running exe) and restarts.
+//!
+//! Every other branch gets one pre-release, `branch-<name>`, replaced on each
+//! push and named `<branch> (build N)`. Settings > Updates > Update from picks
+//! the branch (`update_branch`; empty for the default branch's releases), and
+//! switching installs that branch's newest build even when its number is lower.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+use windows::Win32::Foundation::HWND;
 
 use crate::http;
 use crate::msg;
@@ -17,7 +25,57 @@ pub fn current() -> u32 {
     option_env!("CASCADE_BUILD").and_then(|b| b.parse().ok()).unwrap_or(0)
 }
 
+/// The channel this exe came from: "" for the default branch (and local
+/// builds), else the branch's name.
+pub fn running_channel() -> &'static str {
+    let branch = option_env!("CASCADE_BRANCH").unwrap_or("");
+    if branch.is_empty() || Some(branch) == option_env!("CASCADE_DEFAULT_BRANCH") {
+        ""
+    } else {
+        branch
+    }
+}
+
+/// The chosen channel and the token, set from the config (`configure`).
+static SETUP: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+
+/// Called with the config's `update_branch` and `github_token` whenever it loads.
+pub fn configure(channel: &str, token: &str) {
+    *SETUP.lock().unwrap_or_else(|e| e.into_inner()) = (channel.trim().to_string(), token.to_string());
+}
+
+fn setup() -> (String, String) {
+    SETUP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// What Settings shows for a channel.
+pub fn channel_label(channel: &str) -> String {
+    if channel.is_empty() {
+        "Stable".into()
+    } else {
+        channel.into()
+    }
+}
+
+/// A branch's release tag: `/` isn't kept in tags the API can look up.
+fn tag_for(branch: &str) -> String {
+    let slug: String = branch
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' { c } else { '-' })
+        .collect();
+    format!("branch-{slug}")
+}
+
+/// `<branch> (build N)`, a branch release's name, split.
+fn parse_branch_name(name: &str) -> Option<(String, u32)> {
+    let at = name.rfind(" (build ")?;
+    let build = name[at + 8..].trim_end_matches(')').parse().ok()?;
+    Some((name[..at].to_string(), build))
+}
+
 // Outcomes posted as `msg::UPDATE` (wparam = outcome, lparam = build).
+/// A channel was picked in Settings (lparam 1: install from it now).
+pub const PICKED: usize = 7;
 pub const AVAILABLE: usize = 1;
 pub const UP_TO_DATE: usize = 2;
 pub const INSTALLING: usize = 3;
@@ -43,9 +101,10 @@ fn get(url: &str, headers: &[(&'static str, String)], follow: bool) -> Option<ht
     http::get(url, &refs, follow)
 }
 
-/// Latest release, or Err(true) when GitHub refused access (private repo).
-fn latest(token: &str) -> Result<Release, bool> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+/// GET from the API: the body, or Err(true) when GitHub refused access
+/// (a private repo without a token, or a missing release), Err(false) otherwise.
+fn api(path: &str, token: &str) -> Result<String, bool> {
+    let url = format!("https://api.github.com/repos/{REPO}/{path}");
     let r = get(&url, &headers(token, "application/vnd.github+json"), true).ok_or(false)?;
     if r.status == 404 || r.status == 401 || r.status == 403 {
         return Err(true);
@@ -53,12 +112,90 @@ fn latest(token: &str) -> Result<Release, bool> {
     if r.status != 200 {
         return Err(false);
     }
-    let body = String::from_utf8_lossy(&r.body);
-    let tag = http::string_after(&body, "\"tag_name\":").ok_or(false)?;
-    let build = tag.trim_start_matches("build-").parse().map_err(|_| false)?;
-    let assets = &body[body.find("\"assets\":").ok_or(false)?..];
-    let asset_url = exe_asset_url(assets).ok_or(false)?;
-    Ok(Release { build, asset_url })
+    Ok(String::from_utf8_lossy(&r.body).into_owned())
+}
+
+/// One release's JSON: its build number (from the tag, or from the name of
+/// a branch release) and its exe.
+fn parse_release(body: &str) -> Option<Release> {
+    let tag = http::string_after(body, "\"tag_name\":")?;
+    let build = match tag.strip_prefix("build-") {
+        Some(n) => n.parse().ok()?,
+        None => parse_branch_name(&http::string_after(body, "\"name\":")?)?.1,
+    };
+    let assets = &body[body.find("\"assets\":")?..];
+    Some(Release { build, asset_url: exe_asset_url(assets)? })
+}
+
+/// The newest build on `channel` ("" for the default branch's releases).
+fn latest(channel: &str, token: &str) -> Result<Release, bool> {
+    let body = if channel.is_empty() {
+        api("releases/latest", token)?
+    } else {
+        api(&format!("releases/tags/{}", tag_for(channel)), token)?
+    };
+    parse_release(&body).ok_or(false)
+}
+
+/// The branches with a build to update from, newest build first.
+fn branches(body: &str) -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = body
+        .split("\"tag_name\":")
+        .skip(1)
+        .filter_map(|r| {
+            // Each piece starts at a release's tag, then its name.
+            let tag = http::string_after(&format!("\"t\":{r}"), "\"t\":")?;
+            tag.starts_with("branch-").then_some(())?;
+            parse_branch_name(&http::string_after(r, "\"name\":")?)
+        })
+        .collect();
+    out.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|b| seen.insert(b.0.clone()));
+    out
+}
+
+/// Whether to install `r`: newer on the same channel, or anything on another one.
+fn wanted(r: &Release, channel: &str) -> bool {
+    r.build > current() || channel != running_channel()
+}
+
+/// Settings > Updates > Update from: lists Stable and every branch with a
+/// build, and keeps the choice (offering to install from it straight away).
+pub fn pick_channel(owner: HWND) {
+    let (channel, token) = setup();
+    // A short wait on the network, on a thread so a slow answer can be left.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(api("releases?per_page=100", &token));
+    });
+    let body = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(b)) => b,
+        Ok(Err(true)) => {
+            crate::winset::tell("Can't reach the GitHub repo. If it is private, add a GitHub token below.".into());
+            return;
+        }
+        _ => {
+            crate::winset::tell("Couldn't reach GitHub. Try again in a moment.".into());
+            return;
+        }
+    };
+    let mut keys = vec![String::new()];
+    let mut options = vec!["Stable (the default branch's releases)".to_string()];
+    for (branch, build) in branches(&body) {
+        options.push(format!("{branch}  \u{b7}  build {build}"));
+        keys.push(branch);
+    }
+    let current = keys.iter().position(|k| *k == channel);
+    let Some(i) = crate::winset::pick(owner, &options, current) else { return };
+    let chosen = keys.swap_remove(i);
+    crate::config::Config::set("update_branch", &chosen);
+    let install = chosen != running_channel()
+        && crate::winset::confirm(
+            owner,
+            &format!("Install the newest build from {} now? Cascade restarts.", channel_label(&chosen)),
+        );
+    msg::post(msg::UPDATE, PICKED, install as isize);
 }
 
 /// The API url of the asset named `cascade.exe` (a release may carry other
@@ -122,12 +259,13 @@ fn swap_and_relaunch(bytes: &[u8]) -> bool {
 }
 
 /// Background check: posts AVAILABLE when a newer build exists.
-pub fn spawn_checker(token: String) {
+pub fn spawn_checker() {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(20));
         loop {
-            if let Ok(r) = latest(&token) {
-                if r.build > current() {
+            let (channel, token) = setup();
+            if let Ok(r) = latest(&channel, &token) {
+                if wanted(&r, &channel) {
                     msg::post(msg::UPDATE, AVAILABLE, r.build as isize);
                 }
             }
@@ -137,14 +275,15 @@ pub fn spawn_checker(token: String) {
 }
 
 /// The one-click update: check, download, swap, restart.
-pub fn spawn_install(token: String) {
+pub fn spawn_install() {
     std::thread::spawn(move || {
-        let release = match latest(&token) {
+        let (channel, token) = setup();
+        let release = match latest(&channel, &token) {
             Ok(r) => r,
             Err(true) => return void(msg::post(msg::UPDATE, NO_ACCESS, 0)),
             Err(false) => return void(msg::post(msg::UPDATE, FAILED, 0)),
         };
-        if release.build <= current() {
+        if !wanted(&release, &channel) {
             msg::post(msg::UPDATE, UP_TO_DATE, current() as isize);
             return;
         }
@@ -174,5 +313,17 @@ mod tests {
         assert_eq!(exe_asset_url(only), Some("https://api/assets/9".into()));
         let other = r#""assets":[{"url":"https://api/assets/5","id":5,"name":"other.exe"}]"#;
         assert_eq!(exe_asset_url(other), Some("https://api/assets/5".into()));
+    }
+
+    #[test]
+    fn reads_branch_releases() {
+        assert_eq!(parse_branch_name("claude/x-y (build 240)"), Some(("claude/x-y".into(), 240)));
+        assert_eq!(parse_branch_name("Cascade build 12"), None);
+        assert_eq!(tag_for("claude/x-y"), "branch-claude-x-y");
+        let list = r#"[{"url":"u","tag_name":"branch-a-b","target_commitish":"s","name":"a/b (build 9)","assets":[{"url":"https://api/assets/1","name":"cascade.exe"}],"body":"x"},{"tag_name":"build-7","name":"Cascade build 7","assets":[]},{"tag_name":"branch-c","name":"c (build 12)","assets":[{"url":"https://api/assets/3","name":"cascade.exe"}]}]"#;
+        assert_eq!(branches(list), vec![("c".to_string(), 12), ("a/b".to_string(), 9)]);
+        let one = r#"{"tag_name":"branch-a-b","name":"a/b (build 9)","assets":[{"url":"https://api/assets/1","id":1,"name":"cascade.exe"}]}"#;
+        let r = parse_release(one).unwrap();
+        assert_eq!((r.build, r.asset_url.as_str()), (9, "https://api/assets/1"));
     }
 }

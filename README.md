@@ -180,6 +180,8 @@ Right-click the notch, taskbar or tray icon and choose **Update Cascade**. One c
 
 Every push to the default branch is published as a GitHub release (`build-N`), and that's where the updater looks. While the repo is **private**, GitHub only serves releases to signed-in users. In that case, create a fine-grained token with read-only *Contents* access to this repo and paste it after `github_token =` in the config file. If the repo is public, no token is needed.
 
+**Updating from a branch.** Every other branch keeps one pre-release (`branch-<name>`), replaced on each push. Settings > Updates > **Update from** lists *Stable* and each branch with its newest build number. Pick one and Cascade offers to install that build straight away (even an older build, when you're switching). From then on, Update Cascade and the automatic check follow that branch, until you pick Stable again.
+
 To build it yourself, install [Rust](https://rustup.rs) on Windows and run `cargo build --release`. The exe lands in `target\release\cascade.exe`.
 
 ## Why it's light
@@ -242,7 +244,7 @@ Cascade also never injects code into Explorer or patches Windows files, unlike E
 | `src/pomodoro.rs` | Focus timer |
 | `src/calendar.rs`, `src/ics.rs` | Your calendar's events, from its iCal link |
 | `src/icons.rs` | App icons and names |
-| `src/update.rs` | One-click updates from GitHub releases |
+| `src/update.rs` | One-click updates from GitHub releases, from Stable or a branch |
 | `src/http.rs` | Tiny WinHTTP client |
 | `src/shell.rs` | Tray, autostart, fullscreen, taskbar, flyout, menus |
 | `src/config.rs` | `config.ini` |

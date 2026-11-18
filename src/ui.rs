@@ -1059,6 +1059,7 @@ fn setting_value(cfg: &Config, key: &str) -> String {
         k if k.starts_with("win_") => crate::winset::get(k),
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
+        "update_branch" => update::channel_label(&cfg.update_branch),
         _ => cfg.get(key),
     }
 }
@@ -1437,8 +1438,9 @@ impl App {
         if self.cfg.launcher && self.cfg.start_show_recent {
             launcher::spawn_recent();
         }
+        update::configure(&self.cfg.update_branch, &self.cfg.github_token);
         if self.cfg.update_check {
-            update::spawn_checker(self.cfg.github_token.clone());
+            update::spawn_checker();
         }
         self.apply_taskbar();
         self.update_display();
@@ -2800,6 +2802,13 @@ impl App {
 
     fn on_update(&mut self, outcome: usize, build: u32) {
         match outcome {
+            update::PICKED => {
+                self.update_available = None;
+                self.reload_config();
+                if build == 1 {
+                    self.on_menu(MenuCmd::Update);
+                }
+            }
             update::AVAILABLE => {
                 if self.update_available != Some(build) {
                     self.update_available = Some(build);
@@ -3586,7 +3595,7 @@ impl App {
                 if !self.updating {
                     self.updating = true;
                     self.notify("Checking for updates\u{2026}".into(), theme::accent(), false);
-                    update::spawn_install(self.cfg.github_token.clone());
+                    update::spawn_install();
                 }
             }
             MenuCmd::Settings => self.open_settings(),
@@ -3603,6 +3612,7 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        update::configure(&self.cfg.update_branch, &self.cfg.github_token);
         self.cfg.save_battery(self.power);
         theme::set(&self.cfg.theme);
         theme::set_colour(&self.cfg.theme_color, self.cfg.theme_hue, self.cfg.theme_intensity);
@@ -3842,7 +3852,7 @@ impl App {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
             Change::Set(key, v) if key.starts_with("win_") => crate::winset::set(key, &v),
             // Run once this handler has returned: pickers and some buttons wait for an answer.
-            Change::Action(key) if key.starts_with("win_") => crate::winset::queue(key),
+            Change::Action(key) if key.starts_with("win_") || key == "update_branch" => crate::winset::queue(key),
             Change::Set("shell_mode", v) => {
                 let on = v == "true";
                 shellmode::set_registered(on);

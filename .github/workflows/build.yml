@@ -5,6 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run at a time per branch, so its release is replaced in order.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -13,6 +18,9 @@ jobs:
     env:
       # Stamped into the exe; the in-app updater compares it with releases.
       CASCADE_BUILD: ${{ github.run_number }}
+      # Which branch it came from, for updating from a branch (see src/update.rs).
+      CASCADE_BRANCH: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      CASCADE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -66,3 +74,16 @@ jobs:
             setup/target/release/CascadeSetup.exe
           make_latest: true
           body_path: release-notes.md
+      # Every other branch keeps one pre-release, replaced on each push, that
+      # the app can update to when Settings > Updates > Update from picks it.
+      - name: Branch release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="branch-$(printf '%s' "$GITHUB_REF_NAME" | sed 's/[^A-Za-z0-9._-]/-/g')"
+          gh release delete "$tag" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$tag" target/release/cascade.exe setup/target/release/CascadeSetup.exe \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "$GITHUB_REF_NAME (build $CASCADE_BUILD)" --notes-file release-notes.md

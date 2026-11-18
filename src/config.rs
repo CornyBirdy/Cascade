@@ -281,6 +281,9 @@ weather_url =
 # ---- Updates ----
 # Check GitHub for a newer build every few hours (right-click > Update to install).
 update_check = true
+# Which builds to update to: empty for the default branch's releases, or a
+# branch's name for its newest build (Settings > Updates > Update from).
+update_branch =
 # Only needed while the GitHub repo is private: a fine-grained token with
 # read-only \"Contents\" access to CornyBirdy/Cascade.
 github_token =
@@ -408,6 +411,7 @@ pub struct Config {
     pub weather_url: String,
     pub fahrenheit: bool,
     pub update_check: bool,
+    pub update_branch: String,
     pub github_token: String,
     pub max_fps: u32,
     pub perf_log: bool,
@@ -528,6 +532,7 @@ impl Default for Config {
             weather_url: String::new(),
             fahrenheit: false,
             update_check: true,
+            update_branch: String::new(),
             github_token: String::new(),
             max_fps: 144,
             perf_log: false,
@@ -805,6 +810,7 @@ impl Config {
                 "weather_url" => c.weather_url = v.trim_matches('"').to_string(),
                 "fahrenheit" => set_b(&mut c.fahrenheit),
                 "update_check" => set_b(&mut c.update_check),
+                "update_branch" => c.update_branch = v.trim_matches('"').to_string(),
                 "github_token" => c.github_token = v.trim_matches('"').to_string(),
                 "max_fps" => set_u(&mut c.max_fps, 15.0, 500.0),
                 "perf_log" => set_b(&mut c.perf_log),
@@ -956,6 +962,7 @@ impl Config {
             "weather_url" => self.weather_url.clone(),
             "fahrenheit" => b(self.fahrenheit),
             "update_check" => b(self.update_check),
+            "update_branch" => self.update_branch.clone(),
             "github_token" => self.github_token.clone(),
             "max_fps" => self.max_fps.to_string(),
             "perf_log" => b(self.perf_log),
