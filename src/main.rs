@@ -16,6 +16,7 @@ mod deskicons;
 mod deskosd;
 mod desktops;
 mod devices;
+mod dictate;
 mod dock;
 mod drop;
 mod ducker;

@@ -1130,6 +1130,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_camera", "Camera", "Let apps use the camera.", Toggle),
             row("win_mic_access", "Microphone", "Let apps use the microphone.", Toggle),
             row("win_location", "Location", "Let apps know where this PC is.", Toggle),
+            row(
+                "win_speech",
+                "Online speech recognition",
+                "Lets dictation (Win+H) use Microsoft's speech service.",
+                Toggle,
+            ),
             heading("h_access", "Accessibility"),
             row("win_magnifier", "Magnifier", "Zooms in on part of the screen (Win++).", Button("Open")),
             row("win_narrator", "Narrator", "Reads the screen aloud.", Button("Open")),

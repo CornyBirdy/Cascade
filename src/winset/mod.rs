@@ -249,6 +249,7 @@ pub fn get(key: &str) -> String {
         "win_timezone" => system::timezone_label(),
         "win_camera" | "win_mic_access" | "win_location" | "win_toasts" => b(system::flag(key)),
         "win_dnd" => b(dnd()),
+        "win_speech" => b(crate::dictate::online_allowed()),
         _ => String::new(),
     }
 }
@@ -306,6 +307,7 @@ pub fn set(key: &str, v: &str) {
         "win_dark_apps" | "win_dark_windows" | "win_transparency" | "win_accent_bars" => look::set_flag(key, on),
         "win_camera" | "win_mic_access" | "win_location" | "win_toasts" => system::set_flag(key, on),
         "win_dnd" => set_dnd(on),
+        "win_speech" => crate::dictate::set_online_allowed(on),
         _ => {}
     }
 }

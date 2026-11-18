@@ -1242,6 +1242,8 @@ pub enum Hotkey {
     Project,
     /// Win+. or Win+;: the emoji panel.
     Emoji,
+    /// Win+H: dictation.
+    Dictate,
     Snip,
     Magnifier,
     TaskManager,
@@ -1292,6 +1294,7 @@ fn hotkeys() -> Vec<(u32, u32, Hotkey)> {
         (WIN, b'P' as u32, Hotkey::Project),
         (WIN, 0xBE, Hotkey::Emoji),
         (WIN, 0xBA, Hotkey::Emoji),
+        (WIN, b'H' as u32, Hotkey::Dictate),
     ];
     for n in 0..9u32 {
         keys.push((WIN, b'1' as u32 + n, Hotkey::App(n as usize)));
@@ -1337,6 +1340,7 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
         Hotkey::Magnifier => shell::open("magnify.exe"),
         Hotkey::TaskManager => shell::open("taskmgr.exe"),
         Hotkey::DeskStep(right) => crate::vdesk::step(right),
+        Hotkey::Dictate => crate::dictate::toggle(),
         Hotkey::DeskNew => crate::vdesk::create(true),
         Hotkey::DeskClose => crate::vdesk::close(crate::vdesk::read().current),
         // Windows' Snipping Tool is a Store app: Cascade's own snip instead.
