@@ -2448,6 +2448,24 @@ impl App {
             return Some(LRESULT(0));
         }
         if m == self.shell_msg && m != 0 {
+            // A window is being minimised (or brought back): Windows asks
+            // the shell where its taskbar button is, to animate it into (or
+            // out of) that button.
+            const HSHELL_GETMINRECT: u32 = 5;
+            if wp.0 as u32 == HSHELL_GETMINRECT && lp.0 != 0 {
+                #[repr(C)]
+                struct ShellHookInfo {
+                    hwnd: HWND,
+                    rc: RECT,
+                }
+                let info = unsafe { &mut *(lp.0 as *mut ShellHookInfo) };
+                let rect = std::iter::once(&self.dock).chain(self.screens.iter()).find_map(|d| d.min_rect(info.hwnd));
+                if let Some(r) = rect {
+                    info.rc = r;
+                    return Some(LRESULT(1));
+                }
+                return Some(LRESULT(0));
+            }
             self.on_shell(wp.0 as u32, HWND(lp.0 as *mut _));
             return Some(LRESULT(0));
         }
@@ -3403,6 +3421,14 @@ impl App {
         if event == EVENT_SYSTEM_MOVESIZESTART {
             crate::snapdrag::on_start(hwnd);
             return;
+        }
+        // Its taskbar button takes it in (or lets it out).
+        if event == EVENT_SYSTEM_MINIMIZESTART || event == EVENT_SYSTEM_MINIMIZEEND {
+            let into = event == EVENT_SYSTEM_MINIMIZESTART;
+            self.dock.on_minimize(hwnd, into);
+            for d in &mut self.screens {
+                d.on_minimize(hwnd, into);
+            }
         }
         // A window was minimised: Windows may leave a stub of it on the screen; once it has, move it off.
         if event == EVENT_SYSTEM_MINIMIZESTART && shellmode::active() {

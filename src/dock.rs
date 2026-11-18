@@ -124,6 +124,9 @@ pub struct DockApp {
     presence: Spring,
     mag: Spring,
     bounce: Spring,
+    /// A dip as a window of it is minimised into it (and a small hop as one
+    /// comes back out).
+    dip: Spring,
     /// How far it's drawn from its place, easing to 0: it slides over when
     /// the apps are reordered.
     slide: Spring,
@@ -138,6 +141,7 @@ impl DockApp {
             presence: Spring::new(0.0, 380.0, 30.0),
             mag: Spring::new(0.0, 520.0, 34.0),
             bounce: Spring::new(0.0, 260.0, 9.0),
+            dip: Spring::new(0.0, 320.0, 15.0),
             slide: Spring::new(0.0, SLIDE_STIFFNESS, SLIDE_DAMPING),
         }
     }
@@ -1762,6 +1766,16 @@ impl Dock {
         }
     }
 
+    /// `window` is being minimised (`into`) into its button, or coming back
+    /// out of it: the button takes it in with a dip, or lets it go with a hop.
+    pub fn on_minimize(&mut self, window: HWND, into: bool) {
+        let root = unsafe { GetAncestor(window, GA_ROOTOWNER) };
+        if let Some(app) = self.apps.iter_mut().find(|a| a.windows.contains(&window) || a.windows.contains(&root)) {
+            app.dip.kick(if into { -9.0 } else { 6.0 });
+            self.dirty = true;
+        }
+    }
+
     pub fn launch_new(&mut self, i: usize) {
         if let Some(app) = self.apps.get_mut(i) {
             shell::open(&app.id);
@@ -1850,7 +1864,11 @@ impl Dock {
                 || self
                     .apps
                     .iter()
-                    .any(|a| !a.presence.settled() || !a.mag.settled() || !a.bounce.settled() || !a.slide.settled()))
+                    .any(|a| !a.presence.settled()
+                        || !a.mag.settled()
+                        || !a.bounce.settled()
+                        || !a.dip.settled()
+                        || !a.slide.settled()))
     }
 
     /// Steps springs; returns true while the size or position is changing.
@@ -1874,6 +1892,7 @@ impl Dock {
             moving |= a.presence.step(dt);
             moving |= a.mag.step(dt);
             moving |= a.bounce.step(dt);
+            moving |= a.dip.step(dt);
             moving |= a.slide.step(dt);
         }
         for s in &mut self.chip_slide {
@@ -2078,7 +2097,7 @@ impl Dock {
                     p.rrect(s.x, by, s.w, b, 5.0, c.alpha(presence));
                 }
                 let size = self.icon * (1.0 + self.magnify * a.mag.value) * presence;
-                let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0 - lift;
+                let iy = by + (b - size) / 2.0 - 1.0 - a.bounce.value.max(0.0) * 6.0 - a.dip.value * 8.0 - lift;
                 match app_icons.get(i).cloned().flatten() {
                     // Always pixel for pixel, so it's sharp.
                     Some(bmp) => p.icon(&bmp, cx, iy + size / 2.0, presence),
@@ -2420,7 +2439,7 @@ impl Dock {
             && self
                 .apps
                 .iter()
-                .all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled() && a.slide.settled())
+                .all(|a| a.presence.settled() && a.mag.settled() && a.bounce.settled() && a.dip.settled() && a.slide.settled())
     }
 
     /// Redraws only the music widget, for the visualizer's bars: its patch of
@@ -2476,6 +2495,25 @@ impl Dock {
     }
 
     /// Screen x of app `i`'s centre (for anchoring the preview).
+    /// Where `window`'s button is on screen (pixels), for Windows to shrink
+    /// the window into as it's minimised (and grow it out of as it comes
+    /// back). None if it has no button here, or the taskbar isn't showing.
+    pub fn min_rect(&self, window: HWND) -> Option<RECT> {
+        if !self.shown {
+            return None;
+        }
+        let root = unsafe { GetAncestor(window, GA_ROOTOWNER) };
+        let i = self.apps.iter().position(|a| a.windows.contains(&window) || a.windows.contains(&root))?;
+        let span = self.geo.apps.get(i).filter(|s| s.w > 4.0)?;
+        let (k, g) = (self.k, &self.geo);
+        Some(RECT {
+            left: self.screen.left + (span.x * k) as i32,
+            top: self.screen.top + (g.y0 * k) as i32,
+            right: self.screen.left + ((span.x + span.w) * k) as i32,
+            bottom: self.screen.top + (g.y1 * k) as i32,
+        })
+    }
+
     pub fn app_screen_x(&self, i: usize) -> i32 {
         let c = self.geo.apps.get(i).map(|s| s.centre()).unwrap_or(0.0);
         self.screen.left + (c * self.k) as i32
