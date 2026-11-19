@@ -701,13 +701,92 @@ fn apply_work_area(screen: RECT) {
         let (sender, receiver) = channel::<RECT>();
         std::thread::spawn(move || {
             for screen in receiver {
-                set_work_area(screen, wanted_work_area(screen), true);
+                let want = wanted_work_area(screen);
+                set_work_area(screen, want, true);
+                refit_maximized(screen, want);
             }
         });
         *tx = Some(sender);
     }
     if let Some(sender) = tx.as_ref() {
         let _ = sender.send(screen);
+    }
+}
+
+/// Puts back any screen's work area that something else reset: Windows
+/// does when a game changes the resolution and changes it back, when a
+/// screen wakes or is plugged in again, or the scale changes, and some
+/// programs set it themselves. Explorer guards its taskbar's space the same
+/// way. Cheap (a look at each screen), so it's asked often: when windows
+/// change, every couple of seconds, and when Windows says the work area
+/// changed. A screen with a fullscreen app on it (`skip`) is left until it's
+/// gone, so a game isn't told about it mid-play.
+pub fn enforce_work_areas(skip: Option<RECT>) {
+    if !active() {
+        return;
+    }
+    let screens: Vec<RECT> = {
+        let mut v: Vec<RECT> = reserved().iter().map(|e| e.1).collect();
+        v.dedup();
+        v
+    };
+    for screen in screens {
+        if Some(screen) == skip {
+            continue;
+        }
+        // Only a screen that's still there as it was reserved (a screen whose
+        // size changed is reserved again by its taskbar).
+        let (monitor, work) = unsafe {
+            let mon = MonitorFromRect(&screen, MONITOR_DEFAULTTONULL);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if mon.is_invalid() || !GetMonitorInfoW(mon, &mut mi).as_bool() {
+                continue;
+            }
+            (mi.rcMonitor, mi.rcWork)
+        };
+        if monitor != screen {
+            continue;
+        }
+        if work != wanted_work_area(screen) {
+            config::log(&format!(
+                "shell mode: the work area of the screen at {},{} was reset (bottom {}); putting it back",
+                screen.left, screen.top, work.bottom
+            ));
+            apply_work_area(screen);
+        }
+    }
+}
+
+/// Windows maximised while the work area was wrong stay over the taskbar
+/// when it's put right: brings their bottom edge up to the work area's
+/// (keeping them maximised), as Explorer's taskbar does.
+fn refit_maximized(screen: RECT, work: RECT) {
+    let own = unsafe { GetCurrentProcessId() };
+    for h in app_windows_any_state() {
+        unsafe {
+            if !IsZoomed(h).as_bool() {
+                continue;
+            }
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool()
+                || mi.rcMonitor != screen
+            {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == own {
+                continue;
+            }
+            let r = window_rect(h);
+            // A maximised window hangs over the work area by its frame on every side.
+            let frame = (work.top - r.top).max(0);
+            let bottom = work.bottom + frame;
+            if r.bottom > bottom {
+                let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+                let _ = SetWindowPos(h, None, r.left, r.top, r.right - r.left, bottom - r.top, flags);
+            }
+        }
     }
 }
 

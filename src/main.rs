@@ -39,6 +39,7 @@ mod notifications;
 mod nvml;
 mod pomodoro;
 mod preview;
+mod priority;
 mod quickmenu;
 mod radios;
 mod recorder;

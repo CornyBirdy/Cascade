@@ -687,6 +687,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("cards", "Cards"), ("large", "Large"), ("icons", "Icons"), ("list", "List")]),
             ),
             row(
+                "priority",
+                "Priority",
+                "How much of the PC Cascade gets, so the taskbar, Start and the notch never lag behind a game or a busy app.",
+                Choice(&[("high", "High"), ("above_normal", "Above normal"), ("normal", "Normal")]),
+            ),
+            row(
                 "max_fps",
                 "Animation frame cap",
                 "Also limited to your monitor's refresh rate.",

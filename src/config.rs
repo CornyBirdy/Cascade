@@ -289,6 +289,9 @@ update_branch =
 github_token =
 
 # ---- General ----
+# How much of the PC Cascade gets, so the taskbar never lags: high (the
+# default), above_normal or normal.
+priority = high
 # Frame-rate cap while animating (also capped to your refresh rate).
 max_fps = 144
 # Write each surface's render time and frame rate to cascade.log about once a
@@ -417,6 +420,7 @@ pub struct Config {
     pub github_token: String,
     pub max_fps: u32,
     pub perf_log: bool,
+    pub priority: String,
 }
 
 impl Default for Config {
@@ -539,6 +543,7 @@ impl Default for Config {
             github_token: String::new(),
             max_fps: 144,
             perf_log: false,
+            priority: "high".into(),
         }
     }
 }
@@ -818,6 +823,7 @@ impl Config {
                 "github_token" => c.github_token = v.trim_matches('"').to_string(),
                 "max_fps" => set_u(&mut c.max_fps, 15.0, 500.0),
                 "perf_log" => set_b(&mut c.perf_log),
+                "priority" if matches!(v, "high" | "above_normal" | "normal") => c.priority = v.into(),
                 _ => {}
             }
         }
@@ -971,6 +977,7 @@ impl Config {
             "github_token" => self.github_token.clone(),
             "max_fps" => self.max_fps.to_string(),
             "perf_log" => b(self.perf_log),
+            "priority" => self.priority.clone(),
             _ => String::new(),
         }
     }

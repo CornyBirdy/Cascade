@@ -29,7 +29,6 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Registry::HKEY_CURRENT_USER;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-use windows::Win32::System::SystemServices::{SFGAO_FILESYSTEM, SFGAO_FOLDER};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
@@ -180,78 +179,106 @@ pub fn spawn_load() {
     });
 }
 
+/// Explorer's own choices for files: show hidden ones, and Windows' protected ones (desktop.ini).
+fn show_hidden() -> (bool, bool) {
+    let hidden = crate::winset::reg_dword(HKEY_CURRENT_USER, ADVANCED, "Hidden") == Some(1);
+    let system = crate::winset::reg_dword(HKEY_CURRENT_USER, ADVANCED, "ShowSuperHidden") == Some(1);
+    (hidden, hidden && system)
+}
+
+/// The sort key for `sort`: (text, number); the number is a size or (newest
+/// first) a date.
+fn sort_key(sort: Sort, rank: u8, path: &str, meta: Option<&std::fs::Metadata>) -> (String, u64) {
+    match sort {
+        Sort::Name => (String::new(), 0),
+        Sort::Size => (String::new(), meta.map_or(0, |m| if m.is_dir() { 0 } else { m.len() })),
+        Sort::Type => {
+            let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_lowercase());
+            (if rank == 2 { ext.unwrap_or_default() } else { String::new() }, 0)
+        }
+        Sort::Date => {
+            let t = meta.and_then(|m| m.modified().ok());
+            let secs = t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            (String::new(), u64::MAX - secs)
+        }
+    }
+}
+
+/// What the desktop shows, kept in step with the Desktop folders: Windows'
+/// icons that are turned on (from the desktop's namespace), then exactly
+/// what's in your Desktop folder and the public one, read from the disk
+/// (hidden files as Explorer is set to show them).
 unsafe fn load() -> Vec<Item> {
-    let dirs = desktop_dirs();
     let profile = known_folder(&FOLDERID_Profile);
     let sort = Sort::current();
-    // (rank, sort key, item): the key is a number for size and date.
+    // (rank, sort key, number, item).
     let mut out: Vec<(u8, String, u64, Item)> = Vec::new();
     let wic: Option<IWICImagingFactory> = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
-    let Ok(desktop) = SHGetDesktopFolder() else { return Vec::new() };
-    let mut list: Option<IEnumIDList> = None;
-    let flags = (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0) as u32;
-    if desktop.EnumObjects(HWND::default(), flags, &mut list).is_err() {
-        return Vec::new();
+    let icon = |item: &IShellItem| wic.as_ref().and_then(|w| crate::icons::load_icon(item, w).ok()).unwrap_or_default();
+
+    // Windows' icons: This PC, the Recycle Bin, your user folder...
+    if let Ok(desktop) = SHGetDesktopFolder() {
+        let mut list: Option<IEnumIDList> = None;
+        let flags = (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0) as u32;
+        if desktop.EnumObjects(HWND::default(), flags, &mut list).is_ok() {
+            while let Some(list) = list.as_ref() {
+                let mut pidl = [std::ptr::null_mut(); 1];
+                let mut got = 0u32;
+                if list.Next(&mut pidl, Some(&mut got)).is_err() || got == 0 {
+                    break;
+                }
+                let item: Result<IShellItem> = SHCreateItemFromIDList(pidl[0]);
+                CoTaskMemFree(Some(pidl[0] as *const _));
+                let Ok(item) = item else { continue };
+                let (Ok(name), Ok(path)) =
+                    (item.GetDisplayName(SIGDN_NORMALDISPLAY), item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING))
+                else {
+                    continue;
+                };
+                let (name, path) = (take(name), take(path));
+                let wanted = match regitem(&path) {
+                    Some(guid) => windows_icon_shown(guid),
+                    // Your user folder can come as its path rather than its GUID.
+                    None => {
+                        profile.as_deref().is_some_and(|p| same_dir(p, std::path::Path::new(&path)))
+                            && windows_icon_shown(WINDOWS_ICONS[1].0)
+                    }
+                };
+                if wanted {
+                    let pixels = icon(&item);
+                    out.push((0, String::new(), 0, Item { path, name, pixels }));
+                }
+            }
+        }
     }
-    let Some(list) = list else { return Vec::new() };
-    loop {
-        let mut pidl = [std::ptr::null_mut(); 1];
-        let mut got = 0u32;
-        if list.Next(&mut pidl, Some(&mut got)).is_err() || got == 0 {
-            break;
+
+    // The Desktop folders, as they are on the disk.
+    let (hidden, system) = show_hidden();
+    for dir in desktop_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            use std::os::windows::fs::MetadataExt;
+            let Ok(meta) = e.metadata() else { continue };
+            let attrs = meta.file_attributes();
+            const HIDDEN: u32 = 0x2;
+            const SYSTEM: u32 = 0x4;
+            if attrs & HIDDEN != 0 && !(hidden && (attrs & SYSTEM == 0 || system)) {
+                continue;
+            }
+            let path = e.path().to_string_lossy().into_owned();
+            let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(path.as_str()), None) else {
+                continue;
+            };
+            // The shell's name: no extension when Windows hides them, a shortcut without ".lnk".
+            let name = item
+                .GetDisplayName(SIGDN_NORMALDISPLAY)
+                .map(|n| take(n))
+                .unwrap_or_else(|_| e.file_name().to_string_lossy().into_owned());
+            let rank = if meta.is_dir() { 1 } else { 2 };
+            let (key, num) = sort_key(sort, rank, &path, Some(&meta));
+            let pixels = icon(&item);
+            out.push((rank, key, num, Item { path, name, pixels }));
         }
-        let pidl = pidl[0];
-        let item: Result<IShellItem> = SHCreateItemFromIDList(pidl);
-        CoTaskMemFree(Some(pidl as *const _));
-        let Ok(item) = item else { continue };
-        let (Ok(name), Ok(path)) =
-            (item.GetDisplayName(SIGDN_NORMALDISPLAY), item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING))
-        else {
-            continue;
-        };
-        let (name, path) = (take(name), take(path));
-        let attrs = item.GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM).unwrap_or_default();
-        // What Explorer's desktop shows of the desktop's namespace (which also
-        // has everything the navigation pane lists under Desktop): the two
-        // Desktop folders' contents, and Windows' icons that are turned on.
-        let fs = attrs.0 & SFGAO_FILESYSTEM.0 != 0;
-        let wanted = match regitem(&path) {
-            Some(guid) => windows_icon_shown(guid),
-            // Your user folder can come as its path rather than its GUID.
-            None if fs && profile.as_deref().is_some_and(|p| same_dir(p, std::path::Path::new(&path))) => {
-                windows_icon_shown(WINDOWS_ICONS[1].0)
-            }
-            None if fs => PathBuf::from(&path).parent().is_some_and(|p| dirs.iter().any(|d| same_dir(d, p))),
-            None => false,
-        };
-        if !wanted {
-            continue;
-        }
-        // Windows' own icons (This PC, the Recycle Bin) first, then folders, then files.
-        let rank = if attrs.0 & SFGAO_FILESYSTEM.0 == 0 {
-            0
-        } else if attrs.0 & SFGAO_FOLDER.0 != 0 {
-            1
-        } else {
-            2
-        };
-        let pixels = wic.as_ref().and_then(|w| crate::icons::load_icon(&item, w).ok()).unwrap_or_default();
-        let meta = if fs { std::fs::metadata(&path).ok() } else { None };
-        let (key, num) = match sort {
-            Sort::Name => (String::new(), 0),
-            Sort::Size => (String::new(), meta.as_ref().map_or(0, |m| m.len())),
-            Sort::Type => {
-                let ext = std::path::Path::new(&path).extension().map(|e| e.to_string_lossy().to_lowercase());
-                (if rank == 2 { ext.unwrap_or_default() } else { String::new() }, 0)
-            }
-            Sort::Date => {
-                let t = meta.and_then(|m| m.modified().ok());
-                let secs = t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-                // Newest first, as Explorer does.
-                (String::new(), u64::MAX - secs)
-            }
-        };
-        out.push((rank, key, num, Item { path, name, pixels }));
     }
     // Windows' icons first, then folders, then files; within each, by the sort and then the name.
     out.sort_by_key(|(rank, key, num, item)| (*rank, key.clone(), *num, item.name.to_lowercase()));
@@ -263,7 +290,12 @@ pub fn watch() {
     use windows::Win32::Storage::FileSystem::*;
     use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
     std::thread::spawn(|| unsafe {
-        let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME;
+        // Names, and what sorting and hiding go by: attributes, size, date.
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES
+            | FILE_NOTIFY_CHANGE_SIZE
+            | FILE_NOTIFY_CHANGE_LAST_WRITE;
         let handles: Vec<HANDLE> = desktop_dirs()
             .iter()
             .filter_map(|d| FindFirstChangeNotificationW(&HSTRING::from(d.as_os_str()), false, filter).ok())
@@ -278,7 +310,7 @@ pub fn watch() {
                 return;
             }
             // Changes come in bursts (a copy of many files): wait for the end of it.
-            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::thread::sleep(std::time::Duration::from_millis(600));
             for h in &handles {
                 let _ = FindNextChangeNotification(*h);
             }

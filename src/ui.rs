@@ -1412,6 +1412,8 @@ impl App {
     }
 
     fn start(&mut self) {
+        crate::priority::apply(&self.cfg.priority);
+        crate::priority::boost_ui_thread(&self.cfg.priority);
         let ready = shell::shell_ready();
         config::log(&format!(
             "started {} s after Windows (Explorer's taskbar up: {ready}; starts with Windows: {})",
@@ -1744,6 +1746,8 @@ impl App {
             return;
         }
         let screen = shell::fullscreen_screen();
+        // The taskbars' space, put back if something reset it.
+        shellmode::enforce_work_areas(screen);
         let mut changed = false;
         for d in &mut self.screens {
             let on = screen == Some(d.monitor());
@@ -2490,6 +2494,9 @@ impl App {
                 return Some(LRESULT(0));
             }
             WM_SETTINGCHANGE if wp.0 as u32 == SPI_SETWORKAREA.0 => {
+                if hwnd == self.hwnd {
+                    shellmode::enforce_work_areas(shell::fullscreen_screen());
+                }
                 self.dock.refresh_bottom();
                 for d in &mut self.screens {
                     d.refresh_bottom();
@@ -3731,6 +3738,10 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        if self.cfg.priority != old.priority {
+            crate::priority::apply(&self.cfg.priority);
+            crate::priority::boost_ui_thread(&self.cfg.priority);
+        }
         update::configure(&self.cfg.update_branch, &self.cfg.github_token);
         self.cfg.save_battery(self.power);
         theme::set(&self.cfg.theme);
