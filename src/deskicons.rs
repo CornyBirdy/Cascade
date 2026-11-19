@@ -354,6 +354,17 @@ pub struct DeskIcons {
     screen: RECT,
     k: f32,
     pub dirty: bool,
+    /// What the last frame showed, so the next one redraws only what changed
+    /// (a rubber band's edges, the icons whose selection changed) instead of
+    /// every screen's worth of pixels.
+    drawn: Option<Drawn>,
+}
+
+struct Drawn {
+    sel: Vec<bool>,
+    hovered: Option<usize>,
+    band: Option<RECT>,
+    icons: bool,
 }
 
 /// What a click on the desktop asks for, done by the app outside its handler.
@@ -366,6 +377,7 @@ pub enum Ask {
 
 impl DeskIcons {
     pub fn new(hwnd: HWND) -> Self {
+        ICONS.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
         Self {
             hwnd,
             layer: Layer::default(),
@@ -382,6 +394,7 @@ impl DeskIcons {
             screen: RECT::default(),
             k: 1.0,
             dirty: true,
+            drawn: None,
         }
     }
 
@@ -393,6 +406,7 @@ impl DeskIcons {
         self.anchor = self.anchor.filter(|&a| a < self.items.len());
         self.hovered = None;
         self.dirty = true;
+        self.drawn = None;
         // Something just made from the menu (New folder...): selected, with its name ready to type, as in Explorer.
         let made = MADE.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some((path, when)) = made {
@@ -418,6 +432,7 @@ impl DeskIcons {
             self.screen = screen;
             self.k = k;
             self.dirty = true;
+            self.drawn = None;
         }
     }
 
@@ -677,11 +692,75 @@ impl DeskIcons {
         }
     }
 
+    /// Icon `i`'s cell in window pixels, with a little room around it.
+    fn cell_px(&self, i: usize) -> RECT {
+        let (x, y) = self.cell(i);
+        let k = self.k;
+        RECT {
+            left: (x * k).floor() as i32 - 2,
+            top: (y * k).floor() as i32 - 2,
+            right: ((x + CELL_W) * k).ceil() as i32 + 2,
+            bottom: ((y + CELL_H) * k).ceil() as i32 + 2,
+        }
+    }
+
+    /// The rubber band in window pixels.
+    fn band_px(&self) -> Option<RECT> {
+        self.band.as_ref().map(|(a, b, _)| RECT {
+            left: a.x.min(b.x) - 2,
+            top: a.y.min(b.y) - 2,
+            right: a.x.max(b.x) + 3,
+            bottom: a.y.max(b.y) + 3,
+        })
+    }
+
+    /// What has to be redrawn since the last frame: None for everything,
+    /// Some(empty) for nothing.
+    fn damage(&self, icons: bool) -> Option<RECT> {
+        let d = self.drawn.as_ref()?;
+        if d.icons != icons || d.sel.len() != self.items.len() {
+            return None;
+        }
+        let mut out: Option<RECT> = None;
+        let mut add = |r: RECT| {
+            out = Some(match out {
+                None => r,
+                Some(o) => RECT {
+                    left: o.left.min(r.left),
+                    top: o.top.min(r.top),
+                    right: o.right.max(r.right),
+                    bottom: o.bottom.max(r.bottom),
+                },
+            });
+        };
+        for i in 0..self.items.len() {
+            let sel_changed = d.sel[i] != self.sel.get(i).copied().unwrap_or(false);
+            let hover_changed = (d.hovered == Some(i)) != (self.hovered == Some(i));
+            if sel_changed || hover_changed {
+                add(self.cell_px(i));
+            }
+        }
+        let band = self.band_px();
+        if band != d.band {
+            for r in [band, d.band].into_iter().flatten() {
+                add(r);
+            }
+        }
+        let (pw, ph) = (self.screen.right - self.screen.left, self.screen.bottom - self.screen.top);
+        Some(out.map_or(RECT::default(), |r| RECT {
+            left: r.left.max(0),
+            top: r.top.max(0),
+            right: r.right.min(pw),
+            bottom: r.bottom.min(ph),
+        }))
+    }
+
     pub fn render(&mut self, gfx: &mut Gfx) -> Result<()> {
         self.dirty = false;
         if self.generation != gfx.generation {
             self.bitmaps.iter_mut().for_each(|b| *b = None);
             self.generation = gfx.generation;
+            self.drawn = None;
         }
         let icons = shown();
         if icons {
@@ -695,7 +774,14 @@ impl DeskIcons {
         let k = self.k;
         let (pw, ph) = (self.screen.right - self.screen.left, self.screen.bottom - self.screen.top);
         let (w, h) = (pw as f32 / k, ph as f32 / k);
-        gfx.begin(&mut self.layer, pw, ph, k)?;
+        let part = self.damage(icons);
+        if part.is_some_and(|r| r.right <= r.left || r.bottom <= r.top) {
+            return Ok(());
+        }
+        match part {
+            Some(r) => gfx.begin_part(&mut self.layer, pw, ph, r, k)?,
+            None => gfx.begin(&mut self.layer, pw, ph, k)?,
+        }
         {
             let p = gfx.painter();
             let f = &gfx.fonts;
@@ -737,11 +823,17 @@ impl DeskIcons {
             }
         }
         let pos = POINT { x: self.screen.left, y: self.screen.top };
-        let r = gfx.present(&self.layer, self.hwnd, pos, pw, ph, 255);
+        let r = match part {
+            Some(part) => gfx.present_part(&self.layer, self.hwnd, pos, pw, ph, 255, part),
+            None => gfx.present(&self.layer, self.hwnd, pos, pw, ph, 255),
+        };
+        self.drawn =
+            r.is_ok().then(|| Drawn { sel: self.sel.clone(), hovered: self.hovered, band: self.band_px(), icons });
         unsafe {
             if !IsWindowVisible(self.hwnd).as_bool() {
                 // Shown just above the desktop (see `keep_low`), never over apps.
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                ensure_low(self.hwnd);
             }
         }
         r
@@ -752,23 +844,58 @@ impl DeskIcons {
 /// whatever asks it to move up (being shown, clicked, given the focus). For
 /// its `WM_WINDOWPOSCHANGING`.
 pub fn keep_low(hwnd: HWND, pos: &mut WINDOWPOS) {
-    if pos.flags.contains(SWP_NOZORDER) {
+    // Being shown counts even when it says "leave the order alone": a new
+    // window starts at the top, so shown where it is, it would come up over
+    // every app open at the time (switching to shell mode with apps open)
+    // and take all their clicks.
+    if pos.flags.contains(SWP_NOZORDER) && !pos.flags.contains(SWP_SHOWWINDOW) {
         return;
     }
     let Some(desktop) = crate::shellmode::desktop() else { return };
+    pos.flags &= !SWP_NOZORDER;
+    match low_slot(hwnd, desktop) {
+        None => pos.flags |= SWP_NOZORDER,
+        Some(after) => pos.hwndInsertAfter = after,
+    }
+}
+
+/// Where to put the icons' window to sit right above the desktop: the window
+/// to go under (None: it's there already).
+fn low_slot(hwnd: HWND, desktop: HWND) -> Option<HWND> {
     unsafe {
         match GetWindow(desktop, GW_HWNDPREV) {
             // Already right above it.
-            Ok(above) if above == hwnd => pos.flags |= SWP_NOZORDER,
-            // Under the window that's above the desktop: right above the desktop.
+            Ok(above) if above == hwnd => None,
             // An always-on-top window just above it (no app open): the top of the
             // ordinary windows is right above the desktop then.
-            Ok(above) if GetWindowLongW(above, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 => {
-                pos.hwndInsertAfter = HWND_TOP
-            }
-            Ok(above) if !above.is_invalid() => pos.hwndInsertAfter = above,
-            _ => pos.hwndInsertAfter = HWND_BOTTOM,
+            Ok(above) if GetWindowLongW(above, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 => Some(HWND_TOP),
+            // Under the window that's above the desktop: right above the desktop.
+            Ok(above) if !above.is_invalid() => Some(above),
+            _ => Some(HWND_BOTTOM),
         }
+    }
+}
+
+/// The icons' window, for the window procedure to know it without asking
+/// the app (which may be busy when Windows moves it).
+static ICONS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn is_icons(hwnd: HWND) -> bool {
+    hwnd.0 as isize != 0 && ICONS.load(std::sync::atomic::Ordering::Relaxed) == hwnd.0 as isize
+}
+
+/// Puts the icons' window back just above the desktop if anything lifted
+/// it (asked every couple of seconds, and once it's first shown).
+pub fn ensure_low(hwnd: HWND) {
+    let Some(desktop) = crate::shellmode::desktop() else { return };
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || GetWindow(desktop, GW_HWNDPREV).ok() == Some(hwnd) {
+            return;
+        }
+        let Some(after) = low_slot(hwnd, desktop) else { return };
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, flags);
+        config::log("desktop: the icons' window had come up over apps; put back under them");
     }
 }
 
@@ -921,15 +1048,50 @@ pub fn delete(owner: HWND, paths: &[String], for_good: bool) {
     });
 }
 
-/// Ctrl+V: what's on the clipboard, into the Desktop folder.
+/// Ctrl+V: what's on the clipboard, into the Desktop folder. On a thread of
+/// its own: the shell's paste is the whole copy, however long it takes.
 pub fn paste(owner: HWND) {
-    if let Some(dir) = user_desktop() {
-        verb(owner, &[dir.to_string_lossy().into_owned()], "paste", false);
-    }
+    let owner = owner.0 as isize;
+    crate::shell::off_thread(move || {
+        if let Some(dir) = user_desktop() {
+            verb(HWND(owner as *mut _), &[dir.to_string_lossy().into_owned()], "paste", false);
+        }
+    });
 }
 
 /// Shows the shell's own menu for the desktop items `paths` at the pointer, and does what's picked.
+///
+/// The shell's side (its menu handler, the extensions programs add to it,
+/// and the command picked, which can be a long copy) runs on a thread of its
+/// own; only Cascade's drawing of the menu is on the window thread, so a
+/// slow extension never stalls the taskbar.
 pub fn item_menu(owner: HWND, paths: &[String]) {
+    let (owner, paths) = (owner.0 as isize, paths.to_vec());
+    crate::shell::off_thread(move || item_menu_(HWND(owner as *mut _), &paths));
+}
+
+/// A menu waiting for the window thread to show it, and where to send the pick.
+type Asking = (Vec<crate::menu::Entry>, std::sync::mpsc::Sender<usize>);
+static ASKING: std::sync::Mutex<Option<Asking>> = std::sync::Mutex::new(None);
+
+/// Has the window thread show `entries` at the pointer; waits for the pick.
+fn ask_ui(entries: Vec<crate::menu::Entry>) -> usize {
+    let (tx, rx) = std::sync::mpsc::channel();
+    *ASKING.lock().unwrap_or_else(|e| e.into_inner()) = Some((entries, tx));
+    if !msg::post(msg::DESK_MENU_SHOW, 0, 0) {
+        return 0;
+    }
+    rx.recv().unwrap_or(0)
+}
+
+/// For `msg::DESK_MENU_SHOW`, on the window thread: shows the waiting menu.
+pub fn show_asked(owner: HWND) {
+    let Some((entries, tx)) = ASKING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let id = crate::menu::show(owner, entries, crate::menu::Place::Cursor);
+    let _ = tx.send(id);
+}
+
+fn item_menu_(owner: HWND, paths: &[String]) {
     unsafe {
         let Some(cm) = context_menu(paths) else { return };
         let Ok(menu) = CreatePopupMenu() else { return };
@@ -946,7 +1108,7 @@ pub fn item_menu(owner: HWND, paths: &[String]) {
                 let _ = c.HandleMenuMsg(WM_INITMENUPOPUP, WPARAM(sub.0 as usize), LPARAM(i as isize));
             }
         });
-        let id = crate::menu::show(owner, entries, crate::menu::Place::Cursor) as u32;
+        let id = ask_ui(entries) as u32;
         let mut buf = [0u8; 64];
         let verb_ok = id >= FIRST
             && cm
@@ -967,8 +1129,8 @@ pub fn item_menu(owner: HWND, paths: &[String]) {
         }
         // The shell's Delete expects Explorer's view to carry it out: Cascade does it.
         if is(b"delete\0") {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
-            delete(owner, paths, GetKeyState(VK_SHIFT.0 as i32) < 0);
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+            delete(owner, paths, GetAsyncKeyState(VK_SHIFT.0 as i32) < 0);
             return;
         }
         if id >= FIRST {
@@ -982,6 +1144,11 @@ pub fn item_menu(owner: HWND, paths: &[String]) {
             };
             let r = cm.InvokeCommand(&info);
             config::log(&format!("desktop: menu command {} on {} item(s): {r:?}", id - FIRST, paths.len()));
+            // Copy and Cut leave the files on the clipboard from this thread,
+            // which is about to end: hand them to Windows to keep.
+            if is(b"copy\0") || is(b"cut\0") {
+                let _ = OleFlushClipboard();
+            }
         }
         msg::post(msg::DESK_ICONS, 0, 0);
     }
@@ -1047,10 +1214,25 @@ pub fn can_paste() -> bool {
 }
 
 /// Paste shortcut: shortcuts to what's on the clipboard, on the desktop.
-pub fn paste_shortcut(owner: HWND) {
-    if let Some(dir) = user_desktop() {
-        verb(owner, &[dir.to_string_lossy().into_owned()], "pastelink", false);
-    }
+/// Paste shortcut: a shortcut on the desktop to each file on the clipboard
+/// ("Name - Shortcut", as Explorer names them), on a thread of its own.
+pub fn paste_shortcut(_owner: HWND) {
+    crate::shell::off_thread(|| unsafe {
+        let Some(dir) = user_desktop() else { return };
+        let Ok(data) = OleGetClipboard() else { return };
+        for f in crate::drop::files(&data) {
+            let target = PathBuf::from(&f);
+            let stem = target.file_stem().or(target.file_name()).map(|s| s.to_string_lossy().into_owned());
+            let Some(path) = free_name(&dir, &format!("{} - Shortcut", stem.unwrap_or_default()), ".lnk") else {
+                continue;
+            };
+            let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER) else { return };
+            let ok = link.SetPath(&HSTRING::from(f.as_str())).is_ok()
+                && link.cast::<IPersistFile>().and_then(|p| p.Save(&HSTRING::from(path.as_os_str()), true)).is_ok();
+            config::log(&format!("desktop: shortcut to {f}: {ok}"));
+        }
+        msg::post(msg::DESK_ICONS, 0, 0);
+    });
 }
 
 // ------------------------------------------------------------ dropping --

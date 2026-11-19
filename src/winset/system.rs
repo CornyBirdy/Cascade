@@ -76,8 +76,8 @@ pub fn pick_timezone(owner: HWND) {
 
 /// Sets the clock from the internet now (Windows asks for admin rights).
 pub fn sync_time() {
-    let ok = crate::shell::launch("cmd.exe", "/c net start w32time & w32tm /resync /force", true);
-    config::log(&format!("time: sync asked for (started: {ok})"));
+    crate::shell::launch_admin("cmd.exe", "/c net start w32time & w32tm /resync /force");
+    config::log("time: sync asked for");
 }
 
 /// The keyboard layouts installed, for the page.
@@ -403,10 +403,10 @@ pub fn action(key: &str, owner: HWND) -> Option<()> {
             }
         }
         "win_reset_pc" => {
-            crate::shell::launch("systemreset.exe", "", true);
+            crate::shell::launch_admin("systemreset.exe", "");
         }
         "win_restore" => {
-            crate::shell::launch("rstrui.exe", "", true);
+            crate::shell::launch_admin("rstrui.exe", "");
         }
         "win_accounts" => {
             crate::shell::launch("netplwiz.exe", "", false);

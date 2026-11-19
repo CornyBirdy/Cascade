@@ -740,6 +740,12 @@ static DESK_MENU_FOR: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::
 
 unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
+        // The desktop's icons stay under every app, even when Windows moves
+        // them while the app is busy (being shown, clicked, given the focus).
+        WM_WINDOWPOSCHANGING if crate::deskicons::is_icons(hwnd) => {
+            crate::deskicons::keep_low(hwnd, &mut *(lp.0 as *mut WINDOWPOS));
+            return DefWindowProcW(hwnd, m, wp, lp);
+        }
         WM_MOUSEACTIVATE => {
             // Only the notch, dock and previews refuse focus.
             if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 {
@@ -847,6 +853,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
                 (None, Some(owner)) if wp.0 == 1 => shellmode::desktop_menu(owner),
                 _ => {}
             }
+            return LRESULT(0);
+        }
+        msg::DESK_MENU_SHOW => {
+            let owner = with_app(|a| a.deskicons.as_ref().map(|d| d.hwnd)).flatten().unwrap_or(hwnd);
+            crate::deskicons::show_asked(owner);
             return LRESULT(0);
         }
         msg::DESK_RENAME => {
@@ -1748,6 +1759,10 @@ impl App {
         let screen = shell::fullscreen_screen();
         // The taskbars' space, put back if something reset it.
         shellmode::enforce_work_areas(screen);
+        // The desktop's icons under every app, whatever lifted them.
+        if let Some(d) = &self.deskicons {
+            crate::deskicons::ensure_low(d.hwnd);
+        }
         let mut changed = false;
         for d in &mut self.screens {
             let on = screen == Some(d.monitor());
@@ -1858,12 +1873,6 @@ impl App {
                 if m == WM_SYSKEYDOWN {
                     return None;
                 }
-            }
-            // Never over apps, whatever asks it to come up.
-            WM_WINDOWPOSCHANGING => {
-                let pos = unsafe { &mut *(lp.0 as *mut WINDOWPOS) };
-                crate::deskicons::keep_low(d.hwnd, pos);
-                return None;
             }
             _ => return None,
         }

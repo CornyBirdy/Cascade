@@ -1064,7 +1064,9 @@ pub fn open_as_admin(target: &str) {
         crate::shellmode::open(target, true);
         return;
     }
-    open_as_admin_direct(target);
+    // Windows' permission prompt waits for an answer: not on the window thread.
+    let target = target.to_string();
+    off_thread(move || open_as_admin_direct(&target));
 }
 
 /// `open_as_admin`, here and now.
@@ -1095,6 +1097,16 @@ pub(crate) fn open_as_admin_direct(target: &str) {
         }
     }
     open_direct(target);
+}
+
+/// Starts `file` with `args` as administrator, on a thread of its own:
+/// Windows' permission prompt waits for an answer, and the taskbar mustn't.
+pub fn launch_admin(file: &str, args: &str) {
+    let (file, args) = (file.to_string(), args.to_string());
+    off_thread(move || {
+        let ok = launch(&file, &args, true);
+        crate::config::log(&format!("started {file} as administrator: {ok}"));
+    });
 }
 
 /// Starts `file` with `args`, as admin if `admin` (Windows asks first).
@@ -1136,11 +1148,42 @@ pub fn open_file(path: &std::path::Path) {
 /// stays off Cascade's window thread, so the taskbar never stalls with it.
 pub fn off_thread(f: impl FnOnce() + Send + 'static) {
     std::thread::spawn(move || unsafe {
-        let _ =
-            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        // OLE, not only COM: the clipboard and drag and drop need it.
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
         f();
-        windows::Win32::System::Com::CoUninitialize();
+        pump_while_windows();
+        windows::Win32::System::Ole::OleUninitialize();
     });
+}
+
+/// Some shell commands open a window on the thread that asked and return at
+/// once (a properties box, an extension's dialog): keep it alive, handling
+/// its messages, until the thread has no windows left, as Explorer's threads do.
+fn pump_while_windows() {
+    use windows::core::BOOL;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    unsafe extern "system" fn any(h: HWND, found: LPARAM) -> BOOL {
+        if IsWindowVisible(h).as_bool() {
+            *(found.0 as *mut bool) = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let has_windows = || unsafe {
+        let mut found = false;
+        let _ = EnumThreadWindows(GetCurrentThreadId(), Some(any), LPARAM(&mut found as *mut bool as isize));
+        found
+    };
+    let mut m = MSG::default();
+    while has_windows() {
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, 500, QS_ALLINPUT);
+            while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+    }
 }
 
 /// Windows' Open box: a file of one of `filters` ((name, "*.a;*.b")). None

@@ -110,8 +110,8 @@ pub fn pick_uninstall(owner: HWND) {
             let is_file = |p: &str| Path::new(p).is_file();
             let (exe, args) = crate::shellmode::split_command(&crate::shellmode::expand_env(&cmd), &is_file);
             // Uninstallers mostly need admin rights: Windows asks.
-            let ok = crate::shell::launch(&exe, &args, true);
-            config::log(&format!("apps: uninstalling {} with {exe} {args} (started: {ok})", app.name));
+            crate::shell::launch_admin(&exe, &args);
+            config::log(&format!("apps: uninstalling {} with {exe} {args}", app.name));
         }
         Remove::Package(full) => {
             let name = app.name.clone();

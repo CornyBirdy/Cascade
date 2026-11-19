@@ -147,6 +147,8 @@ pub mod msg {
     pub const CLIP_FRONT: u32 = WM_APP + 46;
     /// A picker changed the config file: read it again.
     pub const RELOAD: u32 = WM_APP + 47;
+    /// Shell mode: a desktop item's menu, built on a thread of its own, to show (see `deskicons::item_menu`).
+    pub const DESK_MENU_SHOW: u32 = WM_APP + 48;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

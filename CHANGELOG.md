@@ -4,6 +4,20 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-19
+
+**New**
+- **Windows' settings, in full**: every page goes as deep as Windows' own Settings app. **Network & internet**: each adapter's details, its IP (automatic, or an address, mask and gateway you set), DNS servers (or a provider such as Cloudflare or Quad9) and DNS over HTTPS; Wi-Fi properties, metered connection, the proxy, network reset. **Sound**: each device's own volume, balance, mute, format (sample rate and bit depth), default and default for calls, turning devices off and on; mono audio; what happens to other sounds during calls. **Power**: hibernate, energy saver, the power and sleep buttons and the lid. **Time & language**: set the time and time zone automatically, 24-hour clock, short date, first day of the week. **Privacy & security**: advertising ID, launch tracking, tailored experiences and ten more app permissions. **System**: your account, Storage Sense, clipboard history, Remote Desktop, environment variables, System Restore, advanced startup, reset this PC. **Personalisation**: lock screen picture, file extensions, hidden files. Changes only an administrator may make ask for permission, as Windows does.
+- **New pages**: **Bluetooth & devices** (remove paired devices; the mouse's primary button, speed, precision, wheel, inactive-window scrolling and double-click speed; keyboard repeat, cursor blink, access-key underlines), **Gaming** (Game Mode, Game Bar, background recording, each app's GPU, hardware-accelerated GPU scheduling, windowed-game optimisations, variable refresh rate, Auto HDR) and **Accessibility** (text and pointer size, text cursor, animations, scrollbars, notification time, high contrast, Sticky / Filter / Toggle keys and the Shift-five-times shortcut).
+- **Priority** (Settings > General): Cascade runs at High priority by default, out of Windows' efficiency mode, kept in memory under a game, and ahead on the GPU, so the taskbar never lags behind a busy app.
+- **The desktop mirrors the Desktop folder**: icons are read straight from your Desktop folder and the public one (hidden files as Explorer is set to show them), and follow renames, new and deleted files, sizes and dates as they happen.
+
+**Fixed**
+- **Maximised windows going under the taskbar** (shell mode): when something resets a screen's work area (a game changing the resolution, a screen waking, a scale change), the taskbar's space is put back within a couple of seconds, and windows maximised meanwhile are fitted above it.
+- **Apps couldn't be clicked after switching to shell mode with them open**: the desktop's icon layer came up over every open window and took their clicks. It now always stays under apps.
+- **Dragging a selection on the desktop was choppy**: only what changed is redrawn, not every screen's worth of pixels.
+- **Lag spikes**: the Open box (Change wallpaper, choosing an app), setting the wallpaper, a file's right-click menu and its commands, pasting, and anything that asks for administrator permission now run off Cascade's window thread, so the taskbar never stalls with them.
+
 ## 2026-11-18 (later)
 
 **New**
