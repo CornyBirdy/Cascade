@@ -844,7 +844,7 @@ fn wallpaper_window() -> Option<HWND> {
 }
 
 /// Loads the wallpaper again (the setting or the screens changed).
-fn reload_wallpaper() {
+pub(crate) fn reload_wallpaper() {
     if let Some(w) = wallpaper_window() {
         let r = virtual_screen();
         crate::wallpaper::reload(w, (r.left, r.top));
@@ -1154,10 +1154,7 @@ unsafe fn desktop_menu_(owner: HWND) {
             }
         }
         WALLPAPER => {
-            if let Some(path) = wallpaper::choose(owner) {
-                wallpaper::set_picture(&path);
-                reload_wallpaper();
-            }
+            wallpaper::choose_and_set(reload_wallpaper);
         }
         TASKMGR => shell::open("taskmgr.exe"),
         SETTINGS => {

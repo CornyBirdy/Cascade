@@ -1130,3 +1130,41 @@ pub fn open_file(path: &std::path::Path) {
         let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL);
     }
 }
+
+/// Runs `f` on a thread of its own with COM ready for windows (Open boxes,
+/// shell menus): anything that loads the shell or waits on other programs
+/// stays off Cascade's window thread, so the taskbar never stalls with it.
+pub fn off_thread(f: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || unsafe {
+        let _ =
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        f();
+        windows::Win32::System::Com::CoUninitialize();
+    });
+}
+
+/// Windows' Open box: a file of one of `filters` ((name, "*.a;*.b")). None
+/// if cancelled. Blocks while it's open, so call it from `off_thread`.
+pub fn choose_file(title: &str, filters: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let names: Vec<(HSTRING, HSTRING)> =
+            filters.iter().map(|(n, s)| (HSTRING::from(*n), HSTRING::from(*s))).collect();
+        let specs: Vec<COMDLG_FILTERSPEC> = names
+            .iter()
+            .map(|(n, s)| COMDLG_FILTERSPEC { pszName: PCWSTR(n.as_ptr()), pszSpec: PCWSTR(s.as_ptr()) })
+            .collect();
+        let _ = dialog.SetFileTypes(&specs);
+        let _ = dialog.SetTitle(&HSTRING::from(title));
+        if let Ok(options) = dialog.GetOptions() {
+            let _ = dialog.SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        }
+        dialog.Show(None).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path.map(std::path::PathBuf::from)
+    }
+}

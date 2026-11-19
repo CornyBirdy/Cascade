@@ -492,6 +492,41 @@ pub fn pick(key: &str, owner: HWND) {
     }
 }
 
+// ------------------------------------------------------- advanced display --
+
+/// The chosen screen in depth: its mode, colour depth, HDR and the graphics
+/// card driving it (Windows' Advanced display page).
+pub fn advanced() -> String {
+    let Some(s) = chosen() else { return String::new() };
+    let mut parts = Vec::new();
+    if let Some(m) = current_mode(&s.gdi) {
+        parts.push(format!("{} \u{d7} {} at {} Hz", m.dmPelsWidth, m.dmPelsHeight, m.dmDisplayFrequency));
+    }
+    let mut c = ColourInfo { header: DISPLAYCONFIG_DEVICE_INFO_HEADER::default(), value: 0, encoding: 0, bits: 0 };
+    c.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    c.header.size = std::mem::size_of::<ColourInfo>() as u32;
+    c.header.adapterId = s.adapter;
+    c.header.id = s.target;
+    if unsafe { DisplayConfigGetDeviceInfo(&mut c.header) } == 0 && c.bits > 0 {
+        let hdr = if c.value & 2 != 0 { ", HDR on" } else { "" };
+        parts.push(format!("{}-bit colour{hdr}", c.bits));
+    }
+    // The graphics card: the display device whose name is the screen's.
+    unsafe {
+        for i in 0.. {
+            let mut d = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+            if !EnumDisplayDevicesW(windows::core::PCWSTR::null(), i, &mut d, 0).as_bool() {
+                break;
+            }
+            if wide(&d.DeviceName) == s.gdi {
+                parts.push(format!("on {}", wide(&d.DeviceString)));
+                break;
+            }
+        }
+    }
+    format!("{}: {}.", s.name, parts.join(", "))
+}
+
 // ------------------------------------------------------------ arranging --
 
 /// Where each screen sits on the desktop now (desktop pixels), in

@@ -64,7 +64,7 @@ fn start() -> Result<SpeechRecognizer, String> {
             SpeechRecognitionResultStatus::TopicLanguageNotSupported => {
                 "Dictation isn't available in your language".into()
             }
-            _ => "Turn on Online speech recognition (Cascade's Settings > Privacy & access)".into(),
+            _ => "Turn on Online speech recognition (Cascade's Settings > Privacy & security)".into(),
         });
     }
     let session = r.ContinuousRecognitionSession().map_err(|e| e.to_string())?;
@@ -90,7 +90,7 @@ fn start() -> Result<SpeechRecognizer, String> {
     }));
     session.StartAsync().and_then(|a| a.get()).map_err(|e| {
         if e.code().0 as u32 == 0x8004_5509 {
-            "Turn on Online speech recognition (Cascade's Settings > Privacy & access)".to_string()
+            "Turn on Online speech recognition (Cascade's Settings > Privacy & security)".to_string()
         } else {
             format!("Dictation couldn't start ({e})")
         }

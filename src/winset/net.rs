@@ -1,4 +1,4 @@
-//! Network & Bluetooth: Wi-Fi and Bluetooth on or off, airplane mode,
+//! Network & internet (and the Bluetooth radio): Wi-Fi and Bluetooth on or off, airplane mode,
 //! the mobile hotspot, joining a network that needs a password, and what
 //! you're connected through. As the Network & internet and Bluetooth &
 //! devices pages of Windows' Settings, through the same radio, tethering and

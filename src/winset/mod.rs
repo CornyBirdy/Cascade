@@ -1,22 +1,43 @@
-//! Windows' own settings, on Cascade's settings pages (Display, Sound,
-//! Network & Bluetooth, Personalisation, Apps, Power & battery, Time &
-//! language, Privacy & accessibility, System): what Windows' Settings app
-//! offers for each, read from Windows and changed through the same APIs, so
-//! nothing needs that app (which, as a Store app, needs Explorer).
+//! Windows' own settings, on Cascade's settings pages, as full as Windows'
+//! Settings app: Display, Sound, Network & internet, Bluetooth & devices,
+//! Personalisation, Apps, Gaming, Power & battery, Time & language,
+//! Accessibility, Privacy & security and System. Read from Windows and
+//! changed through the same APIs and settings, so nothing needs that app
+//! (which, as a Store app, needs Explorer). What only an administrator may
+//! change (an adapter's IP, Remote Desktop, the time service...) asks for
+//! permission as Windows does, and runs Windows' own tools.
 //!
 //! Each setting is a key starting `win_`. The settings window asks `get`
 //! for a value, `desc` for a live description, and hands changes to `set`
 //! (toggles, sliders, text) or `action` (buttons, and the pickers, which
 //! show a list to choose from).
 
+pub mod access;
 pub mod apps;
 pub mod audio;
 pub mod display;
+pub mod gaming;
+pub mod input;
 pub mod look;
 pub mod net;
+pub mod netcfg;
 pub mod night;
 pub mod power;
 pub mod system;
+
+/// The pages' own modules, each answering for its own keys (`None`: not
+/// one of mine). Asked before the rows handled here.
+macro_rules! each_page {
+    ($f:ident($($a:expr),*)) => {
+        netcfg::$f($($a),*)
+            .or_else(|| input::$f($($a),*))
+            .or_else(|| gaming::$f($($a),*))
+            .or_else(|| access::$f($($a),*))
+            .or_else(|| audio::$f($($a),*))
+            .or_else(|| power::$f($($a),*))
+            .or_else(|| system::$f($($a),*))
+    };
+}
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -157,6 +178,88 @@ pub(crate) fn run_hidden(file: &str, args: &[&str], wait: bool) -> bool {
     }
 }
 
+/// Runs `command` (a cmd.exe line) as administrator, without a window, and
+/// waits for it: Windows asks for permission first, as its own Settings
+/// does for these. The exit code, or None if it was turned down. Call off
+/// the window's thread.
+pub(crate) fn run_admin(command: &str) -> Option<u32> {
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    let params = HSTRING::from(format!("/d /c {command}"));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: w!("cmd.exe"),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe {
+        if ShellExecuteExW(&mut info).is_err() || info.hProcess.is_invalid() {
+            crate::config::log(&format!("admin: turned down or failed: {command}"));
+            return None;
+        }
+        WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 1u32;
+        let _ = GetExitCodeProcess(info.hProcess, &mut code);
+        let _ = CloseHandle(info.hProcess);
+        crate::config::log(&format!("admin: {command} -> {code}"));
+        Some(code)
+    }
+}
+
+/// Runs a program without a window and returns what it printed, if it ran.
+pub(crate) fn run_output(file: &str, args: &[&str]) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new(file).args(args).creation_flags(0x0800_0000).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A value that's slow to read (WinRT device lists, network state): the page
+/// gets the last one read straight away and never waits; once it's `ttl`
+/// old it's read again on a thread of its own, and the page is redrawn
+/// when it comes.
+pub(crate) struct Slow<T> {
+    slot: Mutex<(Option<(std::time::Instant, T)>, bool)>,
+}
+
+impl<T: Clone + Send + 'static> Slow<T> {
+    pub const fn new() -> Self {
+        Self { slot: Mutex::new((None, false)) }
+    }
+
+    pub fn get(&'static self, ttl: std::time::Duration, read: fn() -> T) -> Option<T> {
+        let mut s = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let stale = s.0.as_ref().is_none_or(|(t, _)| t.elapsed() > ttl);
+        if stale && !s.1 {
+            s.1 = true;
+            std::thread::spawn(move || {
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    );
+                }
+                let v = read();
+                let mut s = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+                *s = (Some((std::time::Instant::now(), v)), false);
+                drop(s);
+                changed();
+            });
+        }
+        s.0.as_ref().map(|(_, v)| v.clone())
+    }
+
+    /// Read again next time (something was just changed).
+    pub fn forget(&self) {
+        let mut s = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t, _)) = s.0.as_mut() {
+            *t = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        }
+    }
+}
+
 /// Says "the settings changed": the settings window shows the new values.
 pub(crate) fn changed() {
     msg::post(msg::WIN_CHANGED, 0, 0);
@@ -203,6 +306,9 @@ pub fn take_queued() -> Option<&'static str> {
 
 /// A setting's value, as the settings window shows it.
 pub fn get(key: &str) -> String {
+    if let Some(v) = each_page!(get(key)) {
+        return v;
+    }
     let b = |v: bool| v.to_string();
     match key {
         "win_screen" | "win_layout" | "win_resolution" | "win_refresh" | "win_scale" | "win_orientation" => {
@@ -238,8 +344,12 @@ pub fn get(key: &str) -> String {
 
 /// A live description, where a row has one.
 pub fn desc(key: &str) -> Option<String> {
+    if let Some(d) = each_page!(desc(key)) {
+        return Some(d);
+    }
     match key {
         "win_screen" => Some(display::screen_desc()),
+        "win_display_info" => Some(display::advanced()),
         "win_hdr" => {
             display::hdr().map(|_| "Brighter highlights and richer colour in apps and games made for it.".into())
         }
@@ -258,6 +368,9 @@ pub fn desc(key: &str) -> Option<String> {
 
 /// Whether a row applies on this PC (HDR only on a screen that has it, battery only on a laptop...).
 pub fn shown(key: &str) -> bool {
+    if let Some(s) = each_page!(shown(key)) {
+        return s;
+    }
     match key {
         "win_hdr" => display::hdr().is_some(),
         "win_screen" | "win_layout" | "win_primary" | "win_arrange" | "win_identify" => display::count() > 1,
@@ -270,6 +383,10 @@ pub fn shown(key: &str) -> bool {
 
 /// A toggle, slider or text box changed.
 pub fn set(key: &str, v: &str) {
+    if each_page!(set(key, v)).is_some() {
+        changed();
+        return;
+    }
     let on = v == "true";
     match key {
         "win_hdr" => display::set_hdr(on),
@@ -302,6 +419,10 @@ pub fn set(key: &str, v: &str) {
 
 /// A button or picker was clicked (run outside the settings window's handler; see `queue`).
 pub fn action(key: &str, owner: HWND) {
+    if each_page!(action(key, owner)).is_some() {
+        changed();
+        return;
+    }
     let open = |t: &str| crate::shell::open(t);
     match key {
         "win_screen" | "win_layout" | "win_resolution" | "win_refresh" | "win_scale" | "win_orientation" => {
@@ -328,10 +449,10 @@ pub fn action(key: &str, owner: HWND) {
         }
         "win_accent" => look::pick_accent(owner),
         "win_wallpaper" => {
-            if let Some(p) = crate::wallpaper::choose(owner) {
-                crate::wallpaper::set_picture(&p);
+            crate::wallpaper::choose_and_set(|| {
+                crate::shellmode::reload_wallpaper();
                 changed();
-            }
+            });
         }
         "win_wallpaper_fit" => look::pick_fit(owner),
         "win_uninstall" => apps::pick_uninstall(owner),
@@ -400,19 +521,46 @@ pub fn page_for(uri: &str) -> Option<usize> {
         page::DISPLAY
     } else if has(&["sound", "apps-volume"]) {
         page::SOUND
-    } else if has(&["network", "bluetooth", "connecteddevices", "devices", "printers", "mobile-devices"]) {
+    } else if has(&["network", "proxy", "datausage"]) {
         page::NETWORK
+    } else if has(&[
+        "bluetooth",
+        "connecteddevices",
+        "devices",
+        "printers",
+        "mousetouchpad",
+        "mobile-devices",
+        "typing",
+    ]) {
+        page::DEVICES
     } else if has(&["personalization", "colors", "themes", "lockscreen"]) {
         page::LOOK
     } else if has(&["appsfeatures", "installed-apps", "startupapps", "defaultapps", "optionalfeatures"]) {
         page::APPS
+    } else if has(&["gaming", "quietmomentsgame"]) {
+        page::GAMING
     } else if has(&["powersleep", "batterysaver", "energy"]) {
         page::POWER
-    } else if has(&["dateandtime", "regionformatting", "regionlanguage", "keyboard", "typing"]) {
+    } else if has(&["dateandtime", "regionformatting", "regionlanguage", "keyboard"]) {
         page::TIME
-    } else if has(&["privacy", "easeofaccess", "notifications", "quiethours", "focus"]) {
+    } else if has(&["easeofaccess", "accessibility"]) {
+        page::ACCESS
+    } else if has(&["privacy", "notifications", "quiethours", "focus"]) {
         page::PRIVACY
-    } else if page.is_empty() || has(&["about", "storagesense", "windowsupdate", "recovery", "system"]) {
+    } else if page.is_empty()
+        || has(&[
+            "about",
+            "storagesense",
+            "windowsupdate",
+            "recovery",
+            "system",
+            "clipboard",
+            "remotedesktop",
+            "otherusers",
+            "yourinfo",
+            "signinoptions",
+        ])
+    {
         page::SYSTEM
     } else {
         return None;

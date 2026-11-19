@@ -204,6 +204,154 @@ pub fn pick(key: &str, owner: HWND) {
     }
 }
 
+// ------------------------------------------------- buttons, lid, saver --
+
+const BUTTONS: GUID = GUID::from_u128(0x4f971e89_eebd_4455_a8de_9e59040e7347);
+const LID: GUID = GUID::from_u128(0x5ca83367_6e45_459f_a27b_476b1d01c936);
+const POWER_BUTTON: GUID = GUID::from_u128(0x7648efa3_dd9c_4e3e_b566_50f929386280);
+const SLEEP_BUTTON: GUID = GUID::from_u128(0x96996bc0_ad50_47ec_923b_6f41874dd9eb);
+const HIBERNATE_AFTER: GUID = GUID::from_u128(0x9d7815a6_7ee4_497e_8888_515a05f02364);
+const SAVER: GUID = GUID::from_u128(0xde830923_a562_41af_a086_e3a2c6bad2da);
+const SAVER_AT: GUID = GUID::from_u128(0xe69653ca_cf7f_4f05_aa73_cb833fa90ad4);
+const SAVER_DIM: GUID = GUID::from_u128(0x13d09884_f74e_474a_a852_b6bde8ad03a8);
+
+/// What a button or the lid can do, as Windows numbers them.
+const ACTIONS: [&str; 5] = ["Do nothing", "Sleep", "Hibernate", "Shut down", "Turn off the display"];
+const SAVER_LEVELS: [u32; 7] = [0, 10, 20, 30, 40, 50, 100];
+
+/// The other power settings: (subgroup, setting, on battery).
+fn extra(key: &str) -> Option<(GUID, GUID, bool)> {
+    Some(match key {
+        "win_lid_ac" => (BUTTONS, LID, false),
+        "win_lid_dc" => (BUTTONS, LID, true),
+        "win_pbutton_ac" => (BUTTONS, POWER_BUTTON, false),
+        "win_pbutton_dc" => (BUTTONS, POWER_BUTTON, true),
+        "win_sbutton_ac" => (BUTTONS, SLEEP_BUTTON, false),
+        "win_hibernate_ac" => (SLEEP, HIBERNATE_AFTER, false),
+        "win_hibernate_dc" => (SLEEP, HIBERNATE_AFTER, true),
+        "win_saver_at" => (SAVER, SAVER_AT, true),
+        "win_saver_dim" => (SAVER, SAVER_DIM, true),
+        _ => return None,
+    })
+}
+
+fn read_extra(key: &str) -> Option<u32> {
+    let (sub, set, dc) = extra(key)?;
+    let scheme = active()?;
+    let mut v = 0u32;
+    let ok = unsafe {
+        if dc {
+            PowerReadDCValueIndex(None, Some(&scheme), Some(&sub), Some(&set), &mut v) == 0
+        } else {
+            PowerReadACValueIndex(None, Some(&scheme), Some(&sub), Some(&set), &mut v) == ERROR_SUCCESS
+        }
+    };
+    ok.then_some(v)
+}
+
+fn write_extra(key: &str, v: u32) {
+    let (Some((sub, set, dc)), Some(scheme)) = (extra(key), active()) else { return };
+    unsafe {
+        let r = if dc {
+            PowerWriteDCValueIndex(None, &scheme, Some(&sub), Some(&set), v)
+        } else {
+            PowerWriteACValueIndex(None, &scheme, Some(&sub), Some(&set), v).0
+        };
+        let _ = PowerSetActiveScheme(None, Some(&scheme));
+        config::log(&format!("power: {key} = {v} (result {r})"));
+    }
+}
+
+/// Whether this PC can hibernate (it's turned on and the hardware allows it).
+fn can_hibernate() -> bool {
+    let mut caps = SYSTEM_POWER_CAPABILITIES::default();
+    unsafe { GetPwrCapabilities(&mut caps) && caps.SystemS4 && caps.HiberFilePresent }
+}
+
+fn has_lid() -> bool {
+    let mut caps = SYSTEM_POWER_CAPABILITIES::default();
+    unsafe { GetPwrCapabilities(&mut caps) && caps.LidPresent }
+}
+
+fn on_battery_pc() -> bool {
+    let mut caps = SYSTEM_POWER_CAPABILITIES::default();
+    unsafe { GetPwrCapabilities(&mut caps) && caps.SystemBatteriesPresent }
+}
+
+pub fn get(key: &str) -> Option<String> {
+    let v = read_extra(key);
+    extra(key)?;
+    Some(match key {
+        k if k.starts_with("win_hibernate") => v.map(|s| minutes_text(s / 60)).unwrap_or_default(),
+        "win_saver_at" => match v {
+            Some(0) | None => "Never".into(),
+            Some(100) => "Always".into(),
+            Some(p) => format!("At {p}%"),
+        },
+        "win_saver_dim" => (v.unwrap_or(0) != 100 && v.is_some()).to_string(),
+        _ => v.and_then(|a| ACTIONS.get(a as usize)).map(|s| s.to_string()).unwrap_or_default(),
+    })
+}
+
+pub fn desc(_key: &str) -> Option<String> {
+    None
+}
+
+pub fn shown(key: &str) -> Option<bool> {
+    Some(match key {
+        "win_lid_ac" | "win_lid_dc" => has_lid() && (key == "win_lid_ac" || on_battery_pc()),
+        "win_pbutton_dc" | "win_saver_at" | "win_saver_dim" | "win_hibernate_dc" => {
+            on_battery_pc() && (!key.starts_with("win_hibernate") || can_hibernate())
+        }
+        "win_hibernate_ac" => can_hibernate(),
+        _ => return None,
+    })
+}
+
+pub fn set(key: &str, v: &str) -> Option<()> {
+    match key {
+        // Dim the screen in energy saver: 30% brightness, or as it was (100).
+        "win_saver_dim" => write_extra(key, if v == "true" { 30 } else { 100 }),
+        _ => return None,
+    }
+    Some(())
+}
+
+pub fn action(key: &str, owner: HWND) -> Option<()> {
+    extra(key)?;
+    if key.starts_with("win_hibernate") {
+        let names: Vec<String> = MINUTES.iter().map(|m| minutes_text(*m)).collect();
+        let cur = read_extra(key).and_then(|s| MINUTES.iter().position(|m| m * 60 == s));
+        if let Some(i) = super::pick(owner, &names, cur) {
+            write_extra(key, MINUTES[i] * 60);
+        }
+    } else if key == "win_saver_at" {
+        let names: Vec<String> = SAVER_LEVELS
+            .iter()
+            .map(|p| match p {
+                0 => "Never".into(),
+                100 => "Always".into(),
+                p => format!("At {p}%"),
+            })
+            .collect();
+        let cur = read_extra(key).and_then(|v| SAVER_LEVELS.iter().position(|p| *p == v));
+        if let Some(i) = super::pick(owner, &names, cur) {
+            write_extra(key, SAVER_LEVELS[i]);
+        }
+    } else {
+        let mut choices: Vec<usize> = (0..ACTIONS.len()).collect();
+        if !can_hibernate() {
+            choices.retain(|&a| a != 2);
+        }
+        let names: Vec<String> = choices.iter().map(|&a| ACTIONS[a].to_string()).collect();
+        let cur = read_extra(key).and_then(|v| choices.iter().position(|&a| a as u32 == v));
+        if let Some(i) = super::pick(owner, &names, cur) {
+            write_extra(key, choices[i] as u32);
+        }
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

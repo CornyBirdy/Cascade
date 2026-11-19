@@ -12,19 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use windows::core::{w, HSTRING, PWSTR};
+use windows::core::HSTRING;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-    COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::Registry::*;
-use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
-};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config;
@@ -167,30 +160,20 @@ pub fn set_picture(path: &Path) -> bool {
     ok
 }
 
-/// Asks for a picture with Windows' own Open box. None if it was cancelled.
-pub fn choose(owner: HWND) -> Option<PathBuf> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        let filters = [
-            COMDLG_FILTERSPEC {
-                pszName: w!("Pictures"),
-                pszSpec: w!("*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.jxr;*.heic"),
-            },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
-        ];
-        let _ = dialog.SetFileTypes(&filters);
-        let _ = dialog.SetTitle(w!("Choose a wallpaper"));
-        if let Ok(options) = dialog.GetOptions() {
-            let _ = dialog.SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+/// Asks for a picture with Windows' own Open box and makes it the
+/// wallpaper, then `done` (to redraw the desktop). All on a thread of its
+/// own: the Open box is slow to load without Explorer, and setting the
+/// wallpaper tells (and waits on) every window.
+pub fn choose_and_set(done: fn()) {
+    crate::shell::off_thread(move || {
+        let filters =
+            [("Pictures", "*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.jxr;*.heic"), ("All files", "*.*")];
+        if let Some(path) = crate::shell::choose_file("Choose a wallpaper", &filters) {
+            if set_picture(&path) {
+                done();
+            }
         }
-        dialog.Show(Some(owner)).ok()?;
-        let item = dialog.GetResult().ok()?;
-        let name: PWSTR = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let path = name.to_string().ok();
-        CoTaskMemFree(Some(name.0 as *const c_void));
-        path.map(PathBuf::from)
-    }
+    });
 }
 
 // ------------------------------------------------------------- drawing --

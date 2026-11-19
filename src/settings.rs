@@ -70,12 +70,15 @@ fn nav_icon(i: usize) -> Option<char> {
         11 => 0xE7F4, // Monitor
         12 => 0xE767, // Volume
         13 => 0xE701, // Wi-Fi
-        14 => 0xE771, // Personalise
-        15 => 0xE71D, // All apps
-        16 => 0xE7E8, // Power
-        17 => 0xE774, // Globe
-        18 => 0xE72E, // Lock
-        19 => 0xE770, // System
+        14 => 0xE772, // Devices
+        15 => 0xE771, // Personalise
+        16 => 0xE71D, // All apps
+        17 => 0xE7FC, // Game
+        18 => 0xE7E8, // Power
+        19 => 0xE774, // Globe
+        20 => 0xE776, // Ease of access
+        21 => 0xE72E, // Lock
+        22 => 0xE770, // System
         _ => return None,
     };
     char::from_u32(code)
@@ -87,7 +90,7 @@ const LINE_H: f32 = 15.0;
 /// Most lines a description wraps to.
 const MAX_LINES: usize = 3;
 
-pub const SECTIONS: [&str; 20] = [
+pub const SECTIONS: [&str; 23] = [
     "General",
     "Appearance",
     "Notch",
@@ -102,12 +105,15 @@ pub const SECTIONS: [&str; 20] = [
     // Windows' own settings (see `winset`), after a rule in the sidebar.
     "Display",
     "Sound",
-    "Network & Bluetooth",
+    "Network & internet",
+    "Bluetooth & devices",
     "Personalisation",
     "Apps",
+    "Gaming",
     "Power & battery",
     "Time & language",
-    "Privacy & access",
+    "Accessibility",
+    "Privacy & security",
     "System",
 ];
 
@@ -116,12 +122,15 @@ pub mod page {
     pub const DISPLAY: usize = 11;
     pub const SOUND: usize = 12;
     pub const NETWORK: usize = 13;
-    pub const LOOK: usize = 14;
-    pub const APPS: usize = 15;
-    pub const POWER: usize = 16;
-    pub const TIME: usize = 17;
-    pub const PRIVACY: usize = 18;
-    pub const SYSTEM: usize = 19;
+    pub const DEVICES: usize = 14;
+    pub const LOOK: usize = 15;
+    pub const APPS: usize = 16;
+    pub const GAMING: usize = 17;
+    pub const POWER: usize = 18;
+    pub const TIME: usize = 19;
+    pub const ACCESS: usize = 20;
+    pub const PRIVACY: usize = 21;
+    pub const SYSTEM: usize = 22;
 }
 
 /// Where sidebar entry `i` starts (before scrolling): under its group's title.
@@ -1148,24 +1157,46 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_refresh", "Refresh rate", "Higher is smoother, for games and scrolling.", Pick),
             row("win_orientation", "Display orientation", "Turn the picture for a screen on its side.", Pick),
             row("win_hdr", "Use HDR", "Brighter highlights and richer colour.", Toggle),
+            row("win_display_info", "Advanced display", "", Note),
             heading("h_night", "Night light"),
             row("win_night", "Night light", "Warmer colours, easier on the eyes at night.", Toggle),
             row("win_night_strength", "Strength", "How warm the colours get.", slider(0.1, 1.0, 0.05, Unit::Percent)),
             row("win_night_schedule", "Schedule", "When it comes on.", Pick),
+            row("win_gpu_note", "Graphics", "Which GPU each app uses, Auto HDR and variable refresh rate are on the Gaming page.", Note),
         ],
         page::SOUND => vec![
             heading("h_output", "Output"),
             row("win_output", "Play sound through", "The default output, for every app.", Pick),
             row("win_volume", "Volume", "", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            heading("h_out_dev", "Output device properties"),
+            row("win_snd_out_dev", "Device", "Which output the settings below are for.", Pick),
+            row("win_snd_out_vol", "Volume", "This device's own level.", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            row("win_snd_out_bal", "Balance", "Left (below 0) or right (above 0).", slider(-1.0, 1.0, 0.05, Unit::Percent)),
+            row("win_snd_out_mute", "Mute", "", Toggle),
+            row("win_snd_out_format", "Format", "The sample rate and bit depth it plays at.", Pick),
+            row("win_snd_out_default", "Default device", "Make this the output for everything.", Button("Set as default")),
+            row("win_snd_out_comm", "Default for calls", "Discord, Teams and other calls use this one.", Button("Use for calls")),
+            row("win_snd_out_disable", "Turn off", "Hide this device from Windows and every app.", Button("Turn off")),
             heading("h_input", "Input"),
             row("win_input", "Microphone", "The default input apps listen to.", Pick),
             row("win_mic", "Input level", "", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            heading("h_in_dev", "Input device properties"),
+            row("win_snd_in_dev", "Device", "Which input the settings below are for.", Pick),
+            row("win_snd_in_vol", "Input volume", "This device's own level.", slider(0.0, 1.0, 0.01, Unit::Percent)),
+            row("win_snd_in_mute", "Mute", "", Toggle),
+            row("win_snd_in_format", "Format", "The sample rate and bit depth it records at.", Pick),
+            row("win_snd_in_default", "Default device", "Make this the microphone for everything.", Button("Set as default")),
+            row("win_snd_in_comm", "Default for calls", "Calls use this microphone.", Button("Use for calls")),
+            row("win_snd_in_disable", "Turn off", "Hide this device from Windows and every app.", Button("Turn off")),
             heading("h_sound_more", "More"),
+            row("win_snd_disabled", "Turned-off devices", "", Button("Turn on\u{2026}")),
+            row("win_snd_mono", "Mono audio", "Both ears hear everything (one-sided headphones, hearing in one ear).", Toggle),
+            row("win_snd_ducking", "During calls", "What other sounds do while Windows hears a call.", Pick),
             row("win_mixer", "Volume mixer", "Each app's volume (Windows' classic mixer).", Button("Open")),
             row(
                 "win_sound_cpl",
                 "More sound settings",
-                "Device properties, enhancements, spatial sound and system sounds.",
+                "Enhancements, spatial sound and system sounds.",
                 Button("Open"),
             ),
         ],
@@ -1173,7 +1204,27 @@ fn rows(section: usize) -> Vec<Row> {
             heading("h_net", "Network"),
             row("win_net_info", "Connection", "What you're connected through.", Note),
             row("win_wifi", "Wi-Fi", "", Toggle),
+            row("win_wifi_info", "Wi-Fi properties", "", Note),
+            row("win_metered", "Metered connection", "Windows and apps hold back big downloads on this Wi-Fi network.", Toggle),
             row("win_airplane", "Airplane mode", "Turns every radio off: Wi-Fi, Bluetooth and mobile data.", Toggle),
+            heading("h_join", "Join a network"),
+            row("win_join_ssid", "Network", "One in range (with a lock if it needs a password).", Pick),
+            row("win_join_pw", "Password", "For a network that needs one.", Text { secret: true }),
+            row("win_join", "Join", "Joins it, and remembers it for next time, as Windows does.", Button("Join")),
+            row("win_known", "Known networks", "Networks Windows remembers.", Button("Manage\u{2026}")),
+            heading("h_adapter", "Adapter settings"),
+            row("win_adapter", "Adapter", "Which network adapter the settings below are for.", Pick),
+            row("win_adapter_info", "Properties", "", Note),
+            row("win_ip_mode", "IP assignment", "Automatic from the router (DHCP), or an address you set.", Pick),
+            row("win_ip_addr", "IP address", "Like 192.168.1.20.", Text { secret: false }),
+            row("win_ip_mask", "Subnet mask", "Like 255.255.255.0 (or 24).", Text { secret: false }),
+            row("win_ip_gateway", "Gateway", "Your router's address, like 192.168.1.1.", Text { secret: false }),
+            row("win_dns_mode", "DNS server assignment", "Automatic from the router, or servers you choose.", Pick),
+            row("win_dns_preset", "Use a provider", "Fills in a well-known DNS service's addresses.", Pick),
+            row("win_dns1", "Preferred DNS", "Like 1.1.1.1.", Text { secret: false }),
+            row("win_dns2", "Alternate DNS", "Used when the preferred one doesn't answer.", Text { secret: false }),
+            row("win_doh", "DNS over HTTPS", "Encrypts lookups so the network can't read or change them.", Pick),
+            row("win_ip_save", "Save", "Applies the IP and DNS settings above (Windows asks for permission).", Button("Save")),
             heading("h_hotspot", "Mobile hotspot"),
             row("win_hotspot", "Mobile hotspot", "Share this PC's internet over Wi-Fi.", Toggle),
             row("win_hotspot_from", "Share my internet connection from", "The connection devices on the hotspot use.", Pick),
@@ -1183,19 +1234,37 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_hotspot_security", "Security", "WPA3 is stronger; some older devices only know WPA2.", Pick),
             row("win_hotspot_saver", "Power saving", "Turns the hotspot off when no device has been connected for a while.", Toggle),
             row("win_hotspot_devices", "Connected devices", "", Note),
-            heading("h_join", "Join a network"),
-            row("win_join_ssid", "Network", "One in range (with a lock if it needs a password).", Pick),
-            row("win_join_pw", "Password", "For a network that needs one.", Text { secret: true }),
-            row("win_join", "Join", "Joins it, and remembers it for next time, as Windows does.", Button("Join")),
-            row("win_known", "Known networks", "Networks Windows remembers.", Button("Manage\u{2026}")),
-            heading("h_bt", "Bluetooth & devices"),
-            row("win_bt", "Bluetooth", "", Toggle),
-            row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
-            row("win_printers", "Devices and printers", "Printers, scanners and everything plugged in.", Button("Open")),
+            heading("h_proxy", "Proxy"),
+            row("win_proxy_auto", "Automatically detect settings", "Finds the network's proxy by itself.", Toggle),
+            row("win_proxy_script_on", "Use setup script", "A proxy auto-config (PAC) address.", Toggle),
+            row("win_proxy_script", "Script address", "", Text { secret: false }),
+            row("win_proxy_manual", "Use a proxy server", "Every app using Windows' settings goes through it.", Toggle),
+            row("win_proxy_server", "Proxy address", "host:port, like proxy.example.com:8080.", Text { secret: false }),
+            row("win_proxy_bypass", "Don't use the proxy for", "Addresses separated by semicolons; <local> for local names.", Text { secret: false }),
             heading("h_net_more", "More"),
             row("win_vpn", "VPN", "Connect to a VPN set up on this PC.", Button("Open")),
-            row("win_ncpa", "Network adapters", "Each adapter, its IP settings, and sharing.", Button("Open")),
-            row("win_proxy", "Proxy", "Internet connection and proxy settings.", Button("Open")),
+            row("win_ncpa", "Network adapters", "Windows' classic list: sharing, bridges, each adapter's properties.", Button("Open")),
+            row("win_net_reset", "Network reset", "Sets every adapter back to Windows' defaults (needs a restart).", Button("Reset now")),
+        ],
+        page::DEVICES => vec![
+            heading("h_bt", "Bluetooth"),
+            row("win_bt", "Bluetooth", "", Toggle),
+            row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
+            row("win_bt_devices", "Your devices", "", Button("Remove\u{2026}")),
+            row("win_printers", "Printers & scanners", "Printers, scanners and everything plugged in.", Button("Open")),
+            heading("h_mouse", "Mouse"),
+            row("win_mouse_primary", "Primary mouse button", "Right for left-handed use.", Pick),
+            row("win_mouse_speed", "Pointer speed", "", slider(1.0, 20.0, 1.0, Unit::Count)),
+            row("win_mouse_precision", "Enhance pointer precision", "Pointer acceleration: off for games and steady aim.", Toggle),
+            row("win_mouse_wheel", "Lines to scroll", "How far one notch of the wheel scrolls.", slider(1.0, 100.0, 1.0, Unit::Count)),
+            row("win_mouse_inactive", "Scroll inactive windows", "The wheel scrolls what's under the pointer, not only the window in front.", Toggle),
+            row("win_mouse_dblclick", "Double-click speed", "The longest gap between the two clicks.", slider(200.0, 900.0, 10.0, Unit::Ms)),
+            row("win_mouse_pointers", "Pointers", "The pointer scheme and shadow (Windows' Mouse properties).", Button("Open")),
+            heading("h_keyboard", "Keyboard"),
+            row("win_kb_delay", "Repeat delay", "How long a key is held before it repeats (0 short, 3 long).", slider(0.0, 3.0, 1.0, Unit::Count)),
+            row("win_kb_rate", "Repeat rate", "How fast it repeats (31 fastest).", slider(0.0, 31.0, 1.0, Unit::Count)),
+            row("win_kb_blink", "Cursor blink rate", "The gap between blinks of the text cursor.", slider(100.0, 1200.0, 50.0, Unit::Ms)),
+            row("win_kb_cues", "Underline access keys", "Shows the underlined letter for Alt shortcuts in menus.", Toggle),
         ],
         page::LOOK => vec![
             heading("h_mode", "Light and dark"),
@@ -1208,6 +1277,10 @@ fn rows(section: usize) -> Vec<Row> {
             heading("h_wall", "Background"),
             row("win_wallpaper", "Wallpaper", "A picture for the desktop.", Button("Choose\u{2026}")),
             row("win_wallpaper_fit", "Fit", "How the picture fills each screen.", Pick),
+            row("win_lockscreen", "Lock screen picture", "The picture behind the sign-in and lock screen (Windows asks for permission).", Button("Choose\u{2026}")),
+            heading("h_files", "Files"),
+            row("win_file_ext", "Show file extensions", "\u{201c}photo.jpg\u{201d} rather than \u{201c}photo\u{201d}, on the desktop and in Open boxes.", Toggle),
+            row("win_hidden", "Show hidden files", "On the desktop and in Open boxes.", Toggle),
             row("win_look_note", "Cascade's look", "Cascade's own theme and colours are on the Appearance page.", Note),
         ],
         page::APPS => vec![
@@ -1222,6 +1295,19 @@ fn rows(section: usize) -> Vec<Row> {
                 Note,
             ),
         ],
+        page::GAMING => vec![
+            heading("h_game", "Gaming"),
+            row("win_game_mode", "Game Mode", "Windows puts the game first: no driver installs or update restarts mid-game.", Toggle),
+            row("win_game_bar", "Game Bar", "Win+G opens Xbox Game Bar (if it's installed).", Toggle),
+            row("win_game_capture", "Record in the background", "Game Bar keeps the last moments of play to save as a clip (costs some performance).", Toggle),
+            heading("h_graphics", "Graphics"),
+            row("win_gpu_add", "Choose an app's GPU", "Pick a program, then whether it runs on the power-saving or high-performance GPU.", Button("Add an app\u{2026}")),
+            row("win_gpu_list", "Apps with a GPU set", "", Button("Change\u{2026}")),
+            row("win_gpu_hags", "Hardware-accelerated GPU scheduling", "The GPU schedules its own work: lower latency (needs a restart).", Toggle),
+            row("win_gpu_windowed", "Optimisations for windowed games", "Lower latency for games in a window or borderless.", Toggle),
+            row("win_gpu_vrr", "Variable refresh rate", "G-Sync / FreeSync for games that don't turn it on themselves.", Toggle),
+            row("win_gpu_autohdr", "Auto HDR", "Brighter colour for older games on an HDR screen.", Toggle),
+        ],
         page::POWER => vec![
             row("win_battery", "Battery", "This PC's battery.", Note),
             row("win_power_mode", "Power mode", "Balanced, or better battery life, or more speed (on the Balanced plan).", Pick),
@@ -1229,12 +1315,25 @@ fn rows(section: usize) -> Vec<Row> {
             heading("h_plugged", "Plugged in"),
             row("win_screen_ac", "Turn off the screen after", "Plugged in.", Pick),
             row("win_sleep_ac", "Sleep after", "Plugged in.", Pick),
+            row("win_hibernate_ac", "Hibernate after", "Plugged in.", Pick),
             heading("h_battery", "On battery"),
             row("win_screen_dc", "Turn off the screen after", "On battery.", Pick),
             row("win_sleep_dc", "Sleep after", "On battery.", Pick),
-            row("win_power_cpl", "Lid and power buttons", "What closing the lid and the power button do.", Button("Open")),
+            row("win_hibernate_dc", "Hibernate after", "On battery.", Pick),
+            row("win_saver_at", "Energy saver", "Turns on by itself at this much battery.", Pick),
+            row("win_saver_dim", "Lower brightness in energy saver", "", Toggle),
+            heading("h_buttons", "Buttons and lid"),
+            row("win_pbutton_ac", "Power button", "What pressing it does (plugged in).", Pick),
+            row("win_pbutton_dc", "Power button on battery", "", Pick),
+            row("win_sbutton_ac", "Sleep button", "On keyboards that have one.", Pick),
+            row("win_lid_ac", "Closing the lid", "Plugged in.", Pick),
+            row("win_lid_dc", "Closing the lid on battery", "", Pick),
+            row("win_power_cpl", "More power settings", "Windows' classic Power Options: each plan's advanced settings.", Button("Open")),
         ],
         page::TIME => vec![
+            heading("h_time", "Date & time"),
+            row("win_time_auto", "Set time automatically", "From Windows' time server (Windows asks for permission to change).", Toggle),
+            row("win_tz_auto", "Set time zone automatically", "From where the PC is (needs Location).", Toggle),
             row("win_timezone", "Time zone", "Where your clock's time comes from.", Pick),
             row(
                 "win_time_sync",
@@ -1243,48 +1342,97 @@ fn rows(section: usize) -> Vec<Row> {
                 Button("Sync now"),
             ),
             row("win_time_cpl", "Date and time", "Windows' classic date and time, and extra clocks.", Button("Open")),
+            heading("h_formats", "Formats"),
+            row("win_time_24h", "24-hour clock", "13:00 rather than 1:00 PM.", Toggle),
+            row("win_time_date", "Short date", "How dates are written.", Pick),
+            row("win_time_week", "First day of the week", "Where calendars start.", Pick),
+            heading("h_language", "Language"),
             row("win_layouts", "Keyboard layouts", "The layouts you type with.", Note),
-            row("win_intl", "Region and language", "Formats, languages and keyboards to add.", Button("Open")),
+            row("win_intl", "Region and language", "Languages and keyboards to add, and every format.", Button("Open")),
         ],
-        page::PRIVACY => vec![
-            heading("h_notify", "Notifications"),
-            row("win_dnd", "Do not disturb", "Notification pop-ups stay quiet; they still go in the list.", Toggle),
-            row("win_toasts", "Notifications from apps", "Windows' own switch for every app's notifications.", Toggle),
-            heading("h_privacy", "Privacy"),
-            row("win_camera", "Camera", "Let apps use the camera.", Toggle),
-            row("win_mic_access", "Microphone", "Let apps use the microphone.", Toggle),
-            row("win_location", "Location", "Let apps know where this PC is.", Toggle),
-            row(
-                "win_speech",
-                "Online speech recognition",
-                "Lets dictation (Win+H) use Microsoft's speech service.",
-                Toggle,
-            ),
-            heading("h_access", "Accessibility"),
+        page::ACCESS => vec![
+            heading("h_vision", "Vision"),
+            row("win_acc_text", "Text size", "For Windows' own and Store apps' text.", slider(1.0, 2.25, 0.05, Unit::Percent)),
+            row("win_acc_pointer", "Mouse pointer size", "", slider(1.0, 15.0, 1.0, Unit::Count)),
+            row("win_acc_caret", "Text cursor thickness", "", slider(1.0, 20.0, 1.0, Unit::Px)),
+            row("win_acc_anim", "Animation effects", "Windows' own animations (Cascade's are its own).", Toggle),
+            row("win_acc_scrollbars", "Always show scrollbars", "In Windows' and Store apps, rather than only when the pointer is near.", Toggle),
+            row("win_acc_notif", "Dismiss notifications after", "", Pick),
+            row("win_acc_contrast", "High contrast", "Strong colours for text and edges.", Toggle),
+            row("win_acc_colour", "Colour filters", "Greyscale, inverted and colour-blindness filters (Ease of Access).", Button("Open")),
+            heading("h_keys", "Keyboard"),
+            row("win_acc_sticky", "Sticky keys", "Press Shift, Ctrl, Alt or Win one at a time for shortcuts.", Toggle),
+            row("win_acc_sticky_shortcut", "Sticky keys shortcut", "Shift five times turns Sticky keys on (off: no pop-up mid-game).", Toggle),
+            row("win_acc_filter", "Filter keys", "Ignores brief or repeated presses.", Toggle),
+            row("win_acc_toggle", "Toggle keys", "A tone when Caps, Num or Scroll Lock is pressed.", Toggle),
+            heading("h_tools", "Tools"),
             row("win_magnifier", "Magnifier", "Zooms in on part of the screen (Win++).", Button("Open")),
             row("win_narrator", "Narrator", "Reads the screen aloud.", Button("Open")),
             row("win_osk", "On-screen keyboard", "Type with the mouse or a touch screen.", Button("Open")),
             row(
                 "win_ease",
                 "Ease of Access Center",
-                "Windows' classic accessibility settings: high contrast, sticky keys, mouse keys and more.",
+                "Windows' classic accessibility settings: mouse keys and more.",
                 Button("Open"),
             ),
         ],
+        page::PRIVACY => vec![
+            heading("h_notify", "Notifications"),
+            row("win_dnd", "Do not disturb", "Notification pop-ups stay quiet; they still go in the list.", Toggle),
+            row("win_toasts", "Notifications from apps", "Windows' own switch for every app's notifications.", Toggle),
+            heading("h_general", "General"),
+            row("win_ad_id", "Advertising ID", "Lets apps show ads based on what you do.", Toggle),
+            row("win_track_launches", "Track app launches", "Lets Windows sort Start and search by what you use.", Toggle),
+            row("win_tailored", "Tailored experiences", "Tips and offers from Microsoft based on diagnostic data.", Toggle),
+            row(
+                "win_speech",
+                "Online speech recognition",
+                "Lets dictation (Win+H) use Microsoft's speech service.",
+                Toggle,
+            ),
+            heading("h_privacy", "App permissions"),
+            row("win_camera", "Camera", "Let apps use the camera.", Toggle),
+            row("win_mic_access", "Microphone", "Let apps use the microphone.", Toggle),
+            row("win_location", "Location", "Let apps know where this PC is.", Toggle),
+            row("win_cap_contacts", "Contacts", "Let apps read your contacts.", Toggle),
+            row("win_cap_calendar", "Calendar", "Let apps read your calendar.", Toggle),
+            row("win_cap_calls", "Phone calls", "Let apps make calls.", Toggle),
+            row("win_cap_account", "Account info", "Let apps see your name and picture.", Toggle),
+            row("win_cap_documents", "Documents", "Let apps open your Documents folder.", Toggle),
+            row("win_cap_pictures", "Pictures", "Let apps open your Pictures folder.", Toggle),
+            row("win_cap_videos", "Videos", "Let apps open your Videos folder.", Toggle),
+            row("win_cap_files", "File system", "Let apps that ask open any file you can.", Toggle),
+            row("win_cap_screenshots", "Screenshots", "Let apps take pictures of the screen.", Toggle),
+            row("win_cap_radios", "Radios", "Let apps turn Wi-Fi and Bluetooth on and off.", Toggle),
+        ],
         page::SYSTEM => vec![
+            heading("h_about", "About"),
             row("win_about", "This PC", "Its name, Windows and hardware.", Note),
-            row("win_storage", "Storage", "Space on each drive.", Note),
-            row("win_cleanup", "Free up space", "Windows' Disk Cleanup.", Button("Clean up")),
-            row("win_update", "Windows Update", "Look for updates now.", Button("Check")),
             row("win_rename", "Rename this PC", "The name other devices see.", Button("Rename")),
+            row("win_account", "Account", "", Note),
+            row("win_accounts", "User accounts", "Add, remove and change accounts and passwords.", Button("Open")),
+            row("win_lock", "Lock", "Locks the PC (Win+L).", Button("Lock")),
+            heading("h_storage", "Storage"),
+            row("win_storage", "Storage", "Space on each drive.", Note),
+            row("win_storage_sense", "Storage Sense", "Empties the Recycle Bin and temporary files now and then.", Toggle),
+            row("win_cleanup", "Free up space", "Windows' Disk Cleanup.", Button("Clean up")),
+            heading("h_system_more", "System"),
+            row("win_clip_history", "Clipboard history", "Keeps what you copy, for Win+V.", Toggle),
+            row("win_rdp", "Remote Desktop", "Lets you connect to this PC from another (Windows asks for permission).", Toggle),
+            row("win_update", "Windows Update", "Look for updates now.", Button("Check")),
             row("win_devmgr", "Device Manager", "Drivers and hardware.", Button("Open")),
+            row("win_env", "Environment variables", "PATH and the like.", Button("Open")),
             row(
                 "win_sysprops",
                 "Advanced system settings",
-                "Performance, virtual memory, startup and recovery, environment variables.",
+                "Performance, virtual memory, startup and recovery.",
                 Button("Open"),
             ),
             row("win_taskmgr", "Task Manager", "What's running, and how hard the PC is working.", Button("Open")),
+            heading("h_recovery", "Recovery"),
+            row("win_restore", "System Restore", "Puts system files and settings back to an earlier point.", Button("Open")),
+            row("win_advanced_startup", "Advanced startup", "Restarts into recovery: safe mode, startup settings, UEFI.", Button("Restart now")),
+            row("win_reset_pc", "Reset this PC", "Reinstalls Windows, keeping your files or not.", Button("Reset")),
         ],
         10 => vec![
             row("about", "Cascade", "A tiny native notch, taskbar and Start menu for Windows.", Note),
