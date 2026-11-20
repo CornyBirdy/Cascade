@@ -293,7 +293,7 @@ unsafe fn own_icon(wic: &IWICImagingFactory) -> Result<Vec<u8>> {
 }
 
 /// Scales a bitmap to ICON_SIZE square, premultiplied BGRA.
-unsafe fn to_pixels(wic: &IWICImagingFactory, bmp: &IWICBitmap) -> Result<Vec<u8>> {
+pub(crate) unsafe fn to_pixels(wic: &IWICImagingFactory, bmp: &IWICBitmap) -> Result<Vec<u8>> {
     // Fant both ways: a cubic grows small icons a little sharper, but rings
     // at their see-through edges, which reads as a faint outline.
     let mode = WICBitmapInterpolationModeFant;

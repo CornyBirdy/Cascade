@@ -233,6 +233,11 @@ start_show_pinned = true
 # Instant file search: Start finds any file on the PC's NTFS drives as you
 # type, from the drives' own file tables (asks for permission once).
 file_index = false
+# Where folders open: cascade (Cascade's Files) or explorer (File Explorer).
+file_manager = cascade
+# Pictures open in: auto (Cascade's viewer in shell mode, where Photos can't
+# open; your usual app otherwise), cascade, or windows.
+photo_viewer = auto
 start_show_profile = true
 # Show the Cascade (settings) button above Power.
 start_show_cascade = true
@@ -403,6 +408,8 @@ pub struct Config {
     pub start_show_recent: bool,
     pub start_show_pinned: bool,
     pub file_index: bool,
+    pub file_manager: String,
+    pub photo_viewer: String,
     pub start_show_profile: bool,
     pub start_show_cascade: bool,
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
@@ -504,6 +511,8 @@ impl Default for Config {
             start_show_recent: true,
             start_show_pinned: true,
             file_index: false,
+            file_manager: "cascade".into(),
+            photo_viewer: "auto".into(),
             start_show_profile: true,
             start_show_cascade: true,
             start_places: [true; 8],
@@ -767,6 +776,8 @@ impl Config {
                 "start_show_recent" => set_b(&mut c.start_show_recent),
                 "start_show_pinned" => set_b(&mut c.start_show_pinned),
                 "file_index" => set_b(&mut c.file_index),
+                "file_manager" if matches!(v, "cascade" | "explorer") => c.file_manager = v.into(),
+                "photo_viewer" if matches!(v, "auto" | "cascade" | "windows") => c.photo_viewer = v.into(),
                 "start_show_profile" => set_b(&mut c.start_show_profile),
                 "start_show_cascade" => set_b(&mut c.start_show_cascade),
                 _ if place_index(k).is_some() => {
@@ -928,6 +939,8 @@ impl Config {
             "start_sidebar_compact" => b(self.start_sidebar_compact),
             "start_show_recent" => b(self.start_show_recent),
             "file_index" => b(self.file_index),
+            "file_manager" => self.file_manager.clone(),
+            "photo_viewer" => self.photo_viewer.clone(),
             "start_show_pinned" => b(self.start_show_pinned),
             "start_show_profile" => b(self.start_show_profile),
             "start_show_cascade" => b(self.start_show_cascade),

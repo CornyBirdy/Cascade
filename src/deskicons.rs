@@ -980,7 +980,7 @@ unsafe fn context_menu(paths: &[String]) -> Option<IContextMenu> {
 }
 
 /// Runs one of the shell's verbs ("delete", "copy", "cut", "paste") on items.
-fn verb(owner: HWND, paths: &[String], name: &str, shift: bool) {
+pub(crate) fn verb(owner: HWND, paths: &[String], name: &str, shift: bool) {
     unsafe {
         let Some(cm) = context_menu(paths) else { return };
         // Handlers know their verbs once they've filled a menu.
@@ -1051,12 +1051,16 @@ pub fn delete(owner: HWND, paths: &[String], for_good: bool) {
 /// Ctrl+V: what's on the clipboard, into the Desktop folder. On a thread of
 /// its own: the shell's paste is the whole copy, however long it takes.
 pub fn paste(owner: HWND) {
+    if let Some(dir) = user_desktop() {
+        paste_into(owner, &dir);
+    }
+}
+
+/// What's on the clipboard, into folder `dir` (a copy or a move), on a thread of its own.
+pub fn paste_into(owner: HWND, dir: &std::path::Path) {
     let owner = owner.0 as isize;
-    crate::shell::off_thread(move || {
-        if let Some(dir) = user_desktop() {
-            verb(HWND(owner as *mut _), &[dir.to_string_lossy().into_owned()], "paste", false);
-        }
-    });
+    let dir = dir.to_string_lossy().into_owned();
+    crate::shell::off_thread(move || verb(HWND(owner as *mut _), &[dir], "paste", false));
 }
 
 /// Shows the shell's own menu for the desktop items `paths` at the pointer, and does what's picked.
@@ -1169,7 +1173,7 @@ impl DeskIcons {
 static MADE: std::sync::Mutex<Option<(PathBuf, Instant)>> = std::sync::Mutex::new(None);
 
 /// A free name on the desktop: "New folder", then "New folder (2)" and on.
-fn free_name(dir: &std::path::Path, stem: &str, ext: &str) -> Option<PathBuf> {
+pub(crate) fn free_name(dir: &std::path::Path, stem: &str, ext: &str) -> Option<PathBuf> {
     (1..1000)
         .map(|n| if n == 1 { format!("{stem}{ext}") } else { format!("{stem} ({n}){ext}") })
         .map(|f| dir.join(f))
@@ -1217,8 +1221,14 @@ pub fn can_paste() -> bool {
 /// Paste shortcut: a shortcut on the desktop to each file on the clipboard
 /// ("Name - Shortcut", as Explorer names them), on a thread of its own.
 pub fn paste_shortcut(_owner: HWND) {
-    crate::shell::off_thread(|| unsafe {
-        let Some(dir) = user_desktop() else { return };
+    if let Some(dir) = user_desktop() {
+        paste_shortcut_into(dir);
+    }
+}
+
+/// Shortcuts to what's on the clipboard, in folder `dir`.
+pub fn paste_shortcut_into(dir: PathBuf) {
+    crate::shell::off_thread(move || unsafe {
         let Ok(data) = OleGetClipboard() else { return };
         for f in crate::drop::files(&data) {
             let target = PathBuf::from(&f);

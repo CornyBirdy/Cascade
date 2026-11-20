@@ -1574,6 +1574,9 @@ pub fn open(target: &str, admin: bool) {
         open_files();
         return;
     }
+    if !admin && open_in_cascade(target) {
+        return;
+    }
     if lower.starts_with("ms-settings:") {
         open_settings(target);
         return;
@@ -1821,8 +1824,30 @@ pub fn is_bare_explorer(target: &str) -> bool {
 /// A File Explorer window. Always with a folder to open: asked for nothing in
 /// particular while it isn't the shell, Explorer may try to become it.
 pub fn open_files() {
+    if crate::config::Config::load().file_manager != "explorer" {
+        crate::appwin::launch(&["--files"]);
+        return;
+    }
     // Quick access (Home on Windows 11).
     shell::launch("explorer.exe", "shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}", false);
+}
+
+/// Whether Cascade's own Files or viewer takes `target` (a folder, or a
+/// picture whose app needs Explorer), and if so opens it there.
+pub fn open_in_cascade(target: &str) -> bool {
+    let t = target.trim().trim_matches('"');
+    let folder = std::path::Path::new(t).is_dir()
+        || t.starts_with("::{")
+        || t.to_ascii_lowercase().starts_with("shell:") && !t.to_ascii_lowercase().starts_with("shell:appsfolder");
+    if folder && crate::config::Config::load().file_manager != "explorer" {
+        crate::appwin::launch(&["--files", t]);
+        return true;
+    }
+    if crate::viewer::should_handle(t) {
+        crate::appwin::launch(&["--view", t]);
+        return true;
+    }
+    false
 }
 
 /// The Run box (Win+R). Explorer's own shows it; this is the same dialog,

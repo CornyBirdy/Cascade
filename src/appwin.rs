@@ -174,6 +174,7 @@ pub fn init() {
     unsafe {
         let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
+    crate::shellmode::detect();
     let cfg = crate::config::Config::load();
     crate::theme::set(&cfg.theme);
     crate::theme::set_accent(&cfg.accent, cfg.accent_glass);

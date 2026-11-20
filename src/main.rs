@@ -25,6 +25,8 @@ mod drop;
 mod ducker;
 mod emoji;
 mod fileindex;
+mod files;
+mod filesio;
 mod gfx;
 mod helper;
 mod http;
@@ -64,6 +66,7 @@ mod ui;
 mod update;
 mod usage;
 mod vdesk;
+mod viewer;
 mod wallpaper;
 mod weather;
 mod widgets;
@@ -190,6 +193,14 @@ fn main() {
     let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned());
     if let Some(path) = after("--disk") {
         diskmap::run(path);
+        return;
+    }
+    if let Some(path) = after("--files") {
+        files::run(path);
+        return;
+    }
+    if let Some(path) = after("--view") {
+        viewer::run(path);
         return;
     }
     // The instant-search index, run with admin rights by its task (see `fileindex`).

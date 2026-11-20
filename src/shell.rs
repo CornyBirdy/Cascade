@@ -1000,6 +1000,14 @@ pub fn open(target: &str) {
         crate::shellmode::open(target, false);
         return;
     }
+    // Folders Cascade opens go to its Files (and pictures to its viewer) when set to.
+    if crate::shellmode::is_bare_explorer(target) && crate::config::Config::load().file_manager == "cascade" {
+        crate::appwin::launch(&["--files"]);
+        return;
+    }
+    if crate::shellmode::open_in_cascade(target) {
+        return;
+    }
     open_direct(target);
 }
 

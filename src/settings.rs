@@ -699,6 +699,18 @@ fn rows(section: usize) -> Vec<Row> {
                 Choice(&[("cards", "Cards"), ("large", "Large"), ("icons", "Icons"), ("list", "List")]),
             ),
             row(
+                "file_manager",
+                "Open folders in",
+                "Cascade's Files (tabs, instant search, no Explorer needed) or File Explorer.",
+                Choice(&[("cascade", "Files"), ("explorer", "File Explorer")]),
+            ),
+            row(
+                "photo_viewer",
+                "Open pictures in",
+                "Auto: Cascade's viewer in shell mode (where Photos can't open), your usual app otherwise.",
+                Choice(&[("auto", "Auto"), ("cascade", "Cascade"), ("windows", "Usual app")]),
+            ),
+            row(
                 "priority",
                 "Priority",
                 "How much of the PC Cascade gets, so the taskbar, Start and the notch never lag behind a game or a busy app.",
