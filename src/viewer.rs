@@ -291,7 +291,9 @@ impl State {
         // Straight alpha, as the clipboard's pictures are.
         let px: Vec<u32> = p
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
                 let a = c[3] as u32;
                 let un = |v: u8| (v as u32 * 255 + a / 2).checked_div(a).unwrap_or(0).min(255);

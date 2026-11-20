@@ -379,8 +379,14 @@ unsafe fn follow(h: HANDLE, vol: Shared, journal: u64, mut next: i64) {
                 u16::from_le_bytes(b[56..58].try_into().unwrap_or_default()) as usize,
                 u16::from_le_bytes(b[58..60].try_into().unwrap_or_default()) as usize,
             );
-            let units: Vec<u16> =
-                b.get(no..no + nl).unwrap_or(&[]).chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = b
+                .get(no..no + nl)
+                .unwrap_or(&[])
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
             changed.push((frn, reason, parent, String::from_utf16_lossy(&units), attrs));
             at += len;
         }

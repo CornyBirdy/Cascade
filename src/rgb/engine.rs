@@ -232,7 +232,7 @@ fn grab_screen() -> Option<(usize, usize, Vec<u8>)> {
             SetStretchBltMode(mem, HALFTONE);
             if StretchBlt(mem, 0, 0, W, H, Some(screen), 0, 0, sw, sh, SRCCOPY).as_bool() && !bits.is_null() {
                 let px = std::slice::from_raw_parts(bits as *const u8, (W * H * 4) as usize);
-                let rgb: Vec<u8> = px.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+                let rgb: Vec<u8> = px.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
                 out = Some((W as usize, H as usize, rgb));
             }
             SelectObject(mem, old);

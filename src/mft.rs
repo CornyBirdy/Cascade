@@ -111,8 +111,13 @@ pub fn parse(rec: &[u8], number: u64) -> Option<Record> {
                     let n = *v.get(64)? as usize;
                     // Keep the Win32 name over the 8.3 one.
                     if r.name.is_none() || r.namespace == 2 {
-                        let units: Vec<u16> =
-                            v.get(66..66 + n * 2)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                        let units: Vec<u16> = v
+                            .get(66..66 + n * 2)?
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
                         r.name = Some(String::from_utf16_lossy(&units));
                         r.namespace = ns;
                         r.parent = record_number(u64_at(v, 0)?);
