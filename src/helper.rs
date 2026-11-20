@@ -411,3 +411,23 @@ pub fn restart() {
         });
     }
 }
+
+/// Makes sure an elevated sign-in task `name` runs `cascade.exe {args}`
+/// (asks for permission only if it has to create it). True if it's there.
+pub fn ensure_task(name: &str, args: &str, desc: &str) -> bool {
+    if schtasks(&format!("/Query /TN \"{name}\""), false) {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    create_task(name, &task_xml(&exe.to_string_lossy(), args, desc, true))
+}
+
+/// Starts task `name` now (no prompt: it was approved when it was made).
+pub fn run_task(name: &str) -> bool {
+    schtasks(&format!("/Run /TN \"{name}\""), false)
+}
+
+/// Removes task `name` (asks for permission).
+pub fn delete_task(name: &str) {
+    schtasks(&format!("/Delete /F /TN \"{name}\""), true);
+}

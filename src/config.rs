@@ -230,6 +230,9 @@ start_sidebar_compact = true
 start_show_recent = true
 # Show the Pinned apps grid, and the account button at the top of the sidebar.
 start_show_pinned = true
+# Instant file search: Start finds any file on the PC's NTFS drives as you
+# type, from the drives' own file tables (asks for permission once).
+file_index = false
 start_show_profile = true
 # Show the Cascade (settings) button above Power.
 start_show_cascade = true
@@ -399,6 +402,7 @@ pub struct Config {
     pub start_sidebar_compact: bool,
     pub start_show_recent: bool,
     pub start_show_pinned: bool,
+    pub file_index: bool,
     pub start_show_profile: bool,
     pub start_show_cascade: bool,
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
@@ -499,6 +503,7 @@ impl Default for Config {
             start_sidebar_compact: true,
             start_show_recent: true,
             start_show_pinned: true,
+            file_index: false,
             start_show_profile: true,
             start_show_cascade: true,
             start_places: [true; 8],
@@ -761,6 +766,7 @@ impl Config {
                 "start_sidebar_compact" => set_b(&mut c.start_sidebar_compact),
                 "start_show_recent" => set_b(&mut c.start_show_recent),
                 "start_show_pinned" => set_b(&mut c.start_show_pinned),
+                "file_index" => set_b(&mut c.file_index),
                 "start_show_profile" => set_b(&mut c.start_show_profile),
                 "start_show_cascade" => set_b(&mut c.start_show_cascade),
                 _ if place_index(k).is_some() => {
@@ -921,6 +927,7 @@ impl Config {
             "start_show_sidebar" => b(self.start_show_sidebar),
             "start_sidebar_compact" => b(self.start_sidebar_compact),
             "start_show_recent" => b(self.start_show_recent),
+            "file_index" => b(self.file_index),
             "start_show_pinned" => b(self.start_show_pinned),
             "start_show_profile" => b(self.start_show_profile),
             "start_show_cascade" => b(self.start_show_cascade),

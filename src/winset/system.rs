@@ -411,6 +411,7 @@ pub fn action(key: &str, owner: HWND) -> Option<()> {
         "win_accounts" => {
             crate::shell::launch("netplwiz.exe", "", false);
         }
+        "win_diskmap" => crate::appwin::launch(&["--disk"]),
         "win_lock" => unsafe {
             let _ = windows::Win32::System::Shutdown::LockWorkStation();
         },

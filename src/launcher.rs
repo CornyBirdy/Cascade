@@ -47,6 +47,9 @@ const SIDE_ROW: f32 = 38.0;
 
 /// Opens Cascade's settings window (listed with the apps).
 pub const SETTINGS_TARGET: &str = "cascade:settings";
+/// Cascade's own apps in Start: (name, target, the flag that starts them).
+pub const OWN_APPS: [(&str, &str, &str); 2] =
+    [("Files", "cascade:files", "--files"), ("Disk Usage", "cascade:disk", "--disk")];
 
 /// Sidebar places: label, what to open, glyph.
 const PLACES: [(&str, &str, Glyph); 8] = [
@@ -150,6 +153,9 @@ unsafe fn scan() -> Result<Vec<AppEntry>> {
         out.push(AppEntry { name, target: format!("shell:AppsFolder\\{id}") });
     }
     out.push(AppEntry { name: "Cascade Settings".into(), target: SETTINGS_TARGET.into() });
+    for (name, target, _) in OWN_APPS {
+        out.push(AppEntry { name: name.into(), target: target.into() });
+    }
     out.sort_by_key(|a| a.name.to_lowercase());
     out.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     Ok(out)
@@ -164,6 +170,20 @@ pub const SETTINGS_PAGE: &str = "cascade-settings:";
 pub fn spawn_files(query: String, generation: u32) {
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // Instant search, when it's on: every drive, in milliseconds.
+        if let Some(hits) = crate::fileindex::search(&query, "", 6) {
+            if !hits.is_empty() || crate::fileindex::ready() {
+                let found = hits
+                    .into_iter()
+                    .map(|h| (h.path.rsplit('\\').next().unwrap_or(&h.path).to_string(), h.path))
+                    .collect::<Vec<_>>();
+                let ptr = Box::into_raw(Box::new((generation, found)));
+                if !msg::post(msg::FILES, 0, ptr as isize) {
+                    drop(Box::from_raw(ptr));
+                }
+                return;
+            }
+        }
         // A moment to let typing settle: a newer search makes this one moot.
         std::thread::sleep(std::time::Duration::from_millis(250));
         let found = search_files(&query);
@@ -618,7 +638,7 @@ impl Launcher {
     }
 
     fn icon_id<'a>(&'a self, target: &'a str) -> &'a str {
-        if target == SETTINGS_TARGET {
+        if target == SETTINGS_TARGET || OWN_APPS.iter().any(|a| a.1 == target) {
             &self.exe
         } else {
             target
@@ -851,6 +871,10 @@ impl Launcher {
     fn launch(&self, target: String) -> Action {
         if target == SETTINGS_TARGET {
             Action::Settings
+        } else if let Some((_, _, flag)) = OWN_APPS.iter().find(|a| a.1 == target) {
+            record_launch(&target);
+            crate::appwin::launch(&[flag]);
+            Action::Close
         } else {
             record_launch(&target);
             Action::Launch(target)

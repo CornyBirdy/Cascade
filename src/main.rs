@@ -4,6 +4,7 @@
 #[cfg(not(windows))]
 compile_error!("Cascade is a Windows app.");
 
+mod appwin;
 mod audio;
 mod backdrop;
 mod banner;
@@ -18,10 +19,12 @@ mod deskslide;
 mod desktops;
 mod devices;
 mod dictate;
+mod diskmap;
 mod dock;
 mod drop;
 mod ducker;
 mod emoji;
+mod fileindex;
 mod gfx;
 mod helper;
 mod http;
@@ -32,6 +35,7 @@ mod lang;
 mod launcher;
 mod media;
 mod menu;
+mod mft;
 mod mixer;
 mod mouseedge;
 mod mousehook;
@@ -179,6 +183,18 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--key-helper") {
         helper::run();
+        return;
+    }
+    // Cascade's own apps, each in a process of its own (see `appwin`).
+    let args: Vec<String> = std::env::args().collect();
+    let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned());
+    if let Some(path) = after("--disk") {
+        diskmap::run(path);
+        return;
+    }
+    // The instant-search index, run with admin rights by its task (see `fileindex`).
+    if std::env::args().any(|a| a == "--indexer") {
+        fileindex::run_indexer();
         return;
     }
     // What Windows starts in shell mode: the guard, which starts Cascade

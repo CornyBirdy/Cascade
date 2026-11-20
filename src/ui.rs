@@ -1425,6 +1425,7 @@ impl App {
     fn start(&mut self) {
         crate::priority::apply(&self.cfg.priority);
         crate::priority::boost_ui_thread(&self.cfg.priority);
+        crate::fileindex::start(self.cfg.file_index);
         let ready = shell::shell_ready();
         config::log(&format!(
             "started {} s after Windows (Explorer's taskbar up: {ready}; starts with Windows: {})",
@@ -3747,6 +3748,9 @@ impl App {
     fn reload_config(&mut self) {
         let old = self.cfg.clone();
         self.cfg = Config::load();
+        if self.cfg.file_index != old.file_index {
+            crate::fileindex::set_enabled(self.cfg.file_index);
+        }
         if self.cfg.priority != old.priority {
             crate::priority::apply(&self.cfg.priority);
             crate::priority::boost_ui_thread(&self.cfg.priority);

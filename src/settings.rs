@@ -925,6 +925,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("launcher", "Cascade Start menu", "Opened by the Start button on the taskbar.", Toggle),
             row("launcher_win_key", "Open with the Win key", "Win+E, Win+R and other shortcuts keep working.", Toggle),
             row(
+                "file_index",
+                "Instant file search",
+                "Finds any file or folder on your drives as you type, from Windows' own file tables, like Everything. Asks for permission once; about 45 MB of memory per million files.",
+                Toggle,
+            ),
+            row(
                 "admin_helper",
                 "Work over admin apps",
                 "So the Win key works over Task Manager. Asks for permission once.",
@@ -1436,6 +1442,7 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_lock", "Lock", "Locks the PC (Win+L).", Button("Lock")),
             heading("h_storage", "Storage"),
             row("win_storage", "Storage", "Space on each drive.", Note),
+            row("win_diskmap", "Disk usage", "What's taking the space, as a map you can click into.", Button("Open")),
             row("win_storage_sense", "Storage Sense", "Empties the Recycle Bin and temporary files now and then.", Toggle),
             row("win_cleanup", "Free up space", "Windows' Disk Cleanup.", Button("Clean up")),
             heading("h_system_more", "System"),
