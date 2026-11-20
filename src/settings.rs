@@ -78,7 +78,8 @@ fn nav_icon(i: usize) -> Option<char> {
         19 => 0xE774, // Globe
         20 => 0xE776, // Ease of access
         21 => 0xE72E, // Lock
-        22 => 0xE770, // System
+        22 => 0xEA18, // Shield
+        23 => 0xE770, // System
         _ => return None,
     };
     char::from_u32(code)
@@ -90,7 +91,7 @@ const LINE_H: f32 = 15.0;
 /// Most lines a description wraps to.
 const MAX_LINES: usize = 3;
 
-pub const SECTIONS: [&str; 23] = [
+pub const SECTIONS: [&str; 24] = [
     "General",
     "Appearance",
     "Notch",
@@ -114,6 +115,7 @@ pub const SECTIONS: [&str; 23] = [
     "Time & language",
     "Accessibility",
     "Privacy & security",
+    "Debloat",
     "System",
 ];
 
@@ -130,7 +132,8 @@ pub mod page {
     pub const TIME: usize = 19;
     pub const ACCESS: usize = 20;
     pub const PRIVACY: usize = 21;
-    pub const SYSTEM: usize = 22;
+    pub const DEBLOAT: usize = 22;
+    pub const SYSTEM: usize = 23;
 }
 
 /// Where sidebar entry `i` starts (before scrolling): under its group's title.
@@ -1404,6 +1407,25 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_cap_files", "File system", "Let apps that ask open any file you can.", Toggle),
             row("win_cap_screenshots", "Screenshots", "Let apps take pictures of the screen.", Toggle),
             row("win_cap_radios", "Radios", "Let apps turn Wi-Fi and Bluetooth on and off.", Toggle),
+        ],
+        page::DEBLOAT => vec![
+            row("win_db_status", "Debloat", "", Note),
+            row("win_db_all", "Turn everything on", "Every switch below (Windows asks once for the machine-wide ones).", Button("All on")),
+            row("win_db_none", "Turn everything off", "Windows' own defaults back, for every switch below.", Button("All off")),
+            heading("h_db_ai", "Telemetry and AI"),
+            row("win_db_telemetry", "Telemetry", "Optional diagnostic data off, and the telemetry service stopped (Windows asks for permission).", Toggle),
+            row("win_db_copilot", "Copilot", "Turns Windows Copilot off.", Toggle),
+            row("win_db_recall", "Recall and Click to Do", "No snapshots of what's on your screen, and no Click to Do.", Toggle),
+            row("win_db_typing", "Typing and inking data", "Windows stops learning from what you type and write.", Toggle),
+            row("win_db_activity", "Activity history", "Windows stops keeping and uploading what you've opened (asks for permission).", Toggle),
+            heading("h_db_ads", "Ads and suggestions"),
+            row("win_db_suggestions", "Suggestions and sponsored apps", "No suggested apps in Start, no tips, no apps installed by themselves.", Toggle),
+            row("win_db_lockscreen", "Lock screen tips", "No fun facts and ads on the lock screen.", Toggle),
+            row("win_db_web_search", "Web results in Windows search", "Windows' own search stays on this PC (no Bing).", Toggle),
+            row("win_db_feedback", "Feedback requests", "Windows stops asking for feedback.", Toggle),
+            heading("h_db_bg", "In the background"),
+            row("win_db_edge", "Edge in the background", "No startup boost, and Edge closes when you close it.", Toggle),
+            row("win_db_delivery", "Sharing updates with other PCs", "Updates come from Microsoft only, not uploaded to or downloaded from other PCs (asks for permission).", Toggle),
         ],
         page::SYSTEM => vec![
             heading("h_about", "About"),

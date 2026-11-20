@@ -15,6 +15,7 @@
 pub mod access;
 pub mod apps;
 pub mod audio;
+pub mod debloat;
 pub mod display;
 pub mod gaming;
 pub mod input;
@@ -36,6 +37,7 @@ macro_rules! each_page {
             .or_else(|| audio::$f($($a),*))
             .or_else(|| power::$f($($a),*))
             .or_else(|| system::$f($($a),*))
+            .or_else(|| debloat::$f($($a),*))
     };
 }
 
@@ -98,6 +100,13 @@ pub(crate) fn set_reg_dword(root: HKEY, key: &str, value: &str, v: u32) -> bool 
             Some(&v as *const u32 as *const c_void),
             4,
         ) == ERROR_SUCCESS
+    }
+}
+
+/// Deletes a value (Windows then uses its default).
+pub(crate) fn del_reg_value(root: HKEY, key: &str, value: &str) {
+    unsafe {
+        let _ = RegDeleteKeyValueW(root, &HSTRING::from(key), &HSTRING::from(value));
     }
 }
 
