@@ -144,7 +144,13 @@ impl Kind {
     /// How many colours it takes (min, max).
     pub fn colours(self) -> (usize, usize) {
         match self {
-            Kind::Static | Kind::ColorPulse | Kind::Strobe | Kind::Heartbeat | Kind::Twinkle | Kind::Rain | Kind::Visor => (1, 4),
+            Kind::Static
+            | Kind::ColorPulse
+            | Kind::Strobe
+            | Kind::Heartbeat
+            | Kind::Twinkle
+            | Kind::Rain
+            | Kind::Visor => (1, 4),
             Kind::Gradient | Kind::ColorShift | Kind::Sequential => (2, 8),
             Kind::ColorWave | Kind::Marquee | Kind::TypeKey | Kind::TypeRipple | Kind::AudioPulse => (1, 2),
             Kind::Temperature | Kind::AudioVisualizer => (3, 3),
@@ -367,7 +373,8 @@ pub fn colour(e: &Effect, led: &Led, c: &Context) -> Rgb {
         Kind::Marquee => {
             let n = led.count.max(1) as f32;
             let seg = (size * 8.0 + 1.0).round();
-            let pos = (led.index as f32 + t * f * n * 0.5 * if e.dir == Dir::Left { -1.0 } else { 1.0 }).rem_euclid(seg * 2.0);
+            let pos = (led.index as f32 + t * f * n * 0.5 * if e.dir == Dir::Left { -1.0 } else { 1.0 })
+                .rem_euclid(seg * 2.0);
             if pos < seg {
                 first
             } else {
@@ -415,7 +422,9 @@ pub fn colour(e: &Effect, led: &Led, c: &Context) -> Rgb {
         }
         Kind::Plasma => {
             let s = 4.0 + (1.0 - size) * 8.0;
-            let v = (led.x * s + t * f).sin() + (led.y * s * 0.8 - t * f * 1.3).sin() + ((led.x + led.y) * s * 0.6 + t * f * 0.7).sin();
+            let v = (led.x * s + t * f).sin()
+                + (led.y * s * 0.8 - t * f * 1.3).sin()
+                + ((led.x + led.y) * s * 0.6 + t * f * 0.7).sin();
             Rgb::hue(v / 6.0 + t * f * 0.05)
         }
         Kind::Temperature => {
@@ -437,7 +446,9 @@ pub fn colour(e: &Effect, led: &Led, c: &Context) -> Rgb {
                 Rgb::BLACK
             }
         }
-        Kind::AudioPulse => first.mix(second, 1.0 - c.level.clamp(0.0, 1.0)).scale(0.15 + 0.85 * c.level.clamp(0.0, 1.0)),
+        Kind::AudioPulse => {
+            first.mix(second, 1.0 - c.level.clamp(0.0, 1.0)).scale(0.15 + 0.85 * c.level.clamp(0.0, 1.0))
+        }
         Kind::ScreenAmbience => match &c.screen {
             Some((w, h, px)) if *w > 0 && *h > 0 => {
                 let sx = ((led.x * *w as f32) as usize).min(w - 1);
@@ -526,7 +537,14 @@ mod tests {
             let e = Effect { kind: k, colours: k.default_colours(), ..Default::default() };
             for i in 0..50 {
                 c.t = i as f32 * 0.37;
-                let l = Led { x: (i % 7) as f32 / 6.0, y: (i % 5) as f32 / 4.0, index: i, count: 50, id: i as u32, key: Some(65) };
+                let l = Led {
+                    x: (i % 7) as f32 / 6.0,
+                    y: (i % 5) as f32 / 4.0,
+                    index: i,
+                    count: 50,
+                    id: i as u32,
+                    key: Some(65),
+                };
                 let col = colour(&e, &l, &c);
                 for v in [col.0, col.1, col.2] {
                     assert!((-0.001..=1.001).contains(&v) && v.is_finite(), "{k:?} gave {col:?}");

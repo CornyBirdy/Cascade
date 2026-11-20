@@ -139,7 +139,11 @@ fn audio_thread() {
                     peaks[b] = (peaks[b] * 0.995).max(mag).max(1e-3);
                     *out = (mag / peaks[b]).sqrt().min(1.0);
                 }
-                let level = if quiet.elapsed() > Duration::from_millis(300) { 0.0 } else { bands.iter().sum::<f32>() / BANDS as f32 };
+                let level = if quiet.elapsed() > Duration::from_millis(300) {
+                    0.0
+                } else {
+                    bands.iter().sum::<f32>() / BANDS as f32
+                };
                 *s.audio.lock().unwrap_or_else(|e| e.into_inner()) = (bands, level);
             }
             let _ = client.Stop();
@@ -184,12 +188,18 @@ impl CpuTemp {
                 return None;
             }
             let mut buf = vec![0u8; size as usize];
-            if PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr() as *mut _)) != 0 {
+            if PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr() as *mut _))
+                != 0
+            {
                 return None;
             }
             let items = std::slice::from_raw_parts(buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W, count as usize);
             // Kelvin; the hottest zone is the nearest to the CPU.
-            items.iter().map(|i| i.FmtValue.Anonymous.doubleValue as f32 - 273.15).filter(|t| *t > 0.0 && *t < 130.0).reduce(f32::max)
+            items
+                .iter()
+                .map(|i| i.FmtValue.Anonymous.doubleValue as f32 - 273.15)
+                .filter(|t| *t > 0.0 && *t < 130.0)
+                .reduce(f32::max)
         }
     }
 }
@@ -252,7 +262,10 @@ fn hardware_mode(d: &Controller, hw: &super::model::Hardware) -> Option<(usize, 
     m.direction = hw.direction;
     if !hw.colours.is_empty() && m.colors_max > 0 {
         let n = (hw.colours.len() as u32).clamp(m.colors_min.max(1), m.colors_max) as usize;
-        m.colors = (0..n).map(|k| hw.colours[k.min(hw.colours.len() - 1)]).map(|c| pack((c >> 16) as u8, (c >> 8) as u8, c as u8)).collect();
+        m.colors = (0..n)
+            .map(|k| hw.colours[k.min(hw.colours.len() - 1)])
+            .map(|c| pack((c >> 16) as u8, (c >> 8) as u8, c as u8))
+            .collect();
     }
     Some((i, m))
 }
@@ -318,7 +331,14 @@ impl Engine {
         }
         self.devices = list
             .into_iter()
-            .map(|c| Device { c, leds: Vec::new(), sent: Vec::new(), sent_at: Instant::now(), hardware: false, off: false })
+            .map(|c| Device {
+                c,
+                leds: Vec::new(),
+                sent: Vec::new(),
+                sent_at: Instant::now(),
+                hardware: false,
+                off: false,
+            })
             .collect();
         self.configured = false;
     }
@@ -461,7 +481,12 @@ impl Engine {
                     let mut c = Rgb::BLACK;
                     for l in &layers {
                         if l.covers(&key, *zone) {
-                            c = effects::blend(c, effects::colour(&l.effect, led, &ctx), l.blend, l.opacity.clamp(0.0, 1.0));
+                            c = effects::blend(
+                                c,
+                                effects::colour(&l.effect, led, &ctx),
+                                l.blend,
+                                l.opacity.clamp(0.0, 1.0),
+                            );
                         }
                     }
                     let [r, g, b] = c.scale(bright).to_bytes();
@@ -590,7 +615,12 @@ pub fn run() {
             return;
         }
         let inst = crate::appwin::instance();
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: w!("CascadeRgbEngine"), ..Default::default() };
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(proc),
+            hInstance: inst,
+            lpszClassName: w!("CascadeRgbEngine"),
+            ..Default::default()
+        };
         RegisterClassW(&wc);
         let Ok(hwnd) = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -609,8 +639,13 @@ pub fn run() {
             return;
         };
         let _ = windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification(hwnd, 0);
-        const DISPLAY_STATE: windows::core::GUID = windows::core::GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
-        let _ = windows::Win32::System::Power::RegisterPowerSettingNotification(HANDLE(hwnd.0), &DISPLAY_STATE, REGISTER_NOTIFICATION_FLAGS(0));
+        const DISPLAY_STATE: windows::core::GUID =
+            windows::core::GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+        let _ = windows::Win32::System::Power::RegisterPowerSettingNotification(
+            HANDLE(hwnd.0),
+            &DISPLAY_STATE,
+            REGISTER_NOTIFICATION_FLAGS(0),
+        );
         let _ = windows::Win32::UI::Accessibility::SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,

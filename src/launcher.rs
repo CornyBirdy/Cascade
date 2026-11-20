@@ -48,8 +48,11 @@ const SIDE_ROW: f32 = 38.0;
 /// Opens Cascade's settings window (listed with the apps).
 pub const SETTINGS_TARGET: &str = "cascade:settings";
 /// Cascade's own apps in Start: (name, target, the flag that starts them).
-pub const OWN_APPS: [(&str, &str, &str); 2] =
-    [("Files", "cascade:files", "--files"), ("Disk Usage", "cascade:disk", "--disk")];
+pub const OWN_APPS: [(&str, &str, &str); 3] = [
+    ("Files", "cascade:files", "--files"),
+    ("Disk Usage", "cascade:disk", "--disk"),
+    ("Lighting", "cascade:lighting", "--rgb"),
+];
 
 /// Sidebar places: label, what to open, glyph.
 const PLACES: [(&str, &str, Glyph); 8] = [

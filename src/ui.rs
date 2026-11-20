@@ -4086,6 +4086,7 @@ impl App {
                 }
             }
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
+            Change::Action("lighting_open") => crate::appwin::launch(&["--rgb"]),
             Change::Action("open_config") => shell::open_file(&config::path()),
             Change::Action("open_folder") => shell::open_file(&config::dir()),
             Change::Action("changelog") => shell::open("https://github.com/CornyBirdy/Cascade/releases"),

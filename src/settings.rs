@@ -1274,6 +1274,13 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_net_reset", "Network reset", "Sets every adapter back to Windows' defaults (needs a restart).", Button("Reset now")),
         ],
         page::DEVICES => vec![
+            heading("h_rgb", "Lighting"),
+            row(
+                "lighting_open",
+                "RGB lighting",
+                "Profiles, effects and layout for Corsair, ASUS Aura, RGB Fusion, Razer, Logitech, HyperX and more, without their apps.",
+                Button("Open Lighting"),
+            ),
             heading("h_bt", "Bluetooth"),
             row("win_bt", "Bluetooth", "", Toggle),
             row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),

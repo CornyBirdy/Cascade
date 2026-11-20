@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// OpenRGB's Windows build (portable, 64-bit), from its own release page.
-pub const DOWNLOAD: &str = "https://codeberg.org/OpenRGB/OpenRGB/releases/download/release_1.1/OpenRGB_1.1_Windows_64_8e16de2.zip";
+pub const DOWNLOAD: &str =
+    "https://codeberg.org/OpenRGB/OpenRGB/releases/download/release_1.1/OpenRGB_1.1_Windows_64_8e16de2.zip";
 pub const PAWNIO: &str = "https://pawnio.eu";
 const TASK: &str = "Cascade OpenRGB";
 
@@ -41,7 +42,7 @@ pub fn find(custom: &str) -> Option<PathBuf> {
     find_in(&dir(), 2).or_else(|| {
         ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
             .iter()
-            .filter_map(|v| std::env::var_os(v))
+            .filter_map(std::env::var_os)
             .map(PathBuf::from)
             .flat_map(|base| [base.join("OpenRGB"), base.join("Programs").join("OpenRGB")])
             .find_map(|d| find_in(&d, 1))
@@ -94,7 +95,11 @@ pub fn run_elevated() {
 /// Sets up (asks for permission once) or removes the task that starts OpenRGB with administrator rights.
 pub fn set_admin(on: bool) -> bool {
     if on {
-        crate::helper::ensure_task(TASK, "--openrgb", "Starts OpenRGB with administrator rights for Cascade's lighting (RAM, motherboard and graphics card RGB).")
+        crate::helper::ensure_task(
+            TASK,
+            "--openrgb",
+            "Starts OpenRGB with administrator rights for Cascade's lighting (RAM, motherboard and graphics card RGB).",
+        )
     } else {
         crate::helper::delete_task(TASK);
         true

@@ -262,6 +262,12 @@ fn main() {
     }
     update::cleanup();
     shellmode::detect();
+    // The lighting engine, once Lighting has been set up and is on (see `rgb::engine`).
+    std::thread::spawn(|| {
+        if rgb::model::Lighting::path().exists() && rgb::model::Lighting::load().settings.on {
+            rgb::engine::ensure(true);
+        }
+    });
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         // For dropping files on the taskbar (see `drop`).

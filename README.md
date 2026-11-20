@@ -149,6 +149,18 @@ If you're ever left with a blank screen anyway: **Ctrl+Shift+Esc** opens Task Ma
 
 It's experimental: `cascade.log` (Settings → About → Data folder) records what shell mode did, in lines beginning *shell mode:*, *shell guard:*, *desktops:*, *wallpaper:* and *snip:*.
 
+## Lighting
+
+RGB for every brand in one app (**Lighting** in Start, or Settings > Bluetooth & devices), so iCUE, Synapse, G Hub, Armoury Crate, RGB Fusion and the rest can go.
+
+- **Profiles** down the side: make, rename, duplicate and delete them; link programs to one and it comes on while they're in front.
+- **Lighting**: a profile is layers of effects, the top one over the rest: static colours, gradients, rainbows and waves, visor, rain, marquee, twinkle, strobe, heartbeat, fire, plasma, temperature (CPU or graphics card), audio visualiser and pulse, screen ambience, and keys that light as you type. Each layer covers all devices or the ones you pick, with its own colours, speed, size, direction, opacity and blend. A live preview shows every device lit.
+- **Layout**: drag your devices to where they sit on your desk and resize them, so a wave runs across all of them as one. Fans can be rings, and any device can be flipped or left out.
+- **Devices**: leave a device on the profile's layers, or give it one of its own hardware modes (with its colours, speed, brightness and direction, saved to the device so it keeps it with Cascade closed). Fan and strip headers take their LED counts here.
+- **Settings**: on or off, brightness, frame rate, switching with programs, off while the PC is locked or its screens are off.
+
+It drives the hardware through [OpenRGB](https://openrgb.org) (free and open source), which supports Corsair, ASUS Aura, Gigabyte RGB Fusion, Razer, Logitech, HyperX, MSI, NZXT, SteelSeries and hundreds of other devices. **Get OpenRGB** in Lighting's settings fetches it into Cascade's data folder; it runs out of sight, and Cascade's lighting engine (`cascade.exe --rgb-engine`, at normal priority) feeds it. Keyboards, mice, headsets and USB controllers work as they are; **RAM, motherboard and graphics card lighting** need *Administrator rights* on (a scheduled task, asked for once) and the [PawnIO](https://pawnio.eu) driver. Close the vendors' own apps (Lighting lists the ones running) and stop them starting with Windows: they hold their devices and fight for them.
+
 ## Settings
 
 Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. The box at the top of the sidebar searches every page by a setting's name, description or page; a result works just like the setting on its own page. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Settings that wouldn't do anything as things are set up stay out of the way: the lip's length shows only in Lip style, the notch's width only in Notch style, the custom colour only with Custom picked, the Start menu's parts only with Cascade's Start menu on, and so on. They come back as soon as they'd make a difference. When one needs something on another page (Win+N needs Cascade's taskbar), its description says so, in amber. Starting Cascade again while it's already running also opens Settings.

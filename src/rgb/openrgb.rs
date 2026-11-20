@@ -28,6 +28,7 @@ pub const DEVICE_LIST_UPDATED: u32 = 100;
 pub const REQUEST_RESCAN_DEVICES: u32 = 140;
 pub const RESIZEZONE: u32 = 1000;
 pub const UPDATELEDS: u32 = 1050;
+#[allow(dead_code)] // The protocol, in full.
 pub const UPDATEZONELEDS: u32 = 1051;
 pub const SETCUSTOMMODE: u32 = 1100;
 pub const UPDATEMODE: u32 = 1101;
@@ -39,19 +40,28 @@ pub const MODE_HAS_DIRECTION_LR: u32 = 1 << 1;
 pub const MODE_HAS_DIRECTION_UD: u32 = 1 << 2;
 pub const MODE_HAS_DIRECTION_HV: u32 = 1 << 3;
 pub const MODE_HAS_BRIGHTNESS: u32 = 1 << 4;
+#[allow(dead_code)] // The protocol, in full.
 pub const MODE_HAS_PER_LED_COLOR: u32 = 1 << 5;
+#[allow(dead_code)] // The protocol, in full.
 pub const MODE_HAS_MODE_SPECIFIC_COLOR: u32 = 1 << 6;
+#[allow(dead_code)] // The protocol, in full.
 pub const MODE_HAS_RANDOM_COLOR: u32 = 1 << 7;
 pub const MODE_MANUAL_SAVE: u32 = 1 << 8;
 pub const MODE_AUTOMATIC_SAVE: u32 = 1 << 9;
 
 /// How a mode takes colours.
+#[allow(dead_code)] // The protocol, in full.
 pub const COLORS_NONE: u32 = 0;
+#[allow(dead_code)] // The protocol, in full.
 pub const COLORS_PER_LED: u32 = 1;
+#[allow(dead_code)] // The protocol, in full.
 pub const COLORS_MODE_SPECIFIC: u32 = 2;
+#[allow(dead_code)] // The protocol, in full.
 pub const COLORS_RANDOM: u32 = 3;
 
+#[allow(dead_code)] // The protocol, in full.
 pub const ZONE_SINGLE: i32 = 0;
+#[allow(dead_code)] // The protocol, in full.
 pub const ZONE_LINEAR: i32 = 1;
 pub const ZONE_MATRIX: i32 = 2;
 
@@ -150,8 +160,10 @@ impl Controller {
     }
 
     /// The mode for setting each LED from a program ("Direct" and the like).
+    #[allow(dead_code)] // The modes' own "Direct", where custom_mode isn't enough.
     pub fn direct_mode(&self) -> Option<usize> {
-        let by_name = |n: &str| self.modes.iter().position(|m| m.name.eq_ignore_ascii_case(n) && m.color_mode == COLORS_PER_LED);
+        let by_name =
+            |n: &str| self.modes.iter().position(|m| m.name.eq_ignore_ascii_case(n) && m.color_mode == COLORS_PER_LED);
         by_name("Direct").or_else(|| by_name("Custom")).or_else(|| by_name("Static"))
     }
 }
@@ -199,7 +211,14 @@ impl<'a> Reader<'a> {
 }
 
 fn read_mode(r: &mut Reader, version: u32) -> Option<Mode> {
-    let mut m = Mode { name: r.string()?, value: r.i32()?, flags: r.u32()?, speed_min: r.u32()?, speed_max: r.u32()?, ..Default::default() };
+    let mut m = Mode {
+        name: r.string()?,
+        value: r.i32()?,
+        flags: r.u32()?,
+        speed_min: r.u32()?,
+        speed_max: r.u32()?,
+        ..Default::default()
+    };
     if version >= 3 {
         m.brightness_min = r.u32()?;
         m.brightness_max = r.u32()?;
@@ -217,7 +236,14 @@ fn read_mode(r: &mut Reader, version: u32) -> Option<Mode> {
 }
 
 fn read_zone(r: &mut Reader, version: u32) -> Option<Zone> {
-    let mut z = Zone { name: r.string()?, kind: r.i32()?, leds_min: r.u32()?, leds_max: r.u32()?, leds_count: r.u32()?, matrix: None };
+    let mut z = Zone {
+        name: r.string()?,
+        kind: r.i32()?,
+        leds_min: r.u32()?,
+        leds_max: r.u32()?,
+        leds_count: r.u32()?,
+        matrix: None,
+    };
     let matrix_len = r.u16()? as usize;
     if matrix_len > 0 {
         let (h, w) = (r.u32()?, r.u32()?);
@@ -462,7 +488,14 @@ pub mod tests {
         b.extend_from_slice(&2u16.to_le_bytes());
         b.extend_from_slice(&0i32.to_le_bytes());
         for (n, cm) in [("Direct", COLORS_PER_LED), ("Rainbow", COLORS_NONE)] {
-            let m = Mode { name: n.into(), color_mode: cm, flags: MODE_HAS_SPEED, speed_max: 4, colors: vec![pack(1, 2, 3)], ..Default::default() };
+            let m = Mode {
+                name: n.into(),
+                color_mode: cm,
+                flags: MODE_HAS_SPEED,
+                speed_max: 4,
+                colors: vec![pack(1, 2, 3)],
+                ..Default::default()
+            };
             b.extend_from_slice(&mode_bytes(&m, 4));
         }
         b.extend_from_slice(&1u16.to_le_bytes());
@@ -517,7 +550,15 @@ pub mod tests {
 
     #[test]
     fn modes_round_trip() {
-        let m = Mode { name: "Breathing".into(), value: 7, flags: 3, speed: 2, brightness: 50, colors: vec![1, 2], ..Default::default() };
+        let m = Mode {
+            name: "Breathing".into(),
+            value: 7,
+            flags: 3,
+            speed: 2,
+            brightness: 50,
+            colors: vec![1, 2],
+            ..Default::default()
+        };
         let b = mode_bytes(&m, 4);
         assert_eq!(read_mode(&mut Reader::new(&b), 4).unwrap(), m);
     }
@@ -563,7 +604,12 @@ pub mod tests {
                 let (dev, id, p) = read(&mut s);
                 assert_eq!((dev, id), (i, REQUEST_CONTROLLER_DATA));
                 assert_eq!(p, 4u32.to_le_bytes());
-                reply(&mut s, i, REQUEST_CONTROLLER_DATA, &sample(if i == 0 { "Keyboard" } else { "Fan strip" }, 4 + i as usize * 8, i == 0));
+                reply(
+                    &mut s,
+                    i,
+                    REQUEST_CONTROLLER_DATA,
+                    &sample(if i == 0 { "Keyboard" } else { "Fan strip" }, 4 + i as usize * 8, i == 0),
+                );
             }
             assert_eq!(read(&mut s).1, SETCUSTOMMODE);
             let (dev, id, p) = read(&mut s);

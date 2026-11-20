@@ -36,7 +36,14 @@ pub struct Layer {
 
 impl Default for Layer {
     fn default() -> Self {
-        Layer { name: String::new(), effect: Effect::default(), target: Target::All, blend: Blend::Normal, opacity: 1.0, on: true }
+        Layer {
+            name: String::new(),
+            effect: Effect::default(),
+            target: Target::All,
+            blend: Blend::Normal,
+            opacity: 1.0,
+            on: true,
+        }
     }
 }
 
@@ -89,7 +96,13 @@ pub struct Profile {
 
 impl Default for Profile {
     fn default() -> Self {
-        Profile { name: "Default".into(), layers: vec![Layer::new(Kind::RainbowWave)], hardware: HashMap::new(), apps: Vec::new(), brightness: 1.0 }
+        Profile {
+            name: "Default".into(),
+            layers: vec![Layer::new(Kind::RainbowWave)],
+            hardware: HashMap::new(),
+            apps: Vec::new(),
+            brightness: 1.0,
+        }
     }
 }
 
@@ -141,7 +154,17 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { on: true, brightness: 1.0, fps: 30, auto_switch: true, off_when_idle: true, port: super::openrgb::PORT, screen_fps: 20, openrgb: String::new(), admin: false }
+        Settings {
+            on: true,
+            brightness: 1.0,
+            fps: 30,
+            auto_switch: true,
+            off_when_idle: true,
+            port: super::openrgb::PORT,
+            screen_fps: 20,
+            openrgb: String::new(),
+            admin: false,
+        }
     }
 }
 
@@ -161,7 +184,8 @@ impl Lighting {
     }
 
     pub fn load() -> Lighting {
-        let mut l: Lighting = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let mut l: Lighting =
+            std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         if l.profiles.is_empty() {
             l.profiles.push(Profile::default());
         }
@@ -185,7 +209,7 @@ impl Lighting {
         if self.settings.auto_switch {
             if let Some(e) = exe {
                 let e = e.to_ascii_lowercase();
-                if let Some(i) = self.profiles.iter().position(|p| p.apps.iter().any(|a| *a == e)) {
+                if let Some(i) = self.profiles.iter().position(|p| p.apps.contains(&e)) {
                     return i;
                 }
             }
@@ -202,12 +226,12 @@ impl Lighting {
                 continue;
             }
             let (w, h, ring) = match d.kind {
-                5 => (0.6, 0.22, false), // keyboard
+                5 => (0.6, 0.22, false),  // keyboard
                 6 => (0.08, 0.12, false), // mouse
-                7 => (0.3, 0.2, false),  // mouse mat
-                1 => (0.04, 0.3, false), // memory: upright
-                3 => (0.14, 0.14, true), // cooler: a ring
-                2 => (0.4, 0.08, false), // graphics card
+                7 => (0.3, 0.2, false),   // mouse mat
+                1 => (0.04, 0.3, false),  // memory: upright
+                3 => (0.14, 0.14, true),  // cooler: a ring
+                2 => (0.4, 0.08, false),  // graphics card
                 _ => (0.5, 0.06, false),
             };
             if y + h > 0.98 {

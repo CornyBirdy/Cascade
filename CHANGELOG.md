@@ -12,7 +12,11 @@ Settings > Updates > What's new opens the list.
 - **Instant file search** (Settings > Start menu): Start and Files find any file on your drives as you type, read straight from the drives' file tables and kept current from their change journals.
 - **Disk Usage**: what's taking the space, as a map you can click into, with the biggest items listed.
 - **Debloat** (Settings): switches for telemetry, Copilot, Recall, ads and suggestions, web search, feedback prompts, typing data, activity history, Edge in the background and update sharing. Every one can be turned back off; nothing is uninstalled.
+- **Lighting**: RGB for every brand in one place, instead of iCUE, Synapse, G Hub, Armoury Crate, RGB Fusion and NGENUITY. Profiles (each can come on by itself while a program is in front), effect layers stacked over each other (Static, Gradient, Spectrum, Rainbow wave, Spiral, Colour shift, Pulse, Wave, Visor, Rain, Marquee, Sequential, Twinkle, Strobe, Heartbeat, Fire, Plasma, Temperature (CPU or graphics card), Audio visualiser and pulse, Screen ambience, Type key and Type ripple), each over chosen devices with its own colours, speed, size, direction, opacity and blend; a live preview; a layout canvas so effects run across all your devices as one, with fans as rings; each device's own hardware modes, saved to it if you like; fan and strip LED counts; off while the PC is locked. It drives the hardware through OpenRGB (free and open source, fetched for you), running out of sight. In Start, and Settings > Bluetooth & devices.
 - **Liquid Glass, as the web makes it**: a light blur, a soft sheen from the top left, a rim of inset lines, and **Refraction** back: the edge bends what's around it like a lens (24 px of rim, up to 30 px of bend, falling off as the web recipe's displacement map does). Turn it off in Settings > Appearance for a drawn edge that costs nothing.
+
+**Fixed**
+- **Super drag didn't move maximised windows or admin apps**: a maximised window now comes out of maximise under the pointer and follows it, and windows running as administrator (Task Manager and the like) move through Cascade's helper, which has the rights to. Cascade's own Settings window drags too.
 
 ## 2026-11-19
 
