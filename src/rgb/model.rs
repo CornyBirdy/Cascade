@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn profiles_round_trip() {
-        let mut l = Lighting::default();
+        let mut l = Lighting { profiles: vec![Profile::default()], ..Default::default() };
         l.profiles.push(Profile { name: "Game".into(), apps: vec!["valorant.exe".into()], ..Default::default() });
         l.profiles[0].layers.push(Layer::new(Kind::TypeRipple));
         let text = serde_json::to_string(&l).unwrap();
