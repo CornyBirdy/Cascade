@@ -51,6 +51,7 @@ mod priority;
 mod quickmenu;
 mod radios;
 mod recorder;
+mod rgb;
 mod settings;
 mod shell;
 mod shellmode;
@@ -195,6 +196,18 @@ fn main() {
     let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned());
     if let Some(path) = after("--disk") {
         diskmap::run(path);
+        return;
+    }
+    if args.iter().any(|a| a == "--rgb-engine") {
+        rgb::engine::run();
+        return;
+    }
+    if args.iter().any(|a| a == "--openrgb") {
+        rgb::hw::run_elevated();
+        return;
+    }
+    if args.iter().any(|a| a == "--rgb") {
+        rgb::app::run();
         return;
     }
     if let Some(path) = after("--files") {

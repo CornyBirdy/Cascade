@@ -221,15 +221,15 @@ const IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71)
 const BAND_EDGES: [f32; BANDS + 1] = [40.0, 150.0, 400.0, 1000.0, 3000.0, 10000.0];
 
 /// The samples a capture client hands over.
-struct Format {
-    channels: usize,
-    bits: u16,
-    float: bool,
-    rate: f32,
+pub(crate) struct Format {
+    pub channels: usize,
+    pub bits: u16,
+    pub float: bool,
+    pub rate: f32,
 }
 
 /// Everything the default output plays.
-unsafe fn mix_client() -> Result<(IAudioClient, Format)> {
+pub(crate) unsafe fn mix_client() -> Result<(IAudioClient, Format)> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -504,7 +504,7 @@ unsafe fn capture(stop: &AtomicBool, source: Option<u32>) -> Result<()> {
 }
 
 /// In-place iterative radix-2 FFT.
-fn fft(re: &mut [f32], im: &mut [f32]) {
+pub(crate) fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
     let mut j = 0;
     for i in 1..n {
