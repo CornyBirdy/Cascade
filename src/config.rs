@@ -19,6 +19,9 @@ accent_glass = false
 # How strongly the glass's edge catches the light (its outline, and the light
 # gathered along it): 0 = none, 1 = as designed, 2 = twice as strong.
 theme_edge = 1
+# Liquid Glass: bend what's behind round the edge, like a lens (reads the
+# screen just around each panel a few times a second; off draws it instead).
+refraction = true
 
 # ---- Notch ----
 notch = true
@@ -313,6 +316,7 @@ pub struct Config {
     pub accent: String,
     pub accent_glass: bool,
     pub theme_edge: f32,
+    pub refraction: bool,
     pub notch: bool,
     pub notch_style: String,
     pub lip_width: f32,
@@ -441,6 +445,7 @@ impl Default for Config {
             accent: "windows".into(),
             accent_glass: false,
             theme_edge: 1.0,
+            refraction: true,
             notch: true,
             notch_style: "lip".into(),
             lip_width: 160.0,
@@ -714,6 +719,7 @@ impl Config {
                 "accent" if v == "windows" || crate::theme::parse_accent(v).is_some() => c.accent = v.into(),
                 "accent_glass" => set_b(&mut c.accent_glass),
                 "theme_edge" => set_f(&mut c.theme_edge, 0.0, 2.0),
+                "refraction" => set_b(&mut c.refraction),
                 "notch" => set_b(&mut c.notch),
                 "notch_style" if matches!(v, "lip" | "notch") => c.notch_style = v.into(),
                 "lip_width" => set_f(&mut c.lip_width, 40.0, 400.0),
@@ -879,6 +885,7 @@ impl Config {
             "theme" => self.theme.clone(),
             "accent" => self.accent.clone(),
             "accent_glass" => b(self.accent_glass),
+            "refraction" => b(self.refraction),
             "theme_edge" => self.theme_edge.to_string(),
             "notch" => b(self.notch),
             "notch_style" => self.notch_style.clone(),

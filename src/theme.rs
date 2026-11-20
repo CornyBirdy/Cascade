@@ -4,14 +4,17 @@
 //! `accent =` in the config.
 //!
 //! - **Acrylic**: Windows 11's frosted glass with a fine edge lit along the top.
-//! - **Liquid Glass**: a light blur and what thick glass does to light, drawn
-//!   rather than simulated: a brighter top where it catches the light, a
-//!   band of gathered light just inside the rounded edge, a faint split of
-//!   colour along it, a soft reflection from the top left, the glass's
-//!   thickness as a shadow along the bottom, and a specular rim with glints
-//!   on two corners. Only gradients, painted once per panel size into a
-//!   bitmap and drawn from that (see `panel`): nothing reads the screen, so
-//!   it costs no more than Acrylic.
+//! - **Liquid Glass**: Apple's liquid glass, as the web builds it from CSS
+//!   and an SVG filter (liquidglassdesign.com's recipe, translated): a light
+//!   blur, a faint white haze brighter at the top, a soft sheen from the top
+//!   left (an ellipse 120% wide and 70% tall centred a quarter of the way
+//!   along the top, fading out by 55%), the three inset lines of its rim (a
+//!   lit top, a faint bottom, a hairline all round), and the edge bending
+//!   what's behind it like a lens: within 24 px of the rim, the light is
+//!   shifted by up to 30 px, falling off with the square of the distance in
+//!   (the filter's displacement map). The bending is the one part that reads
+//!   the screen (see `lens`); it can be turned off (Refraction), leaving a
+//!   drawn band of light in its place, which costs no more than Acrylic.
 //!
 //! The accent colour (highlights: the app in front, toggles, progress,
 //! today) is your Windows accent by default, or one picked from Windows'
@@ -43,10 +46,9 @@ pub enum Glass {
 pub enum Rim {
     /// One line, lighter along the top than the bottom (light from above).
     Lit(Color, Color),
-    /// Light catching thick glass: a bright top edge with glints on the
-    /// top-left and bottom-right corners, faint down the sides (the number
-    /// is its strength).
-    Specular(f32),
+    /// The web's liquid glass rim: inset lines along the top and bottom
+    /// (their brightness) and a hairline all round.
+    Inset { top: f32, bottom: f32, hairline: f32 },
 }
 
 /// What thick glass does to the light. Every effect is off at 0.
@@ -86,6 +88,8 @@ pub struct Theme {
     pub film: (Color, Color),
     pub rim: Rim,
     pub light: Light,
+    /// How the edge bends what's behind it, with Refraction on (see `lens`).
+    pub refract: Option<crate::lens::Lens>,
     /// Highlights: the app in front, toggles, progress, today (filled in
     /// from the accent colour by `resolve`).
     pub accent: Color,
@@ -112,21 +116,24 @@ pub const THEMES: [Theme; 2] = [
         film: (white(0.015), white(0.015)),
         rim: Rim::Lit(white(0.14), white(0.06)),
         light: NONE,
+        refract: None,
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about:
-            "Thick, lightly frosted glass: bright along its top, light gathered in its rounded edge, a glinting rim.",
+        about: "Apple's liquid glass: a light blur, a soft sheen, a lit rim, and an edge that bends what's behind it like a lens.",
         glass: Glass::Blur,
         tint: (0.10, 0.10, 0.11),
-        tint_scale: 0.4,
+        tint_scale: 0.35,
         solid: (0.17, 0.17, 0.18),
-        // Brighter at the top, as the glass catches the light from above.
-        film: (white(0.09), white(0.02)),
-        rim: Rim::Specular(0.6),
-        light: Light { lens: (9.0, 0.09), dispersion: 0.05, sheen: 0.05, depth: 0.22 },
+        // The web recipe's 10% white, a little brighter where the light comes from.
+        film: (white(0.10), white(0.05)),
+        rim: Rim::Inset { top: 0.6, bottom: 0.15, hairline: 0.2 },
+        // The drawn band stands in for the bending when Refraction is off.
+        light: Light { lens: (9.0, 0.07), dispersion: 0.0, sheen: 0.35, depth: 0.0 },
+        // 24 px of curved rim, bent up to 30 px (1.25 of it), colours barely split.
+        refract: Some(crate::lens::Lens { band: 24.0, bend: 1.25, split: 0.05 }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
@@ -261,7 +268,7 @@ fn edged(mut t: Theme) -> Theme {
     let c = |c: Color| Color(c.0, c.1, c.2, (c.3 * k).min(1.0));
     t.rim = match t.rim {
         Rim::Lit(a, b) => Rim::Lit(c(a), c(b)),
-        Rim::Specular(s) => Rim::Specular(s * k),
+        Rim::Inset { top, bottom, hairline } => Rim::Inset { top: top * k, bottom: bottom * k, hairline: hairline * k },
     };
     let l = &mut t.light;
     l.lens.1 *= k;
@@ -291,7 +298,33 @@ pub fn lighten(c: Color, t: f32) -> Color {
 }
 
 pub fn current() -> Theme {
-    resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)])
+    let mut t = resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]);
+    // The bent light shows the edge: the drawn band would only fight it.
+    if lens_of(&t).is_some() {
+        t.light.lens = (0.0, 0.0);
+    }
+    t
+}
+
+static REFRACT: AtomicBool = AtomicBool::new(true);
+
+/// Turns the bending of light round Liquid Glass's edge on or off (`refraction`).
+pub fn set_refraction(on: bool) {
+    REFRACT.store(on, Ordering::Relaxed);
+}
+
+/// How `t` bends light, if it does and Refraction is on. The Edge setting
+/// scales how far.
+fn lens_of(t: &Theme) -> Option<crate::lens::Lens> {
+    let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
+    let lens = t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && t.glass == Glass::Blur)?;
+    (k > 0.0).then_some(crate::lens::Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
+}
+
+/// Whether panels bend light (and so their rings need refreshing as what's
+/// behind them changes). `acrylic` is the Blur setting.
+pub fn refracts(acrylic: bool) -> bool {
+    blurs(acrylic) && lens_of(&current()).is_some()
 }
 
 pub fn accent() -> Color {
@@ -325,6 +358,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
         Glass::Acrylic => pack(t.tint, (opacity * t.tint_scale).min(1.0)),
         _ => pack(t.tint, 0.0),
     };
+    b.set_lens(lens_of(&t).filter(|_| blur));
     b.style(if blur { t.glass } else { Glass::Solid }, tint, radius);
     blur
 }
@@ -332,6 +366,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
 /// An opaque backdrop in the theme's panel colour (for Alt+Tab, whose
 /// backdrop also hosts the live previews, so it must always be there).
 pub fn style_opaque(b: &Backdrop, radius: f32) {
+    b.set_lens(None);
     b.style(Glass::Acrylic, pack(current().solid, 1.0), radius);
 }
 
@@ -438,7 +473,33 @@ pub fn paint(
                 p.stroke_rrect_with(lx, ly, lw, lh, r, &brush, line);
             }
         }
-        Rim::Specular(s) => specular(p, x, y, w, h, r, s * alpha),
+        Rim::Inset { top, bottom, hairline } => {
+            inset_rim(p, x, y, w, h, r, top * alpha, bottom * alpha, hairline * alpha)
+        }
+    }
+}
+
+/// The web liquid glass's rim (its three inset box-shadows): a hairline
+/// all round, then a lit line along the top and a faint one along the
+/// bottom, a pixel inside it, following the rounded corners.
+#[allow(clippy::too_many_arguments)]
+fn inset_rim(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, top: f32, bottom: f32, hairline: f32) {
+    let line = p.px(1.0);
+    if hairline > 0.0 {
+        p.stroke_rrect(x + line / 2.0, y + line / 2.0, w - line, h - line, r, white(hairline.min(1.0)), line);
+    }
+    // The top and bottom lines: only where the edge faces up or down (the
+    // corners' curve, a few pixels), clear down the sides.
+    let reach = (r.max(4.0) / h).min(0.45);
+    if let Some(b) = p.linear(
+        x,
+        y,
+        x,
+        y + h,
+        &[(0.0, white(top.min(1.0))), (reach, white(0.0)), (1.0 - reach, white(0.0)), (1.0, white(bottom.min(1.0)))],
+    ) {
+        let i = line * 1.5;
+        p.stroke_rrect_with(x + i, y + i, w - 2.0 * i, h - 2.0 * i, (r - i).max(0.0), &b, line);
     }
 }
 
@@ -497,42 +558,12 @@ fn dispersion(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
 /// A polished surface reflecting the room: a broad soft highlight from the
 /// top left.
 fn sheen(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
-    if let Some(b) = p.elliptic(
-        x + w * 0.22,
-        y - h * 0.15,
-        w * 0.55,
-        h * 0.95,
-        &[(0.0, white(s)), (0.55, white(s * 0.35)), (1.0, white(0.0))],
-    ) {
+    // radial-gradient(120% 70% at 25% 0%, white, transparent 55%), as the
+    // web recipe has it; on a long, low bar the ellipse is kept from
+    // stretching thin (no taller than it is wide).
+    let (rx, ry) = (w * 1.2, (h * 0.7).min(w * 1.2));
+    if let Some(b) = p.elliptic(x + w * 0.25, y, rx, ry, &[(0.0, white(s)), (0.55, white(0.0)), (1.0, white(0.0))]) {
         p.fill_rrect_with(x, y, w, h, r, &b);
-    }
-}
-
-/// The lit rim of thick glass: a faint line all round, brighter along the
-/// top and a little along the bottom, with glints on the top-left and
-/// bottom-right corners.
-fn specular(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
-    let line = p.px(1.0);
-    let (lx, ly, lw, lh) = (x + line / 2.0, y + line / 2.0, w - line, h - line);
-    let edge = (28.0 / h).min(0.45);
-    if let Some(b) = p.linear(
-        x,
-        y,
-        x,
-        y + h,
-        &[(0.0, white(0.50 * s)), (edge, white(0.16 * s)), (1.0 - edge, white(0.12 * s)), (1.0, white(0.30 * s))],
-    ) {
-        p.stroke_rrect_with(lx, ly, lw, lh, r, &b, line);
-    }
-    // Glints, a little wider than the line so they read as light.
-    let reach = w.min(h * 3.0).clamp(24.0, 220.0);
-    let glint = p.px(1.5);
-    let (gx, gy, gw, gh) = (x + glint / 2.0, y + glint / 2.0, w - glint, h - glint);
-    for (cx, cy, a) in [(x + r * 0.3, y + r * 0.3, 0.85), (x + w - r * 0.3, y + h - r * 0.3, 0.5)] {
-        if let Some(b) = p.radial(cx, cy, reach, &[(0.0, white(a * s)), (0.45, white(a * s * 0.3)), (1.0, white(0.0))])
-        {
-            p.stroke_rrect_with(gx, gy, gw, gh, r, &b, glint);
-        }
     }
 }
 

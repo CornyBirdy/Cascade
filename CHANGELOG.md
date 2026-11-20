@@ -4,6 +4,16 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-20
+
+**New**
+- **Files**: Cascade's own file manager, so folders open with no Explorer at all: tabs, an address and search box, folders and drives in a sidebar, details or icons with thumbnails, rename in place, the shell's own menus, copy, cut, paste, delete, drag and drop, live updates, Explorer's shortcuts. In Start, on Win+E and for every folder in shell mode.
+- **Photos**: a picture viewer for shell mode (where Windows' Photos can't open): zoom, pan, the folder's other pictures, rotate and save, fullscreen, delete, copy, set as wallpaper.
+- **Instant file search** (Settings > Start menu): Start and Files find any file on your drives as you type, read straight from the drives' file tables and kept current from their change journals.
+- **Disk Usage**: what's taking the space, as a map you can click into, with the biggest items listed.
+- **Debloat** (Settings): switches for telemetry, Copilot, Recall, ads and suggestions, web search, feedback prompts, typing data, activity history, Edge in the background and update sharing. Every one can be turned back off; nothing is uninstalled.
+- **Liquid Glass, as the web makes it**: a light blur, a soft sheen from the top left, a rim of inset lines, and **Refraction** back: the edge bends what's around it like a lens (24 px of rim, up to 30 px of bend, falling off as the web recipe's displacement map does). Turn it off in Settings > Appearance for a drawn edge that costs nothing.
+
 ## 2026-11-19
 
 **New**

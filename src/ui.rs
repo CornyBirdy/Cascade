@@ -96,6 +96,8 @@ const TIMER_SCAN2: usize = 16;
 const TIMER_TRAYSYNC: usize = 17;
 const TIMER_NOTIFS: usize = 18;
 /// Pastes a clipboard item once the app it's for is in front again.
+/// Refreshes Liquid Glass's bent edges (see `lens`).
+const TIMER_LENS: usize = 19;
 const TIMER_PASTE: usize = 20;
 /// The next moment the calendar needs a look: a countdown to show or step,
 /// or an event starting.
@@ -513,6 +515,9 @@ struct App {
     /// its list of outputs is open.
     mixer: Mixer,
     outputs_open: bool,
+    /// Whether the theme bends light, and whether its refresh timer runs.
+    lens_wanted: bool,
+    lens_on: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
     /// Files being dragged over a taskbar app: (taskbar, app, since when,
@@ -1256,6 +1261,7 @@ impl App {
         theme::set(&cfg.theme);
         theme::set_accent(&cfg.accent, cfg.accent_glass);
         theme::set_edge(cfg.theme_edge);
+        theme::set_refraction(cfg.refraction);
         let gfx = Gfx::new()?;
         let volume = Volume::new().ok();
         let vol = volume.as_ref().and_then(|v| v.get()).unwrap_or((0.0, false));
@@ -1413,6 +1419,8 @@ impl App {
             perf: Perf::new(cfg.perf_log),
             mixer: Mixer::default(),
             outputs_open: false,
+            lens_wanted: false,
+            lens_on: false,
             update_available: None,
             updating: false,
             power: battery(),
@@ -3372,6 +3380,15 @@ impl App {
                 self.retarget();
                 self.arm_calendar();
             }
+            TIMER_LENS => {
+                // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
+                if !crate::lens::refresh() {
+                    self.lens_on = false;
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                    }
+                }
+            }
             TIMER_FLYOUT => shell::set_flyout_hidden(self.flyout_hidden),
             TIMER_SHELL => {
                 if shell::shell_ready() {
@@ -3760,6 +3777,7 @@ impl App {
         theme::set(&self.cfg.theme);
         theme::set_accent(&self.cfg.accent, self.cfg.accent_glass);
         theme::set_edge(self.cfg.theme_edge);
+        theme::set_refraction(self.cfg.refraction);
         if self.cfg.weather != old.weather
             || self.cfg.weather_location != old.weather_location
             || self.cfg.fahrenheit != old.fahrenheit
@@ -3788,9 +3806,28 @@ impl App {
         }
     }
 
+    /// Keeps Liquid Glass's bent edges up to date with what's behind them, a
+    /// few times a second, while refraction is on and a ring is on screen
+    /// (`frame` starts it again when one comes back).
+    fn arm_lens(&mut self) {
+        self.lens_wanted = theme::refracts(self.cfg.acrylic);
+        let on = self.lens_wanted && crate::lens::active();
+        if on != self.lens_on {
+            self.lens_on = on;
+            unsafe {
+                if on {
+                    SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
+                }
+            }
+        }
+    }
+
     /// Redraws every surface, e.g. after the theme changed.
     fn restyle(&mut self) {
         self.gfx.clear_cache();
+        self.arm_lens();
         self.dirty = true;
         self.dock.dirty = true;
         self.launcher.dirty = true;
@@ -5625,6 +5662,10 @@ impl App {
             self.perf.end(Surface::Launcher, t);
         }
         self.perf.flush();
+        // A ring of bent light came on screen (or went): refresh it, or stop.
+        if self.lens_wanted && crate::lens::active() != self.lens_on {
+            self.arm_lens();
+        }
 
         // Full rate while shapes morph or a level moves; the visualizer and
         // fades are fine at 60.

@@ -571,11 +571,6 @@ impl Painter<'_> {
         b.cast().ok()
     }
 
-    /// A gradient spreading out from (cx, cy) to `radius`.
-    pub fn radial(&self, cx: f32, cy: f32, radius: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
-        self.elliptic(cx, cy, radius, radius, stops)
-    }
-
     /// A gradient spreading out from (cx, cy) to an ellipse of radii `rx`, `ry`.
     pub fn elliptic(&self, cx: f32, cy: f32, rx: f32, ry: f32, stops: &[(f32, Color)]) -> Option<ID2D1Brush> {
         let collection = self.stops(stops)?;

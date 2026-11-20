@@ -5,6 +5,10 @@
 //! and asks DWM to blur what's behind it. The blur runs on the GPU inside
 //! DWM, the same way the Windows taskbar does it, and keeps working while the
 //! window is inactive (unlike the newer system backdrops).
+//!
+//! Liquid Glass with Refraction on (see `lens`) gets a second window between
+//! the two: a click-through layered ring holding the light bent round the
+//! panel's edge, over the blur.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -19,6 +23,7 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::lens::{self, Lens};
 use crate::theme::Glass;
 
 #[repr(C)]
@@ -88,8 +93,12 @@ pub struct Backdrop {
     last: Option<RECT>,
     /// Radius of DWM's rounded corners at 100% scaling (0 = square).
     corner: Cell<f32>,
-    /// The panel's own window, which the blur sits under.
+    /// The panel's own window, which the blur (and the ring) sit under.
     content: Cell<HWND>,
+    /// Light bent round the panel's edge, over the blur (see `lens`).
+    lens: Cell<Option<Lens>>,
+    /// The layered window that ring is drawn in, made when first needed.
+    ring: Cell<Option<HWND>>,
 }
 
 impl Backdrop {
@@ -124,6 +133,8 @@ impl Backdrop {
                 last: None,
                 corner: Cell::new(0.0),
                 content: Cell::new(HWND::default()),
+                lens: Cell::new(None),
+                ring: Cell::new(None),
             })
         }
     }
@@ -184,8 +195,88 @@ impl Backdrop {
         if !self.shown {
             return;
         }
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(content), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            match self.ring.get().filter(|_| self.lens.get().is_some()) {
+                // The ring right under the content, the blur under the ring.
+                Some(ring) => {
+                    let _ = SetWindowPos(ring, Some(content), 0, 0, 0, 0, flags);
+                    let _ = SetWindowPos(self.hwnd, Some(ring), 0, 0, 0, 0, flags);
+                }
+                None => {
+                    let _ = SetWindowPos(self.hwnd, Some(content), 0, 0, 0, 0, flags);
+                }
+            }
+        }
+    }
+
+    /// Adds a ring of light bent round the panel's edge (see `lens`) over
+    /// the blur, or (`None`) takes it away. Call before `style`.
+    pub fn set_lens(&self, lens: Option<Lens>) {
+        if lens == self.lens.get() {
+            return;
+        }
+        self.lens.set(lens);
+        if lens.is_none() {
+            self.hide_ring();
+        }
+        self.rect_changed();
+    }
+
+    /// The ring's window: layered (per-pixel alpha), click-through, never
+    /// activated. Made the first time it's needed.
+    fn ring_hwnd(&self) -> Option<HWND> {
+        if let Some(h) = self.ring.get() {
+            return Some(h);
+        }
+        let h = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                w!("CascadeBackdrop"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0)),
+                None,
+            )
+        }
+        .ok()?;
+        self.ring.set(Some(h));
+        Some(h)
+    }
+
+    fn hide_ring(&self) {
+        if let Some(h) = self.ring.get() {
+            lens::hide(h);
+            unsafe {
+                let _ = ShowWindow(h, SW_HIDE);
+            }
+        }
+    }
+
+    /// Moves the ring with the blur and redraws it for the new rect.
+    fn rect_changed(&self) {
+        if let (Some(l), true) = (self.lens.get(), self.shown) {
+            if let Some(ring) = self.ring_hwnd() {
+                unsafe {
+                    let r = self.rect;
+                    let _ = SetWindowPos(
+                        ring,
+                        Some(self.content.get()),
+                        r.left,
+                        r.top,
+                        (r.right - r.left).max(1),
+                        (r.bottom - r.top).max(1),
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+                lens::show(ring, self.rect, self.corner_px(), l);
+            }
         }
     }
 
@@ -208,6 +299,7 @@ impl Backdrop {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
+        self.rect_changed();
     }
 
     /// Like `place`, but cut to a rounded rect `shape` (window-relative px,
@@ -284,6 +376,7 @@ impl Backdrop {
     fn hide_blur(&mut self) {
         if self.shown {
             self.shown = false;
+            self.hide_ring();
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }

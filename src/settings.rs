@@ -758,8 +758,14 @@ fn rows(section: usize) -> Vec<Row> {
             row(
                 "theme_edge",
                 "Edge",
-                "How strongly the edge catches the light. 0% = no outline.",
+                "How strongly the edge catches the light (and, with Refraction, how far it bends). 0% = no outline.",
                 slider(0.0, 2.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "refraction",
+                "Refraction",
+                "The edge bends what's behind it like a lens, as Apple's liquid glass does. Reads the screen just around each panel a few times a second; off draws the edge instead.",
+                Toggle,
             ),
         ],
         2 => vec![
@@ -1508,6 +1514,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         return false;
     }
     match (section, key) {
+        (1, "refraction") => get("theme") == "liquid_glass" && on("acrylic"),
         (0, "alt_tab_style") => on("alt_tab"),
         // Explorer snaps windows when it's the shell; Cascade does when it is.
         (0, "snap_drag") => on("shell_mode") || on("shell_active"),
