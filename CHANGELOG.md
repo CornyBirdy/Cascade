@@ -16,6 +16,7 @@ Settings > Updates > What's new opens the list.
 - **Liquid Glass, as the web makes it**: a light blur, a soft sheen from the top left, a rim of inset lines, and **Refraction** back: the edge bends what's around it like a lens (24 px of rim, up to 30 px of bend, falling off as the web recipe's displacement map does). Turn it off in Settings > Appearance for a drawn edge that costs nothing.
 
 **Fixed**
+- **Updates failing with "try again later"**: after an earlier update, a Cascade process still running from the previous copy (cascade.old.exe) kept that file locked, so the next update couldn't move the running exe aside. It now uses a fresh name when the old one is busy, tries the download three times, says which step failed, and writes why to `cascade.log`.
 - **Super drag didn't move maximised windows or admin apps**: a maximised window now comes out of maximise under the pointer and follows it, and windows running as administrator (Task Manager and the like) move through Cascade's helper, which has the rights to. Cascade's own Settings window drags too.
 
 ## 2026-11-19

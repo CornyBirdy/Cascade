@@ -2978,7 +2978,16 @@ impl App {
             }
             _ => {
                 self.updating = false;
-                self.notify("Update failed \u{2014} try again later".into(), Color(1.0, 0.45, 0.4, 1.0), true);
+                let why = match build as isize {
+                    update::FAIL_DOWNLOAD => "couldn't download it",
+                    update::FAIL_REPLACE => "couldn't replace cascade.exe",
+                    _ => "couldn't read the release",
+                };
+                self.notify(
+                    format!("Update failed: {why} (cascade.log says more) \u{2014} try again later"),
+                    Color(1.0, 0.45, 0.4, 1.0),
+                    true,
+                );
             }
         }
     }

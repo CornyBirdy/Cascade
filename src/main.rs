@@ -263,8 +263,13 @@ fn main() {
     update::cleanup();
     shellmode::detect();
     // The lighting engine, once Lighting has been set up and is on (see `rgb::engine`).
-    std::thread::spawn(|| {
+    // After an update the old engine still runs the old copy: start it afresh.
+    std::thread::spawn(move || {
         if rgb::model::Lighting::path().exists() && rgb::model::Lighting::load().settings.on {
+            if updated {
+                rgb::engine::ensure(false);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
             rgb::engine::ensure(true);
         }
     });

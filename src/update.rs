@@ -83,6 +83,9 @@ pub const INSTALLING: usize = 3;
 pub const INSTALLED: usize = 4;
 pub const FAILED: usize = 5;
 pub const NO_ACCESS: usize = 6;
+/// With FAILED, in lparam: the step that failed (0: reading the release).
+pub const FAIL_DOWNLOAD: isize = 1;
+pub const FAIL_REPLACE: isize = 2;
 
 struct Release {
     build: u32,
@@ -208,20 +211,43 @@ fn exe_asset_url(assets: &str) -> Option<String> {
     }
 }
 
-fn download(asset_url: &str, token: &str) -> Option<Vec<u8>> {
+fn download_once(asset_url: &str, token: &str) -> Result<Vec<u8>, String> {
     // The asset endpoint redirects to a signed storage URL; follow it
     // ourselves so the token is never sent to the storage host.
-    let r = get(asset_url, &headers(token, "application/octet-stream"), false)?;
+    let r = get(asset_url, &headers(token, "application/octet-stream"), false).ok_or("no answer from GitHub")?;
     let body = match (r.status, r.location) {
         (200, _) => r.body,
         (301 | 302 | 303 | 307 | 308, Some(loc)) => {
-            let r = http::get(&loc, &[], true)?;
-            (r.status == 200).then_some(r.body)?
+            let r = http::get(&loc, &[], true).ok_or("no answer from GitHub's file storage")?;
+            if r.status != 200 {
+                return Err(format!("file storage answered {}", r.status));
+            }
+            r.body
         }
-        _ => return None,
+        (s, _) => return Err(format!("GitHub answered {s}")),
     };
     // Sanity check: a Windows executable of a plausible size.
-    (body.len() > 64 * 1024 && body.starts_with(b"MZ")).then_some(body)
+    if body.len() > 64 * 1024 && body.starts_with(b"MZ") {
+        Ok(body)
+    } else {
+        Err(format!("got {} bytes that aren't a program", body.len()))
+    }
+}
+
+/// The new exe, with a couple of tries (a dropped connection is common on a 4 MB file).
+fn download(asset_url: &str, token: &str) -> Result<Vec<u8>, String> {
+    let mut last = String::new();
+    for i in 0..3 {
+        match download_once(asset_url, token) {
+            Ok(b) => return Ok(b),
+            Err(e) => {
+                crate::config::log(&format!("update: download try {}: {e}", i + 1));
+                last = e;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    Err(last)
 }
 
 fn exe_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
@@ -229,31 +255,50 @@ fn exe_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((exe.clone(), exe.with_file_name("cascade.new.exe"), exe.with_file_name("cascade.old.exe")))
 }
 
-/// Removes the previous exe left behind by an update.
+/// Removes the previous exes left behind by updates (those still running,
+/// such as a helper started by an older copy, stay until it ends).
 pub fn cleanup() {
-    if let Some((_, new, old)) = exe_paths() {
-        let _ = std::fs::remove_file(old);
-        let _ = std::fs::remove_file(new);
+    let Some((exe, new, _)) = exe_paths() else { return };
+    let _ = std::fs::remove_file(new);
+    let Some(dir) = exe.parent() else { return };
+    let Ok(list) = std::fs::read_dir(dir) else { return };
+    for e in list.flatten() {
+        let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+        if name.starts_with("cascade.old") && name.ends_with(".exe") {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
-fn swap_and_relaunch(bytes: &[u8]) -> bool {
-    let Some((exe, new, old)) = exe_paths() else { return false };
-    if std::fs::write(&new, bytes).is_err() {
-        return false;
+/// Where the running exe goes: `cascade.old.exe`, or a fresh name when that
+/// one is still in use (a process of an older copy keeps its file locked).
+fn old_slot(old: &std::path::Path) -> PathBuf {
+    if std::fs::remove_file(old).is_ok() || !old.exists() {
+        return old.to_path_buf();
     }
-    let _ = std::fs::remove_file(&old);
-    if std::fs::rename(&exe, &old).is_err() {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    old.with_file_name(format!("cascade.old-{stamp}.exe"))
+}
+
+fn swap_and_relaunch(bytes: &[u8]) -> Result<(), String> {
+    let Some((exe, new, old)) = exe_paths() else { return Err("can't tell where cascade.exe is".into()) };
+    std::fs::write(&new, bytes).map_err(|e| format!("writing {}: {e}", new.display()))?;
+    let old = old_slot(&old);
+    if let Err(e) = std::fs::rename(&exe, &old) {
         let _ = std::fs::remove_file(&new);
-        return false;
+        return Err(format!("moving {} aside: {e}", exe.display()));
     }
-    if std::fs::rename(&new, &exe).is_err() {
+    if let Err(e) = std::fs::rename(&new, &exe) {
         let _ = std::fs::rename(&old, &exe);
-        return false;
+        return Err(format!("putting the new exe in place: {e}"));
     }
     // The new copy waits for this one to exit (single-instance lock).
     crate::shellmode::set_intent(crate::shellmode::Intent::Restart);
-    std::process::Command::new(&exe).arg("--updated").spawn().is_ok()
+    std::process::Command::new(&exe)
+        .arg("--updated")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("starting the new copy: {e}"))
 }
 
 /// Background check: posts AVAILABLE when a newer build exists.
@@ -279,19 +324,30 @@ pub fn spawn_install() {
         let release = match latest(&channel, &token) {
             Ok(r) => r,
             Err(true) => return void(msg::post(msg::UPDATE, NO_ACCESS, 0)),
-            Err(false) => return void(msg::post(msg::UPDATE, FAILED, 0)),
+            Err(false) => {
+                crate::config::log(&format!(
+                    "update: couldn't read the newest release on \"{}\"",
+                    channel_label(&channel)
+                ));
+                return void(msg::post(msg::UPDATE, FAILED, 0));
+            }
         };
         if !wanted(&release, &channel) {
             msg::post(msg::UPDATE, UP_TO_DATE, current() as isize);
             return;
         }
         msg::post(msg::UPDATE, INSTALLING, release.build as isize);
-        match download(&release.asset_url, &token) {
-            Some(bytes) if swap_and_relaunch(&bytes) => {
+        let result = download(&release.asset_url, &token)
+            .map_err(|e| (FAIL_DOWNLOAD, e))
+            .and_then(|bytes| swap_and_relaunch(&bytes).map_err(|e| (FAIL_REPLACE, e)));
+        match result {
+            Ok(()) => {
+                crate::config::log(&format!("update: installed build {}", release.build));
                 msg::post(msg::UPDATE, INSTALLED, release.build as isize);
             }
-            _ => {
-                msg::post(msg::UPDATE, FAILED, 0);
+            Err((why, e)) => {
+                crate::config::log(&format!("update: build {} failed: {e}", release.build));
+                msg::post(msg::UPDATE, FAILED, why);
             }
         }
     });
