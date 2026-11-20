@@ -10,9 +10,11 @@
 //!
 //! The Win key itself is left alone: one mask key tap (see `keyhook`) makes
 //! Windows treat it as part of a combination, so letting go of it doesn't open
-//! its Start menu. Windows of programs with admin rights (which Cascade can't
-//! move), maximised ones, the desktop, the taskbar and Cascade's own are left
-//! to the click.
+//! its Start menu. A maximised window comes out of it under the pointer, as
+//! it does dragged by its title bar, and follows. Windows of programs with
+//! admin rights (Task Manager, installers) are moved by the admin helper
+//! when it runs (Windows doesn't let Cascade move them itself); the desktop
+//! and the taskbar are left to the click.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::Mutex;
@@ -33,6 +35,8 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static FROM: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
 /// Set while a drag's button is down, to swallow its release.
 static HELD: AtomicBool = AtomicBool::new(false);
+/// The window being dragged has admin rights: the helper moves it.
+static VIA_HELPER: AtomicBool = AtomicBool::new(false);
 
 fn down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
@@ -63,9 +67,6 @@ fn pick(pt: POINT) -> Result<HWND, String> {
         if IsIconic(root).as_bool() {
             return Err(format!("{class} is minimised"));
         }
-        if IsZoomed(root).as_bool() {
-            return Err(format!("{class} is maximised"));
-        }
         if matches!(
             class.as_str(),
             "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow"
@@ -74,11 +75,12 @@ fn pick(pt: POINT) -> Result<HWND, String> {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(root, Some(&mut pid));
-        if pid == GetCurrentProcessId() {
-            return Err(format!("{class} is one of Cascade's own windows"));
+        // Cascade's own windows are its panels, except Settings (and its apps, other processes).
+        if pid == GetCurrentProcessId() && class != "CascadeSettings" {
+            return Err(format!("{class} is one of Cascade's own panels"));
         }
-        if crate::helper::window_above_us(root) {
-            return Err(format!("{class} has admin rights (Cascade doesn't)"));
+        if crate::helper::window_above_us(root) && !crate::helper::running() {
+            return Err(format!("{class} has admin rights (turn on Start menu > Work over admin apps to drag those)"));
         }
         Ok(root)
     }
@@ -98,6 +100,30 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if let Ok(h) = picked {
                     let mut r = RECT::default();
                     if GetWindowRect(h, &mut r).is_ok() {
+                        let admin = crate::helper::window_above_us(h);
+                        VIA_HELPER.store(admin, Ordering::Relaxed);
+                        // Maximised: out of it, at its normal size, with the pointer
+                        // over the same part of it (across), near its top.
+                        if IsZoomed(h).as_bool() {
+                            let mut place = WINDOWPLACEMENT {
+                                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                                ..Default::default()
+                            };
+                            let _ = GetWindowPlacement(h, &mut place);
+                            let n = place.rcNormalPosition;
+                            let (nw, nh) = (n.right - n.left, n.bottom - n.top);
+                            let across = (info.pt.x - r.left) as f32 / (r.right - r.left).max(1) as f32;
+                            let left = info.pt.x - (nw as f32 * across) as i32;
+                            let top = info.pt.y - (info.pt.y - r.top).clamp(8, 40);
+                            r = RECT { left, top, right: left + nw, bottom: top + nh };
+                            if admin {
+                                crate::helper::request_move(h, left, top, true);
+                            } else {
+                                let _ = ShowWindowAsync(h, SW_RESTORE);
+                                let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+                                let _ = SetWindowPos(h, None, left, top, 0, 0, flags);
+                            }
+                        }
                         for (slot, v) in FROM.iter().zip([info.pt.x, info.pt.y, r.left, r.top]) {
                             slot.store(v, Ordering::Relaxed);
                         }
@@ -130,6 +156,10 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let h = HWND(WINDOW.load(Ordering::Relaxed) as *mut _);
                     let f = |i: usize| FROM[i].load(Ordering::Relaxed);
                     let (x, y) = (f(2) + info.pt.x - f(0), f(3) + info.pt.y - f(1));
+                    if VIA_HELPER.load(Ordering::Relaxed) {
+                        crate::helper::request_move(h, x, y, false);
+                        return CallNextHookEx(None, code, wp, lp);
+                    }
                     let _ = SetWindowPos(
                         h,
                         None,

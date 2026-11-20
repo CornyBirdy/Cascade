@@ -27,6 +27,10 @@ const CLASS: PCWSTR = w!("CascadeKeyHelper");
 const FOCUS: u32 = WM_APP + 1;
 const QUIT: u32 = WM_APP + 2;
 const MINIMIZE: u32 = WM_APP + 3;
+/// Move the window in wParam to the point packed in lParam (super drag over an admin window).
+const MOVE: u32 = WM_APP + 4;
+/// Restore the window in wParam from maximised.
+const RESTORE: u32 = WM_APP + 5;
 
 /// The main Cascade window, if Cascade is running.
 pub fn main_window() -> Option<HWND> {
@@ -109,6 +113,19 @@ pub fn post_main(m: u32, wparam: usize) {
     }
 }
 
+/// Asks the helper to move `hwnd` (an admin window Cascade can't move) to
+/// (x, y). False without the helper running.
+pub fn request_move(hwnd: HWND, x: i32, y: i32, restore: bool) -> bool {
+    let Some(h) = helper_window() else { return false };
+    unsafe {
+        if restore {
+            let _ = PostMessageW(Some(h), RESTORE, WPARAM(hwnd.0 as usize), LPARAM(0));
+        }
+        let packed = (x as u16 as isize) | ((y as u16 as isize) << 16);
+        PostMessageW(Some(h), MOVE, WPARAM(hwnd.0 as usize), LPARAM(packed)).is_ok()
+    }
+}
+
 /// Asks the helper to minimise `hwnd` (an admin window Cascade can't touch).
 pub fn request_minimize(hwnd: HWND) {
     if let Some(h) = helper_window() {
@@ -174,6 +191,16 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             let _ = ShowWindow(HWND(wp.0 as *mut _), SW_MINIMIZE);
             LRESULT(0)
         }
+        MOVE => {
+            let (x, y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+            let _ = SetWindowPos(HWND(wp.0 as *mut _), None, x, y, 0, 0, flags);
+            LRESULT(0)
+        }
+        RESTORE => {
+            let _ = ShowWindowAsync(HWND(wp.0 as *mut _), SW_RESTORE);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, m, wp, lp),
     }
 }
@@ -203,7 +230,7 @@ pub fn run() {
             return;
         };
         // Let Cascade (not elevated) post these two messages to us.
-        for m in [FOCUS, QUIT, MINIMIZE] {
+        for m in [FOCUS, QUIT, MINIMIZE, MOVE, RESTORE] {
             let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
         }
         keyhook::set_helper_mode(hwnd);
