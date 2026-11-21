@@ -738,6 +738,19 @@ fn rows(section: usize) -> Vec<Row> {
                 "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
                 Toggle,
             ),
+            heading("h_windows", "Windows"),
+            row(
+                "min_animation",
+                "Minimise animation",
+                "Windows go into their taskbar button when minimised, and come back out of it (where Windows doesn't animate them itself).",
+                Toggle,
+            ),
+            row(
+                "wobbly",
+                "Wobbly windows",
+                "Windows bend like jelly while you drag them, and wobble as they settle.",
+                Toggle,
+            ),
             heading("h_glass", "Glass"),
             row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
             row(

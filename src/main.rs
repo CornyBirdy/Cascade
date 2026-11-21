@@ -41,6 +41,7 @@ mod lensmath;
 mod media;
 mod menu;
 mod mft;
+mod minanim;
 mod mixer;
 mod mouseedge;
 mod mousehook;
@@ -78,6 +79,7 @@ mod weather;
 mod widgets;
 mod wifi;
 mod winset;
+mod wobble;
 
 /// Messages worker threads post to the main (notch) window.
 pub mod msg {

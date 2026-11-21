@@ -267,7 +267,7 @@ impl Paint {
     fn open(&mut self, path: PathBuf) {
         if let Some((px, w, h)) = crate::viewer::load_pixels(&path) {
             let mut c = Canvas::new(w as i32, h as i32);
-            for (i, p) in px.chunks_exact(4).enumerate() {
+            for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
                 // Over white, as it would print.
                 let a = p[3] as u32;
                 let ch = |v: u8| (v as u32 + (255 - a)).min(255);

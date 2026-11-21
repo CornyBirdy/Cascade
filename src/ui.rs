@@ -1461,6 +1461,8 @@ impl App {
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::minanim::configure(self.cfg.min_animation);
+        crate::wobble::configure(self.cfg.wobbly);
         crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
@@ -3463,8 +3465,12 @@ impl App {
         }
         // A window began moving: in shell mode, it can be snapped by dragging it to an edge.
         if event == EVENT_SYSTEM_MOVESIZESTART {
+            crate::wobble::start(hwnd);
             crate::snapdrag::on_start(hwnd);
             return;
+        }
+        if event == EVENT_SYSTEM_MOVESIZEEND {
+            crate::wobble::release();
         }
         // Its taskbar button takes it in (or lets it out).
         if event == EVENT_SYSTEM_MINIMIZESTART || event == EVENT_SYSTEM_MINIMIZEEND {
@@ -3473,12 +3479,25 @@ impl App {
             for d in &mut self.screens {
                 d.on_minimize(hwnd, into);
             }
+            // Into (or out of) its button, where Windows won't show it going.
+            if !crate::minanim::windows_animates() {
+                let button = std::iter::once(&self.dock).chain(self.screens.iter()).find_map(|d| d.min_rect(hwnd));
+                let place = if into {
+                    crate::minanim::normal_rect(hwnd)
+                } else {
+                    let mut r = RECT::default();
+                    unsafe { GetWindowRect(hwnd, &mut r).ok() }.map(|_| r)
+                };
+                if let (Some(button), Some(place)) = (button, place) {
+                    crate::minanim::play(hwnd, place, button, into);
+                }
+            }
         }
-        // A window was minimised: Windows may leave a stub of it on the screen; once it has, move it off.
+        // A window was minimised: Windows may leave a stub of it on the screen;
+        // once its animation into the button is over, move it off.
         if event == EVENT_SYSTEM_MINIMIZESTART && shellmode::active() {
-            shellmode::park_minimized();
             unsafe {
-                SetTimer(Some(self.hwnd), TIMER_PARK, 150, None);
+                SetTimer(Some(self.hwnd), TIMER_PARK, 400, None);
             }
         }
         // Windows opened its own Start menu: the Win key reached it without
@@ -3801,6 +3820,8 @@ impl App {
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::minanim::configure(self.cfg.min_animation);
+        crate::wobble::configure(self.cfg.wobbly);
         crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());

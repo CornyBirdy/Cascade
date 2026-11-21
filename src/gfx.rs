@@ -628,6 +628,30 @@ impl Painter<'_> {
         unsafe { self.rt.DrawBitmap(bmp, Some(&rect(x, y, w, h)), alpha, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
     }
 
+    /// Draws the part `src` (x, y, w, h in the bitmap's pixels) of a bitmap
+    /// into the same place, as moved by `m`: a texture warped piece by piece.
+    pub fn image_warped(&self, bmp: &ID2D1Bitmap, src: (f32, f32, f32, f32), m: [f32; 6]) {
+        unsafe {
+            let mut before = windows_numerics::Matrix3x2::default();
+            self.rt.GetTransform(&mut before);
+            let warp = windows_numerics::Matrix3x2 { M11: m[0], M12: m[1], M21: m[2], M22: m[3], M31: m[4], M32: m[5] };
+            self.rt.SetTransform(&(warp * before));
+            let r = rect(src.0, src.1, src.2, src.3);
+            self.rt.DrawBitmap(bmp, Some(&r), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, Some(&r));
+            self.rt.SetTransform(&before);
+        }
+    }
+
+    /// Draws what `f` draws without smoothing edges (pieces meet with no seams).
+    pub fn aliased(&self, f: impl FnOnce()) {
+        unsafe {
+            let before = self.rt.GetAntialiasMode();
+            self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            f();
+            self.rt.SetAntialiasMode(before);
+        }
+    }
+
     /// Draws a bitmap at its own pixel size, centred on (cx, cy) and snapped
     /// to whole pixels, so icons stay sharp.
     pub fn icon(&self, bmp: &ID2D1Bitmap, cx: f32, cy: f32, alpha: f32) {

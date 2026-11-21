@@ -192,7 +192,8 @@ impl Camera {
     fn photo(&mut self) {
         let frame = LATEST.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|f| (f.w, f.h, f.px.clone()));
         let Some((w, h, px)) = frame else { return };
-        let mut pixels: Vec<u32> = px.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let mut pixels: Vec<u32> =
+            px.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         if self.mirror {
             for row in pixels.chunks_mut(w as usize) {
                 row.reverse();

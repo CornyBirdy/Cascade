@@ -129,6 +129,10 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         }
                         WINDOW.store(h.0 as isize, Ordering::Relaxed);
                         HELD.store(true, Ordering::Relaxed);
+                        // Wobbly windows wobble here too (not admin ones: they can't be reached).
+                        if !admin {
+                            crate::wobble::start(h);
+                        }
                         // Win is part of a combination now: letting go of it
                         // won't open Windows' Start menu.
                         crate::keyhook::mask_win();
@@ -173,6 +177,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_LBUTTONUP if HELD.swap(false, Ordering::Relaxed) => {
                 WINDOW.store(0, Ordering::Relaxed);
+                crate::wobble::release();
                 return LRESULT(1);
             }
             _ => {}

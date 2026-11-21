@@ -47,6 +47,10 @@ notch_fullscreen = false
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
 super_drag = true
+# Windows go into their taskbar button when minimised, and come back out of it.
+min_animation = true
+# Windows bend like jelly while you drag them about.
+wobbly = false
 # The built-in pen tablet driver (10moon, Vinsa and their relatives).
 tablet = true
 # ink (Windows Ink: a pen, with pressure) or mouse.
@@ -343,6 +347,8 @@ pub struct Config {
     pub notch_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
+    pub min_animation: bool,
+    pub wobbly: bool,
     pub tablet: bool,
     pub tablet_mode: String,
     pub tablet_screen: String,
@@ -481,6 +487,8 @@ impl Default for Config {
             notch_fullscreen: false,
             battery_saver: false,
             super_drag: true,
+            min_animation: true,
+            wobbly: false,
             tablet: true,
             tablet_mode: "ink".into(),
             tablet_screen: "all".into(),
@@ -764,6 +772,8 @@ impl Config {
                 "notch_fullscreen" => set_b(&mut c.notch_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
+                "min_animation" => set_b(&mut c.min_animation),
+                "wobbly" => set_b(&mut c.wobbly),
                 "tablet" => set_b(&mut c.tablet),
                 "tablet_mode" if matches!(v, "ink" | "mouse") => c.tablet_mode = v.into(),
                 "tablet_screen" if matches!(v, "all" | "main") => c.tablet_screen = v.into(),
@@ -940,6 +950,8 @@ impl Config {
             "notch_fullscreen" => b(self.notch_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
+            "min_animation" => b(self.min_animation),
+            "wobbly" => b(self.wobbly),
             "tablet" => b(self.tablet),
             "tablet_mode" => self.tablet_mode.clone(),
             "tablet_screen" => self.tablet_screen.clone(),
