@@ -2872,6 +2872,29 @@ impl Settings {
             {
                 let p = gfx.painter();
                 let f = &gfx.fonts;
+                let accent = theme::accent();
+                // The backdrop: the sidebar a shade darker, and the accent's
+                // light glowing in from the top right of the page.
+                p.rrect(0.0, 0.0, SIDEBAR, chin, 0.0, Color(0.0, 0.0, 0.0, 0.14));
+                p.line(SIDEBAR - 0.5, 0.0, SIDEBAR - 0.5, chin, Color::white(0.05), 1.0);
+                if let Some(b) = p.elliptic(
+                    cwin,
+                    0.0,
+                    (cwin - SIDEBAR) * 0.9,
+                    chin * 0.7,
+                    &[(0.0, accent.alpha(0.13)), (0.5, accent.alpha(0.04)), (1.0, accent.alpha(0.0))],
+                ) {
+                    p.fill_rrect_with(SIDEBAR, 0.0, cwin - SIDEBAR, chin, 0.0, &b);
+                }
+                if let Some(b) = p.elliptic(
+                    0.0,
+                    chin,
+                    SIDEBAR * 1.6,
+                    chin * 0.5,
+                    &[(0.0, accent.alpha(0.07)), (1.0, accent.alpha(0.0))],
+                ) {
+                    p.fill_rrect_with(0.0, 0.0, SIDEBAR, chin, 0.0, &b);
+                }
                 // Sidebar: the search box, then each page with its icon, in two groups.
                 let (bx, by, bw, bh) = SEARCH_BOX;
                 p.rrect(bx, by, bw, bh, 6.0, BOX_BG);
@@ -2900,11 +2923,21 @@ impl Settings {
                     }
                     let active = i == self.section || (self.section == LIGHTING && i == page::LOOK);
                     let lit = self.glow(Hit::Nav(i));
-                    let a = if active { 0.075 } else { 0.05 * lit };
-                    if a > 0.0 {
-                        p.rrect(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 5.0, Color::white(a));
+                    if active {
+                        // The open page: lit with the accent, brightest at its marker.
+                        if let Some(b) = p.linear(
+                            12.0,
+                            0.0,
+                            SIDEBAR - 12.0,
+                            0.0,
+                            &[(0.0, accent.alpha(0.22)), (1.0, accent.alpha(0.05))],
+                        ) {
+                            p.fill_rrect_with(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 6.0, &b);
+                        }
+                    } else if lit > 0.0 {
+                        p.rrect(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 6.0, Color::white(0.05 * lit));
                     }
-                    let c = Color::white(if active { 0.96 } else { 0.78 + 0.15 * lit });
+                    let c = Color::white(if active { 0.98 } else { 0.78 + 0.15 * lit });
                     let (ix, iy) = (34.0, y + NAV_H / 2.0);
                     match (nav_icon(i), &f.icons) {
                         (Some(ch), Some(font)) => {
@@ -2946,16 +2979,28 @@ impl Settings {
                 let dy = self.page_dy();
                 let fade = ease(self.page_since.elapsed().as_secs_f32() / PAGE_S);
                 p.clip(SIDEBAR, 0.0, cwin - SIDEBAR, chin);
-                p.text(
-                    self.title(),
-                    &f.big,
-                    x0,
-                    30.0 - self.scroll() + dy,
-                    cw,
-                    48.0,
-                    Align::Left,
-                    Color::white(0.96 * fade.max(0.2)),
-                );
+                // The title, with the page's icon on an accent tile.
+                let ty = 30.0 - self.scroll() + dy;
+                let page_icon = match self.section {
+                    LIGHTING => Some('\u{E706}'),
+                    s if s < SECTIONS.len() => nav_icon(s),
+                    _ => Some('\u{E721}'),
+                };
+                let mut tx = x0;
+                if let (Some(ch), Some(font)) = (page_icon, &f.icons) {
+                    let a = fade.max(0.2);
+                    p.gradient_rrect(
+                        x0,
+                        ty + 4.0,
+                        40.0,
+                        40.0,
+                        10.0,
+                        &[(0.0, accent.alpha(0.9 * a)), (1.0, theme::lighten(accent, 0.2).alpha(0.6 * a))],
+                    );
+                    p.text(&ch.to_string(), font, x0, ty + 4.0, 40.0, 40.0, Align::Center, Color::white(a));
+                    tx += 54.0;
+                }
+                p.text(self.title(), &f.big, tx, ty, cw, 48.0, Align::Left, Color::white(0.96 * fade.max(0.2)));
                 for (i, r) in self.rows().iter().enumerate() {
                     let y = self.row_y(i);
                     let h = self.row_h(i);
@@ -2963,12 +3008,25 @@ impl Settings {
                         continue;
                     }
                     if matches!(r.ctl, Ctl::Heading) {
-                        p.text(r.title, &f.title, x0 + 2.0, y + 16.0, cw, 24.0, Align::Left, Color::white(0.92));
+                        p.rrect(x0 + 2.0, y + 22.0, 3.0, 12.0, 1.5, accent);
+                        p.text(r.title, &f.title, x0 + 12.0, y + 16.0, cw, 24.0, Align::Left, Color::white(0.94));
                         continue;
                     }
                     let lit = self.glow(Hit::Row(i)).max(self.glow(Hit::Reset(i)) * 0.6);
-                    p.rrect(x0, y, cw, h, 6.0, CARD.alpha(CARD.3 + 0.022 * lit));
-                    p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 6.0, Color::white(0.045), 1.0);
+                    // A card: a soft light along its top, and the accent along its edge under the pointer.
+                    p.rrect(x0, y, cw, h, 8.0, CARD.alpha(CARD.3 + 0.022 * lit));
+                    p.gradient_rrect(
+                        x0,
+                        y,
+                        cw,
+                        h,
+                        8.0,
+                        &[(0.0, Color::white(0.025)), (0.6, Color::white(0.0)), (1.0, Color::white(0.0))],
+                    );
+                    p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 8.0, Color::white(0.045), 1.0);
+                    if lit > 0.0 {
+                        p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 8.0, accent.alpha(0.35 * lit), 1.0);
+                    }
                     let text_w = self.text_w(i, r);
                     // The gallery's title and description are the picked theme's.
                     let picked = matches!(r.ctl, Ctl::Gallery)
