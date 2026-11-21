@@ -1,4 +1,4 @@
-//! Wobbly windows (Settings > Appearance > Wobbly windows), as Linux
+//! Wobbly windows (Settings > Personalisation > Wobbly windows), as Linux
 //! desktops have them: a window dragged about bends like jelly, the part
 //! you hold following the pointer and the rest catching up, and it settles
 //! with a wobble when you let go.

@@ -23,6 +23,7 @@ mod desktops;
 mod devices;
 mod dictate;
 mod diskmap;
+mod disktree;
 mod dock;
 mod drop;
 mod ducker;

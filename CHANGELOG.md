@@ -4,12 +4,39 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-22
+
+**New**
+- **Pressure graph and test pad for the pen tablet** (Settings > Bluetooth & devices > Pen tablet): drag the curve's points for where the pen starts drawing, how soft or firm it feels and how hard a full press is, with a dot showing your pen live; draw on the pad to try it. The tablet's settings only show while the built-in driver is on.
+- **Disk Usage as a tree**, as TreeSize shows it (the map's still there, Tree / Map at the top): open folders to see what's in them, biggest first, each with its size, files, folders, a bar for its share of the folder above, and when it last changed; loose files together as "[n Files]". Without the file index the tree fills in as it's worked out: folders appear as they're found and their sizes climb.
+- **Snap layouts**: drag a window to the top of the screen and Windows 11's layouts drop down (halves, thirds, two thirds and one, a wide middle, a half and two quarters, quarters); let go over a part to put it there.
+- **Screenshots pop up as a preview** in the corner, as recordings do (Edit opens the editor, Folder, Copy, Delete), instead of the whole editor every time.
+- **Own icons for Cascade's apps**: Files, Photos, Calculator, Camera, Notepad, Clock, Media Player, Sound Recorder, Paint, Disk Usage, Lighting, Snip and Settings each have their own, in Start and on the taskbar (they were Cascade's logo or Windows' stock pictures). Snip is its own app on the taskbar and in Start too.
+- **Check for updates** (Settings > Updates): looks first and says what it found; Update now appears once there's a newer build.
+- **Any accent colour**: the + after the palette opens a colour picker.
+- **Profile picture** (Settings > Start menu): a picture for Start's account button; your Windows account's picture until you pick one.
+- **Files**: the path as parts to click (This PC › C: › Users ›...; click the bar to type one), columns that drag wider or narrower, **Group by** type, date modified or size (View), and phones and cameras plugged in listed in the sidebar, as Explorer does.
+- **Wobbly windows settings**: how much they wobble and how quickly they settle.
+
+**Improved**
+- **Settings in Windows 11's look**: the wallpaper blurred and darkened behind it as Windows' Mica is, plain cards with a hairline edge, no glow or gradients. Pages that repeated each other are one now: Appearance is part of Personalisation, Screens of Display, About of System; the auto ducker is in Sound, the default apps in Apps, battery saver in Power & battery, Windows Update in Updates; one sidebar in Windows' order. Settings that a switch brings in grow open instead of popping in.
+- **Liquid Glass is clear glass now**: no blur and no white haze (it was foggy), a fine rim instead of the white border, and a stronger lens bending what's around each edge, its colours split.
+- **The Start menu's acrylic** is as see-through as the taskbar's.
+- **Start's search learns**: what you open for a search comes first next time ("vs", then Visual Studio Code). Something that's both a setting and a command (Device Manager) is listed once, and settings, commands and files show their own icons.
+
+**Fixed**
+- **The pen was always pressed**: the driver took the pen's resting pressure from OpenTabletDriver's figure, and pens rest differently. It learns each pen's rest as it comes into reach, and has a threshold before it draws (with a little give, so it doesn't flicker).
+- **Wobbly windows tore**: each piece of the window was bent as a slanted rectangle, which can't meet its neighbours; they're bent as triangles that share their edges.
+- **No minimise animation for Cascade's own windows** (Settings, Files...), and none when restoring: the restore flew to where the window was parked off screen.
+- **Cascade Snip not opening**: a snip that ended without tidying up blocked every one after it; that's cleared now, and the log says when one is refused.
+- **Files**: the address and search boxes showed a box inside a box.
+
 ## 2026-11-21
 
 **New**
 - **Windows' everyday apps, Cascade's way** (in Start, and for text, music and video in shell mode, where the Store versions can't run): **Calculator** (Standard and Scientific, the answer as you type, history, the keyboard), **Camera** (photos to Camera Roll, video with the microphone's sound, switch cameras, mirror, self-timer), **Notepad** (open, save, word wrap, zoom, line and column), **Clock** (timers with rings, stopwatch with laps, alarms, world clock), **Media Player** (video and music, seek, volume, the folder as a playlist, repeat, fullscreen), **Sound Recorder** (the microphone to WAV with a level meter, play, show, delete) and **Paint** (pencil, brush, eraser, fill, picker, lines, rectangles, ellipses, palette, sizes, undo, zoom, PNG and JPEG). Each is its own app on the taskbar, with its own icon.
-- **Minimise animation** (Settings > Appearance > Windows): windows fly into their taskbar button when minimised and back out when restored, drawn from their own live picture, wherever Windows doesn't animate it itself. In shell mode Windows' own animation now gets to finish before a minimised window is tidied off the screen (it was cut short).
-- **Wobbly windows** (Settings > Appearance > Windows, off to start with): a window you drag bends like jelly, the part you hold following the pointer and the rest catching up, and wobbles as it settles. Works with super drag too.
+- **Minimise animation** (Settings > Personalisation > Windows): windows fly into their taskbar button when minimised and back out when restored, drawn from their own live picture, wherever Windows doesn't animate it itself. In shell mode Windows' own animation now gets to finish before a minimised window is tidied off the screen (it was cut short).
+- **Wobbly windows** (Settings > Personalisation > Windows, off to start with): a window you drag bends like jelly, the part you hold following the pointer and the rest catching up, and wobbles as it settles. Works with super drag too.
 - **A built-in pen tablet driver** (Settings > Bluetooth & devices > Pen tablet): 10moon, Vinsa and their relatives (USB 08F2:6811 and 0B57:902E) switched into tablet mode and read directly, as their own driver does, handed to Windows as a real pen (pressure in drawing apps) or as a mouse. Screen, proportions, left-handed, pressure firmness and the pen's two buttons can be set.
 - **Recording with Cascade Snip**: a 3, 2, 1 countdown first (Esc cancels, click starts now), a new bar in Snip's look (a pulsing dot, the time, Stop; drag it anywhere) and, once saved, a preview card at the bottom right as Snip & Sketch's: the last frame, its length and size, Play, Folder, Copy and Delete.
 - **Widgets' edit mode** (the pencil on the panel): each card made smaller or bigger and its corners rounded, square or round; every card drags into place, Notifications too.

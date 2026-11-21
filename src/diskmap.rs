@@ -1,7 +1,9 @@
 //! Disk usage (`cascade.exe --disk [folder]`): what's taking the space, as a
-//! map of rectangles sized by how much each folder and file holds, with the
-//! biggest listed beside it. Click a folder to go into it, Backspace or ‹
-//! to go back up; right-click for Open, Show in Files, Copy path, Delete.
+//! tree (TreeSize's view, see `disktree`: open folders to see what's in
+//! them, filling in live as it's worked out) or as a map of rectangles sized
+//! by how much each folder and file holds, with the biggest listed beside
+//! it. Click a folder to go into it, Backspace or ‹ to go back up;
+//! right-click for Open, Show in Files, Copy path, Delete.
 //!
 //! Sizes come from the instant-search index when it's on (every folder's
 //! total at once, as WizTree does from the drive's file table); without it,
@@ -26,6 +28,16 @@ const LIST_W: f32 = 340.0;
 const STATUS: f32 = 30.0;
 const GAP: f32 = 2.0;
 const DONE: u32 = WM_APP + 1;
+/// The tree's walk found more (redraw).
+const TREE_MORE: u32 = WM_APP + 2;
+/// The tree's rows and header.
+const TREE_ROW: f32 = 26.0;
+const TREE_HEAD: f32 = 30.0;
+/// The tree's columns after Name: (title, width).
+const TREE_COLS: [(&str, f32); 5] =
+    [("Size", 96.0), ("Files", 86.0), ("Folders", 80.0), ("% of parent", 130.0), ("Modified", 100.0)];
+/// The Tree / Map switch at the top.
+const SWITCH: (f32, f32) = (52.0, 132.0);
 
 /// A folder's contents: its total, and each item (name, folder, size), biggest first.
 #[derive(Clone, Default)]
@@ -50,6 +62,16 @@ struct State {
     rects: Vec<(f32, f32, f32, f32, Option<usize>)>,
     hovered: Option<usize>,
     drives: Vec<(char, u64, u64)>,
+    /// Shown as the tree (else the map), the tree, its open folders, how far
+    /// it's scrolled, the row picked and the row under the pointer, and
+    /// the rows as last drawn (for clicks).
+    tree_view: bool,
+    tree: Option<crate::disktree::Shared>,
+    open: std::collections::HashSet<usize>,
+    tree_scroll: f32,
+    tree_sel: Option<crate::disktree::Row>,
+    tree_hot: Option<usize>,
+    tree_rows: Vec<(crate::disktree::Row, usize)>,
 }
 
 thread_local! {
@@ -125,6 +147,11 @@ impl State {
         self.path = path.clone();
         self.hovered = None;
         self.rects.clear();
+        if self.tree_view {
+            self.start_tree();
+            appwin::redraw(self.hwnd);
+            return;
+        }
         if let Some(l) = self.cache.get(&path) {
             self.listing = Some(l.clone());
             appwin::redraw(self.hwnd);
@@ -157,6 +184,99 @@ impl State {
             SetTimer(Some(self.hwnd), 1, 250, None);
         }
         appwin::redraw(self.hwnd);
+    }
+
+    /// A tree of the folder shown (unless there is one already).
+    fn start_tree(&mut self) {
+        let root_now = self.tree.as_ref().map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).root.clone());
+        if root_now.as_ref() == Some(&self.path) {
+            return;
+        }
+        let hwnd = self.hwnd.0 as isize;
+        self.tree = Some(crate::disktree::start(&self.path, move || unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), TREE_MORE, WPARAM(0), LPARAM(0));
+        }));
+        self.open.clear();
+        self.open.insert(0);
+        self.tree_scroll = 0.0;
+        self.tree_sel = None;
+        self.tree_hot = None;
+    }
+
+    /// Shows the tree or the map.
+    fn show_tree(&mut self, on: bool) {
+        if on == self.tree_view {
+            return;
+        }
+        self.tree_view = on;
+        let path = self.path.clone();
+        self.go(path);
+    }
+
+    /// The tree's row at `y`, if there's one there.
+    fn tree_row_at(&self, y: f32) -> Option<usize> {
+        let top = TOP + TREE_HEAD;
+        if y < top {
+            return None;
+        }
+        let i = ((y - top + self.tree_scroll) / TREE_ROW).floor() as usize;
+        (i < self.tree_rows.len()).then_some(i)
+    }
+
+    /// A click in the tree: on a folder's arrow (or `toggle`) opens or closes it.
+    fn tree_click(&mut self, x: f32, y: f32, toggle: bool) {
+        use crate::disktree::Row;
+        let Some(i) = self.tree_row_at(y) else { return };
+        let (row, depth) = self.tree_rows[i];
+        self.tree_sel = Some(row);
+        if let Row::Folder(id) = row {
+            let arrow = 12.0 + depth as f32 * 18.0;
+            if (toggle || (x >= arrow && x < arrow + 20.0)) && !self.open.remove(&id) {
+                if let Some(t) = &self.tree {
+                    t.lock().unwrap_or_else(|e| e.into_inner()).read_from_index(id);
+                }
+                self.open.insert(id);
+            }
+        }
+        appwin::redraw(self.hwnd);
+    }
+
+    /// Right-click on a row of the tree: what can be done with that folder.
+    fn tree_menu(&mut self, y: f32) {
+        use crate::disktree::Row;
+        use crate::menu::{item, show, Entry, Place};
+        let Some(i) = self.tree_row_at(y) else { return };
+        let (row, _) = self.tree_rows[i];
+        let Some(tree) = self.tree.clone() else { return };
+        let id = match row {
+            Row::Folder(id) | Row::Files(id) => id,
+        };
+        let p = tree.lock().unwrap_or_else(|e| e.into_inner()).path_of(id);
+        let entries = vec![
+            item(1, "Show in Files"),
+            item(2, "Show as a map"),
+            item(3, "Copy path"),
+            Entry::Separator,
+            item(4, "Delete"),
+        ];
+        match show(self.hwnd, entries, Place::Cursor) {
+            1 => appwin::launch(&["--files", &p.to_string_lossy()]),
+            2 => {
+                self.tree_view = false;
+                self.go(p);
+            }
+            3 => crate::shell::copy_text(&p.to_string_lossy()),
+            4 if id != 0 && matches!(row, Row::Folder(_)) => {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if crate::winset::confirm(self.hwnd, &format!("Move \u{201c}{name}\u{201d} to the Recycle Bin?")) {
+                    crate::deskicons::delete(self.hwnd, &[p.to_string_lossy().into_owned()], false);
+                    self.cache.clear();
+                    self.tree = None;
+                    self.start_tree();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn walked(&mut self) {
@@ -301,8 +421,138 @@ fn colour(name: &str, dir: bool, i: usize) -> Color {
     }
 }
 
+/// Draws the tree in (x, y, w, h): a header, then its rows from `scroll` down.
+#[allow(clippy::too_many_arguments)]
+fn paint_tree(
+    p: &crate::gfx::Painter,
+    f: &crate::gfx::Fonts,
+    area: (f32, f32, f32, f32),
+    t: &crate::disktree::Tree,
+    rows: &[(crate::disktree::Row, usize)],
+    open: &std::collections::HashSet<usize>,
+    scroll: f32,
+    sel: Option<crate::disktree::Row>,
+    hot: Option<usize>,
+) {
+    use crate::disktree::Row;
+    let (x, y, w, h) = area;
+    let accent = theme::accent();
+    p.rrect(x, y, w, h, 8.0, PANEL);
+    // The header.
+    let fixed: f32 = TREE_COLS.iter().map(|c| c.1).sum();
+    let name_w = (w - fixed - 16.0).max(200.0);
+    p.text("Name", &f.label, x + 14.0, y, name_w, TREE_HEAD, Align::Left, Color::white(0.6));
+    let mut cx = x + 8.0 + name_w;
+    for (title, cw) in TREE_COLS {
+        p.text(title, &f.label, cx, y, cw - 12.0, TREE_HEAD, Align::Right, Color::white(0.6));
+        cx += cw;
+    }
+    p.rrect(x + 8.0, y + TREE_HEAD - 1.0, w - 16.0, 1.0, 0.0, LINE);
+    // The rows.
+    let top = y + TREE_HEAD;
+    p.clip(x, top, w, h - TREE_HEAD);
+    let first = (scroll / TREE_ROW).floor().max(0.0) as usize;
+    let count = ((h - TREE_HEAD) / TREE_ROW).ceil() as usize + 1;
+    for (i, &(row, depth)) in rows.iter().enumerate().skip(first).take(count) {
+        let ry = top + i as f32 * TREE_ROW - scroll;
+        let (node, parent_size) = match row {
+            Row::Folder(id) => {
+                let n = &t.nodes[id];
+                (n, n.parent.map_or(n.size, |p| t.nodes[p].size))
+            }
+            Row::Files(id) => (&t.nodes[id], t.nodes[id].size),
+        };
+        let (name, size, files, folders, modified) = match row {
+            Row::Folder(_) => (node.name.clone(), node.size, node.files, node.folders, node.modified),
+            Row::Files(_) => {
+                let n = node.own_files;
+                (format!("[{n} File{}]", if n == 1 { "" } else { "s" }), node.own_size, n, 0, 0)
+            }
+        };
+        if sel == Some(row) {
+            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, accent.alpha(0.28));
+        } else if hot == Some(i) {
+            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, Color::white(0.05));
+        }
+        let ix = x + 12.0 + depth as f32 * 18.0;
+        // The arrow: open or closed, for a folder with anything in it.
+        if let Row::Folder(id) = row {
+            let n = &t.nodes[id];
+            let has = !n.children.is_empty() || n.own_files > 0 || (t.indexed && !n.read);
+            if has {
+                let (ax, ay) = (ix + 8.0, ry + TREE_ROW / 2.0);
+                let c = Color::white(0.65);
+                if open.contains(&id) {
+                    p.line(ax - 4.0, ay - 2.0, ax, ay + 2.0, c, 1.4);
+                    p.line(ax, ay + 2.0, ax + 4.0, ay - 2.0, c, 1.4);
+                } else {
+                    p.line(ax - 2.0, ay - 4.0, ax + 2.0, ay, c, 1.4);
+                    p.line(ax + 2.0, ay, ax - 2.0, ay + 4.0, c, 1.4);
+                }
+            }
+        }
+        // A folder, or a page for the loose files.
+        let (gx, gy) = (ix + 22.0, ry + 7.0);
+        match row {
+            Row::Folder(_) => {
+                p.rrect(gx, gy, 7.0, 3.0, 1.0, Color(0.96, 0.75, 0.25, 1.0));
+                p.rrect(gx, gy + 2.0, 16.0, 11.0, 2.0, Color(0.98, 0.80, 0.32, 1.0));
+            }
+            Row::Files(_) => {
+                p.rrect(gx + 2.0, gy - 1.0, 11.0, 14.0, 2.0, Color::white(0.75));
+            }
+        }
+        // The share of the root, as TreeSize does: a bar behind the name.
+        let root = t.nodes[0].size.max(1);
+        let tx = gx + 24.0;
+        let bar_w = (x + 8.0 + name_w - tx - 8.0).max(0.0);
+        let share_root = size as f32 / root as f32;
+        p.rrect(tx - 4.0, ry + 4.0, bar_w * share_root, TREE_ROW - 8.0, 3.0, Color::white(0.06));
+        let bold = depth <= 1 && matches!(row, Row::Folder(_));
+        p.text(&name, &f.body, tx, ry, bar_w, TREE_ROW, Align::Left, Color::white(if bold { 0.96 } else { 0.85 }));
+        // The numbers.
+        let mut cx = x + 8.0 + name_w;
+        let cell = |cx: f32, cw: f32, text: &str| {
+            p.text(text, &f.small, cx, ry, cw - 12.0, TREE_ROW, Align::Right, Color::white(0.75));
+        };
+        cell(cx, TREE_COLS[0].1, &size_text(size));
+        cx += TREE_COLS[0].1;
+        let counts = !t.indexed || matches!(row, Row::Files(_));
+        cell(cx, TREE_COLS[1].1, &if counts { files.to_string() } else { String::new() });
+        cx += TREE_COLS[1].1;
+        cell(
+            cx,
+            TREE_COLS[2].1,
+            &if counts && matches!(row, Row::Folder(_)) { folders.to_string() } else { String::new() },
+        );
+        cx += TREE_COLS[2].1;
+        // % of the folder above, as a bar with the number on it.
+        let share = if matches!(row, Row::Folder(0)) { 1.0 } else { size as f32 / parent_size.max(1) as f32 };
+        let (bx, bw) = (cx + 8.0, TREE_COLS[3].1 - 16.0);
+        p.rrect(bx, ry + 5.0, bw, TREE_ROW - 10.0, 3.0, Color::white(0.06));
+        p.rrect(bx, ry + 5.0, bw * share.clamp(0.0, 1.0), TREE_ROW - 10.0, 3.0, accent.alpha(0.55));
+        p.text(&format!("{:.1} %", share * 100.0), &f.small, bx, ry, bw, TREE_ROW, Align::Center, Color::white(0.92));
+        cx += TREE_COLS[3].1;
+        cell(cx, TREE_COLS[4].1, &crate::disktree::date(modified));
+    }
+    p.unclip();
+    // Scrollbar.
+    let total = rows.len() as f32 * TREE_ROW;
+    let view = h - TREE_HEAD;
+    if total > view {
+        let thumb = (view * view / total).max(30.0);
+        let ty = top + (view - thumb) * (scroll / (total - view)).clamp(0.0, 1.0);
+        p.rrect(x + w - 8.0, ty, 4.0, thumb, 2.0, Color::white(0.25));
+    }
+}
+
 fn paint(s: &mut State) {
     let hwnd = s.hwnd;
+    let tree_view = s.tree_view;
+    let tree = s.tree.clone();
+    let open = s.open.clone();
+    let (tree_scroll, tree_sel, tree_hot) = (s.tree_scroll, s.tree_sel, s.tree_hot);
+    let mut tree_rows = Vec::new();
     let drives = s.drives.clone();
     let path_text = s.path.to_string_lossy().into_owned();
     let listing = s.listing.clone();
@@ -313,12 +563,24 @@ fn paint(s: &mut State) {
         // Top: back, the path, the drives.
         p.rrect(12.0, 12.0, 30.0, 28.0, 6.0, Color::white(0.06));
         p.text("\u{2039}", &f.title, 12.0, 10.0, 30.0, 28.0, Align::Center, Color::white(0.85));
+        // Tree or map.
+        let (sx, sw) = SWITCH;
+        p.rrect(sx, 12.0, sw, 28.0, 6.0, Color::white(0.06));
+        for (k, label) in ["Tree", "Map"].iter().enumerate() {
+            let on = (k == 0) == tree_view;
+            let bx = sx + k as f32 * sw / 2.0;
+            if on {
+                p.rrect(bx + 2.0, 14.0, sw / 2.0 - 4.0, 24.0, 5.0, theme::accent());
+            }
+            p.text(label, &f.body, bx, 12.0, sw / 2.0, 28.0, Align::Center, Color::white(if on { 1.0 } else { 0.75 }));
+        }
+        let px = sx + sw + 12.0;
         p.text(
             &path_text,
             &f.title,
-            52.0,
+            px,
             12.0,
-            w - 60.0 - drives.len() as f32 * 96.0,
+            w - px - 8.0 - drives.len() as f32 * 96.0,
             28.0,
             Align::Left,
             Color::white(0.95),
@@ -341,6 +603,29 @@ fn paint(s: &mut State) {
             p.text(&size_text(total - used), &f.small, x + 32.0, 13.0, 52.0, 14.0, Align::Right, Color::white(0.55));
         }
         let (mx, my, mw, mh) = (12.0, TOP, w - LIST_W - 24.0, h - TOP - STATUS - 6.0);
+        if tree_view {
+            let Some(tree) = &tree else { return };
+            let t = tree.lock().unwrap_or_else(|e| e.into_inner());
+            tree_rows = crate::disktree::rows(&t, &open);
+            let max = (tree_rows.len() as f32 * TREE_ROW - (mh - TREE_HEAD)).max(0.0);
+            let scroll = tree_scroll.min(max);
+            paint_tree(p, f, (12.0, TOP, w - 24.0, mh), &t, &tree_rows, &open, scroll, tree_sel, tree_hot);
+            let root = &t.nodes[0];
+            let status = if t.indexed {
+                format!("{} \u{b7} from the file index, so it's all here already", size_text(root.size))
+            } else if t.done {
+                format!("{} \u{b7} {} files \u{b7} {} folders", size_text(root.size), root.files, root.folders)
+            } else {
+                format!(
+                    "Working it out\u{2026} {} so far \u{b7} {} files \u{b7} {} folders found",
+                    size_text(root.size),
+                    root.files,
+                    root.folders
+                )
+            };
+            p.text(&status, &f.small, 14.0, h - STATUS + 6.0, w - 28.0, 18.0, Align::Left, Color::white(0.6));
+            return;
+        }
         p.rrect(w - LIST_W - 6.0, TOP, LIST_W - 6.0, mh, 8.0, PANEL);
         let Some(l) = listing else {
             p.text(
@@ -441,6 +726,9 @@ fn paint(s: &mut State) {
         p.text(&status, &f.small, 14.0, h - STATUS + 6.0, w - 28.0, 18.0, Align::Left, Color::white(0.6));
     });
     s.rects = rects;
+    if tree_view {
+        s.tree_rows = tree_rows;
+    }
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -453,13 +741,34 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_ERASEBKGND => return LRESULT(1),
         WM_SIZE | WM_DPICHANGED => appwin::redraw(hwnd),
-        WM_TIMER => appwin::redraw(hwnd),
+        WM_TIMER | TREE_MORE => appwin::redraw(hwnd),
+        WM_MOUSEWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32;
+            with(|s| {
+                if s.tree_view {
+                    let (_, h) = appwin::client(hwnd);
+                    let view = h - TOP - STATUS - 6.0 - TREE_HEAD;
+                    let max = (s.tree_rows.len() as f32 * TREE_ROW - view).max(0.0);
+                    s.tree_scroll = (s.tree_scroll - delta / 120.0 * TREE_ROW * 3.0).clamp(0.0, max);
+                    appwin::redraw(hwnd);
+                }
+            });
+            return LRESULT(0);
+        }
         DONE => {
             with(|s| s.walked());
         }
         WM_MOUSEMOVE => {
             let (x, y) = appwin::mouse(hwnd, lp);
             with(|s| {
+                if s.tree_view {
+                    let hot = s.tree_row_at(y);
+                    if hot != s.tree_hot {
+                        s.tree_hot = hot;
+                        appwin::redraw(hwnd);
+                    }
+                    return;
+                }
                 let h = s.hit(x, y);
                 if h != s.hovered {
                     s.hovered = h;
@@ -475,6 +784,12 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     if x < 46.0 {
                         s.up();
                     }
+                    let (sx, sw) = SWITCH;
+                    if x >= sx && x < sx + sw {
+                        s.show_tree(x < sx + sw / 2.0);
+                        appwin::redraw(hwnd);
+                        return;
+                    }
                     let n = s.drives.len();
                     for (k, (l, _, _)) in s.drives.clone().into_iter().enumerate() {
                         let dx = w - (n - k) as f32 * 96.0 - 4.0;
@@ -482,6 +797,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                             s.go(PathBuf::from(format!("{l}:\\")));
                         }
                     }
+                    return;
+                }
+                if s.tree_view {
+                    s.tree_click(x, y, false);
                     return;
                 }
                 if let Some(i) = s.hit(x, y) {
@@ -494,6 +813,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_LBUTTONDBLCLK => {
             let (x, y) = appwin::mouse(hwnd, lp);
             with(|s| {
+                if s.tree_view {
+                    s.tree_click(x, y, true);
+                    return;
+                }
                 if let Some(i) = s.hit(x, y) {
                     s.open(i);
                 }
@@ -501,6 +824,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_RBUTTONUP => {
             let (x, y) = appwin::mouse(hwnd, lp);
+            if with(|s| s.tree_view) == Some(true) {
+                with(|s| s.tree_menu(y));
+                return LRESULT(0);
+            }
             let i = with(|s| s.hit(x, y)).flatten();
             if let Some(i) = i {
                 with(|s| s.menu(i));
@@ -536,6 +863,13 @@ pub fn run(start: Option<String>) {
             rects: Vec::new(),
             hovered: None,
             drives: drives(),
+            tree_view: true,
+            tree: None,
+            open: std::collections::HashSet::new(),
+            tree_scroll: 0.0,
+            tree_sel: None,
+            tree_hot: None,
+            tree_rows: Vec::new(),
         })
     });
     with(|s| s.go(path));

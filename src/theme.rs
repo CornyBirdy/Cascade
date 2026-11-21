@@ -1,6 +1,6 @@
 //! The look shared by every Cascade surface (the notch's lip, the taskbar,
 //! the Start menu, the panels and Alt+Tab): one of two themes, and your
-//! accent colour. Picked in Settings > Appearance, or `theme =` and
+//! accent colour. Picked in Settings > Personalisation, or `theme =` and
 //! `accent =` in the config.
 //!
 //! - **Acrylic**: Windows 11's frosted glass with a fine edge lit along the top.
