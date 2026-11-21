@@ -77,8 +77,84 @@ enum Hit {
     Caption(u8),
     Side(usize),
     Header(usize),
+    /// The edge between header `i` and the next (drag to resize column `i`).
+    HeaderEdge(usize),
+    /// A part of the path in the address bar, and the bar around them.
+    Crumb(usize),
+    Address,
     Item(usize),
     Empty,
+}
+
+/// How far a group heading takes (Group by).
+const GROUP_H: f32 = 34.0;
+
+/// The path as the address bar shows it: each folder on the way, to click.
+fn crumbs(loc: &Loc) -> Vec<(String, Loc)> {
+    match loc {
+        Loc::Path(p) if !p.starts_with("\\\\") => {
+            let mut out = vec![("This PC".to_string(), filesio::this_pc())];
+            let mut acc = String::new();
+            for (k, part) in p.trim_end_matches('\\').split('\\').enumerate() {
+                if part.is_empty() {
+                    continue;
+                }
+                if k == 0 {
+                    acc = format!("{part}\\");
+                    out.push((Loc::Path(acc.clone()).title(), Loc::Path(acc.clone())));
+                } else {
+                    if !acc.ends_with('\\') {
+                        acc.push('\\');
+                    }
+                    acc.push_str(part);
+                    out.push((part.to_string(), Loc::Path(acc.clone())));
+                }
+            }
+            out
+        }
+        other => vec![(other.title(), other.clone())],
+    }
+}
+
+/// Which group an item goes in (Group by: 1 type, 2 date modified, 3
+/// size): its place among the groups and the group's name.
+fn group_of(item: &filesio::Item, by: u8, now: u64) -> (u32, String) {
+    match by {
+        1 if item.folder => (0, "Folders".into()),
+        1 => (1, if item.kind.is_empty() { "Other".into() } else { item.kind.clone() }),
+        2 => {
+            if item.modified == 0 {
+                return (9, "Unknown".into());
+            }
+            let days = now.saturating_sub(item.modified) / 864_000_000_000;
+            let (rank, name) = match days {
+                0 => (0, "Today"),
+                1 => (1, "Yesterday"),
+                2..=6 => (2, "Earlier this week"),
+                7..=13 => (3, "Last week"),
+                14..=30 => (4, "Earlier this month"),
+                31..=61 => (5, "Last month"),
+                62..=365 => (6, "Earlier this year"),
+                _ => (7, "A long time ago"),
+            };
+            (rank, name.into())
+        }
+        3 if item.folder => (0, "Folders".into()),
+        3 => {
+            let s = item.size.unwrap_or(0);
+            let (rank, name) = match s {
+                0 => (1, "Empty"),
+                1..=16_383 => (2, "Tiny (under 16 KB)"),
+                16_384..=1_048_575 => (3, "Small (16 KB to 1 MB)"),
+                1_048_576..=134_217_727 => (4, "Medium (1 to 128 MB)"),
+                134_217_728..=1_073_741_823 => (5, "Large (128 MB to 1 GB)"),
+                1_073_741_824..=4_294_967_295 => (6, "Huge (1 to 4 GB)"),
+                _ => (7, "Gigantic (over 4 GB)"),
+            };
+            (rank, name.into())
+        }
+        _ => (0, String::new()),
+    }
 }
 
 struct Tab {
@@ -95,6 +171,9 @@ struct Tab {
     loading: bool,
     generation: u32,
     filter: String,
+    /// Group headings (Group by): where each group starts in `order`, its
+    /// name, and how many are in it.
+    heads: Vec<(usize, String, usize)>,
 }
 
 impl Tab {
@@ -111,6 +190,7 @@ impl Tab {
             loading: true,
             generation: 0,
             filter: String::new(),
+            heads: Vec::new(),
         }
     }
 
@@ -150,6 +230,15 @@ struct State {
     side: Vec<(char, String, Loc)>,
     typed: (String, Instant),
     gfx_generation: u32,
+    /// The Date modified, Type and Size columns' widths (Name takes the rest),
+    /// and a column edge being dragged: (column, where the drag began, its width then).
+    col_w: [f32; 3],
+    col_drag: Option<(usize, f32, f32)>,
+    /// The address box is being typed in (else the path shows as parts to click).
+    editing_addr: bool,
+    /// Group by: 0 none, 1 type, 2 date modified, 3 size.
+    group: u8,
+    measure: Option<crate::gfx::Measure>,
 }
 
 thread_local! {
@@ -207,6 +296,10 @@ fn sidebar() -> Vec<(char, String, Loc)> {
                 out.push(('\u{EDA2}', format!("{l}:"), Loc::Path(root)));
             }
         }
+    }
+    // Phones and cameras plugged in (as Explorer lists them under This PC).
+    for (name, parse) in filesio::portable_devices() {
+        out.push(('\u{E8EA}', name.clone(), Loc::Shell(parse, name)));
     }
     out.push((
         '\u{E74D}',
@@ -296,7 +389,9 @@ impl State {
         let (x0, _, cw, _) = self.content();
         let top = self.rows_top();
         match self.view {
-            View::Details => (x0 + 8.0, top + pos as f32 * ROW_H, cw - 24.0, ROW_H),
+            View::Details => {
+                (x0 + 8.0, top + pos as f32 * ROW_H + self.heads_before(pos) as f32 * GROUP_H, cw - 24.0, ROW_H)
+            }
             View::Icons => {
                 let c = self.cols();
                 (x0 + 8.0 + (pos % c) as f32 * TILE_W, top + (pos / c) as f32 * TILE_H, TILE_W - 6.0, TILE_H - 6.0)
@@ -307,8 +402,25 @@ impl State {
     fn content_height(&self) -> f32 {
         let n = self.t().order.len();
         match self.view {
-            View::Details => n as f32 * ROW_H + 8.0,
+            View::Details => n as f32 * ROW_H + self.t().heads.len() as f32 * GROUP_H + 8.0,
             View::Icons => (n.div_ceil(self.cols())) as f32 * TILE_H + 8.0,
+        }
+    }
+
+    /// Group headings at or before item `pos` (Details only).
+    fn heads_before(&self, pos: usize) -> usize {
+        if self.view != View::Details {
+            return 0;
+        }
+        self.t().heads.partition_point(|h| h.0 <= pos)
+    }
+
+    /// Column `i`'s width (Name, 0, takes what the others leave).
+    fn col_width(&self, i: usize, cw: f32) -> f32 {
+        if i == 0 {
+            self.name_w(cw)
+        } else {
+            self.col_w[i - 1]
         }
     }
 
@@ -551,9 +663,17 @@ impl State {
                 .filter(|&i| f.is_empty() || tab.items[i].name.to_lowercase().contains(&f))
                 .collect();
             let items = &tab.items;
+            let by = self.group;
+            let now = unsafe { windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime() };
+            let now = ((now.dwHighDateTime as u64) << 32) | now.dwLowDateTime as u64;
+            let groups: Vec<(u32, String)> = items.iter().map(|it| group_of(it, by, now)).collect();
             order.sort_by(|&a, &b| {
                 let (x, y) = (&items[a], &items[b]);
-                // Folders first, whichever way.
+                // In their groups first (Group by), then folders first, whichever way.
+                let grouped = groups[a].cmp(&groups[b]);
+                if grouped != std::cmp::Ordering::Equal {
+                    return grouped;
+                }
                 let folders = y.folder.cmp(&x.folder);
                 let by = match col {
                     1 => x.modified.cmp(&y.modified),
@@ -563,6 +683,15 @@ impl State {
                 };
                 folders.then(if asc { by } else { by.reverse() }).then_with(|| natural(&x.name, &y.name))
             });
+            tab.heads.clear();
+            if by != 0 {
+                for (pos, &i) in order.iter().enumerate() {
+                    match tab.heads.last_mut() {
+                        Some(h) if groups[order[h.0]] == groups[i] => h.2 += 1,
+                        _ => tab.heads.push((pos, groups[i].1.clone(), 1)),
+                    }
+                }
+            }
             tab.order = order;
         }
     }
@@ -765,10 +894,19 @@ impl State {
             check(2, "Icons", self.view == View::Icons),
             Entry::Separator,
             check(3, "Hidden items", self.show_hidden),
+            Entry::Separator,
+            check(10, "Group by: none", self.group == 0),
+            check(11, "Group by type", self.group == 1),
+            check(12, "Group by date modified", self.group == 2),
+            check(13, "Group by size", self.group == 3),
         ];
         match show(self.hwnd, entries, Place::Cursor) {
             1 => self.view = View::Details,
             2 => self.view = View::Icons,
+            g @ 10..=13 => {
+                self.group = (g - 10) as u8;
+                self.resort();
+            }
             3 => {
                 self.show_hidden = !self.show_hidden;
                 self.load();
@@ -977,6 +1115,17 @@ impl State {
             return (x >= px && x < px + 32.0).then_some(Hit::NewTab);
         }
         if y < TABS_H + BAR_H {
+            let (ax, aw, _) = self.box_layout(w);
+            if x >= ax && x < ax + aw {
+                if !self.editing_addr {
+                    for (cx, cw, i) in self.crumb_layout(w) {
+                        if x >= cx && x < cx + cw {
+                            return Some(Hit::Crumb(i));
+                        }
+                    }
+                }
+                return Some(Hit::Address);
+            }
             return match ((x - 8.0) / 36.0).floor() as i32 {
                 0 => Some(Hit::Back),
                 1 => Some(Hit::Forward),
@@ -999,11 +1148,16 @@ impl State {
         }
         let (x0, y0, cw, _) = self.content();
         if self.view == View::Details && y < y0 + HEAD_H {
-            let mut cx = x0 + 8.0 + self.name_w(cw);
-            if x < cx {
-                return Some(Hit::Header(0));
-            }
-            for (i, (_, cwid)) in COLS.iter().enumerate().skip(1) {
+            let mut cx = x0 + 8.0;
+            for i in 0..COLS.len() {
+                let cwid = self.col_width(i, cw);
+                // The edge after a column (but the Name column's, which takes what's left).
+                if i > 0 && (x - (cx + cwid)).abs() < 5.0 {
+                    return Some(Hit::HeaderEdge(i));
+                }
+                if i > 0 && (x - cx).abs() < 5.0 && i > 1 {
+                    return Some(Hit::HeaderEdge(i - 1));
+                }
                 if x < cx + cwid {
                     return Some(Hit::Header(i));
                 }
@@ -1024,7 +1178,7 @@ impl State {
     }
 
     fn name_w(&self, cw: f32) -> f32 {
-        (cw - 24.0 - COLS[1..].iter().map(|c| c.1).sum::<f32>()).max(160.0)
+        (cw - 24.0 - self.col_w.iter().sum::<f32>()).max(160.0)
     }
 
     fn tab_w(&self, w: f32) -> f32 {
@@ -1042,8 +1196,10 @@ impl State {
             View::Details => (ROW_H, 1),
             View::Icons => (TILE_H, self.cols()),
         };
-        let first = ((scroll / row).floor() as usize) * per;
-        let count = (((ch - (top - y0)) / row).ceil() as usize + 2) * per;
+        // Group headings push rows down: start early enough, and take more.
+        let heads = if self.view == View::Details { self.t().heads.len() } else { 0 };
+        let first = (((scroll - heads as f32 * GROUP_H).max(0.0) / row).floor() as usize) * per;
+        let count = (((ch - (top - y0)) / row).ceil() as usize + 2 + heads) * per;
         first.min(n)..(first + count).min(n)
     }
 
@@ -1075,6 +1231,11 @@ impl State {
     }
 
     fn paint(&mut self) {
+        // The address box lost the keyboard: back to the path's parts.
+        if self.editing_addr && unsafe { GetFocus() } != self.addr {
+            self.editing_addr = false;
+            self.place_boxes();
+        }
         // A lost render target: every bitmap is gone with it.
         let generation = self.gfx.as_ref().map_or(0, |g| g.generation);
         if self.gfx_generation != generation {
@@ -1170,9 +1331,52 @@ impl State {
             }
             glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, Color::white(if can[k] { 0.85 } else { 0.3 }));
         }
+        // The address and search boxes, in exactly the text boxes' colour so
+        // each reads as one box (not a box in a box).
         let (ax, aw, sw) = self.box_layout(w);
-        p.rrect(ax, TABS_H + 7.0, aw, 30.0, 5.0, Color::white(0.06));
-        p.rrect(w - sw - 10.0, TABS_H + 7.0, sw, 30.0, 5.0, Color::white(0.06));
+        let field = Color(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0);
+        let addr_lit = matches!(hov, Some(Hit::Address) | Some(Hit::Crumb(_)));
+        p.rrect(ax, TABS_H + 7.0, aw, 30.0, 5.0, field);
+        p.stroke_rrect(
+            ax + 0.5,
+            TABS_H + 7.5,
+            aw - 1.0,
+            29.0,
+            5.0,
+            Color::white(if addr_lit { 0.12 } else { 0.06 }),
+            1.0,
+        );
+        p.rrect(w - sw - 10.0, TABS_H + 7.0, sw, 30.0, 5.0, field);
+        p.stroke_rrect(w - sw - 9.5, TABS_H + 7.5, sw - 1.0, 29.0, 5.0, Color::white(0.06), 1.0);
+        if self.editing_addr {
+            p.rrect(ax + 1.0, TABS_H + 35.0, aw - 2.0, 2.0, 1.0, accent);
+        } else {
+            // The path as parts to click, as Explorer shows it.
+            let parts = crumbs(&t.loc);
+            let layout = self.crumb_layout(w);
+            if layout.first().is_some_and(|l| l.2 > 0) {
+                glyph_at(0xE712, ax + 6.0, TABS_H + 14.0, 16.0, Color::white(0.55));
+            }
+            for (n, (cx, cwid, i)) in layout.iter().enumerate() {
+                if hov == Some(Hit::Crumb(*i)) {
+                    p.rrect(*cx, TABS_H + 10.0, *cwid, 24.0, 4.0, Color::white(0.08));
+                }
+                let last = n + 1 == layout.len();
+                p.text(
+                    &parts[*i].0,
+                    &f.body,
+                    cx + 6.0,
+                    TABS_H + 7.0,
+                    cwid - 6.0,
+                    30.0,
+                    Align::Left,
+                    Color::white(if last { 0.95 } else { 0.78 }),
+                );
+                if !last {
+                    glyph_at(0xE76C, cx + cwid + 1.0, TABS_H + 17.0, 10.0, Color::white(0.5));
+                }
+            }
+        }
         // Commands.
         p.rrect(0.0, TABS_H + BAR_H - 0.5, w, 1.0, 0.0, LINE);
         let cy = TABS_H + BAR_H;
@@ -1229,9 +1433,21 @@ impl State {
         let scroll = t.scroll;
         if self.view == View::Details {
             let mut cx = x0 + 8.0;
-            let nw = self.name_w(cw);
-            for (i, (name, cwid)) in COLS.iter().enumerate() {
-                let width = if i == 0 { nw } else { *cwid };
+            for (i, (name, _)) in COLS.iter().enumerate() {
+                let width = self.col_width(i, cw);
+                // The line between columns, brighter where it can be dragged.
+                if i > 0 {
+                    let lit =
+                        matches!(hov, Some(Hit::HeaderEdge(e)) if e == i) || self.col_drag.is_some_and(|d| d.0 == i);
+                    p.line(
+                        cx + width - 0.5,
+                        cy0 + 7.0,
+                        cx + width - 0.5,
+                        cy0 + HEAD_H - 7.0,
+                        Color::white(if lit { 0.45 } else { 0.10 }),
+                        1.0,
+                    );
+                }
                 if hov == Some(Hit::Header(i)) {
                     p.rrect(cx, cy0 + 2.0, width, HEAD_H - 4.0, 4.0, Color::white(0.05));
                 }
@@ -1262,6 +1478,26 @@ impl State {
         let top = self.rows_top();
         p.clip(x0, top, cw, chh - (top - cy0));
         let biggest = t.items.iter().filter(|i| i.folder).filter_map(|i| i.size).max().unwrap_or(0);
+        // Group headings (Group by), above each group's first row.
+        if self.view == View::Details {
+            for (k, (pos, name, count)) in t.heads.iter().enumerate() {
+                let hy = top + *pos as f32 * ROW_H + k as f32 * GROUP_H - scroll;
+                if hy + GROUP_H < top || hy > cy0 + chh {
+                    continue;
+                }
+                let label = format!("{name} ({count})");
+                p.text(&label, &f.label, x0 + 16.0, hy + 4.0, cw - 40.0, GROUP_H - 4.0, Align::Left, accent);
+                let lw = p.measure(&label, &f.label);
+                p.line(
+                    x0 + 24.0 + lw,
+                    hy + GROUP_H / 2.0 + 2.0,
+                    x0 + cw - 24.0,
+                    hy + GROUP_H / 2.0 + 2.0,
+                    Color::white(0.08),
+                    1.0,
+                );
+            }
+        }
         for (pos, bmp) in icons {
             let i = t.order[*pos];
             let item = &t.items[i];
@@ -1288,7 +1524,7 @@ impl State {
                         _ => String::new(),
                     };
                     for (k, text) in [&item.date, &item.kind, &size].iter().enumerate() {
-                        let cwid = COLS[k + 1].1;
+                        let cwid = self.col_w[k];
                         if k == 2 {
                             // TreeSize's bars: a folder's share of the biggest here; a drive's fill.
                             let (bx, bw) = (cx + 8.0, cwid - 14.0);
@@ -1381,12 +1617,37 @@ impl State {
         (ax, w - ax - sw - 22.0, sw)
     }
 
+    /// Where the path's parts go in the address bar: (x, width, part), the
+    /// first ones left out when the path is too long for it.
+    fn crumb_layout(&self, w: f32) -> Vec<(f32, f32, usize)> {
+        let (ax, aw, _) = self.box_layout(w);
+        let parts = crumbs(&self.t().loc);
+        let width = |s: &str| self.measure.as_ref().map_or(s.len() as f32 * 7.5, |m| m.width(s, &m.body)) + 12.0;
+        let widths: Vec<f32> = parts.iter().map(|(name, _)| width(name)).collect();
+        const CHEVRON: f32 = 14.0;
+        let room = aw - 32.0;
+        let mut first = 0;
+        while first + 1 < parts.len() && widths[first..].iter().map(|w| w + CHEVRON).sum::<f32>() > room {
+            first += 1;
+        }
+        let mut x = ax + if first > 0 { 26.0 } else { 6.0 };
+        let mut out = Vec::new();
+        for (i, wd) in widths.iter().enumerate().skip(first) {
+            out.push((x, *wd, i));
+            x += wd + CHEVRON;
+        }
+        out
+    }
+
     fn place_boxes(&self) {
         let (w, _) = appwin::client(self.hwnd);
         let k = appwin::scale(self.hwnd);
         let (ax, aw, sw) = self.box_layout(w);
         unsafe {
+            // The address box only while it's typed in; the path's parts show otherwise.
+            let shown = if self.editing_addr { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
             let flags = SWP_NOZORDER | SWP_NOACTIVATE;
+            let _ = SetWindowPos(self.addr, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | flags | shown);
             let _ = SetWindowPos(
                 self.addr,
                 None,
@@ -1421,7 +1682,11 @@ impl State {
             Some(Hit::Back) => self.back(),
             Some(Hit::Forward) => self.forward(),
             Some(Hit::Up) => self.up(),
-            Some(Hit::Refresh) => self.load(),
+            Some(Hit::Refresh) => {
+                // A phone plugged in since shows in the sidebar too.
+                self.side = sidebar();
+                self.load();
+            }
             Some(Hit::Cmd(i)) => self.command(i),
             Some(Hit::Caption(b)) => appwin::caption_press(self.hwnd, b),
             Some(Hit::Side(i)) => {
@@ -1432,6 +1697,20 @@ impl State {
                 self.sort = if self.sort.0 == i { (i, !self.sort.1) } else { (i, i != 1 && i != 3) };
                 self.resort();
             }
+            Some(Hit::HeaderEdge(i)) => {
+                self.col_drag = Some((i, x, self.col_w[i - 1]));
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+            }
+            Some(Hit::Crumb(i)) => {
+                if let Some((_, loc)) = crumbs(&self.t().loc).into_iter().nth(i) {
+                    if loc != self.t().loc {
+                        self.go(loc);
+                    }
+                }
+            }
+            Some(Hit::Address) => self.focus_addr(),
             Some(Hit::Item(pos)) => {
                 let i = self.t().order[pos];
                 let double = unsafe { GetDoubleClickTime() } as u128;
@@ -1483,6 +1762,11 @@ impl State {
     }
 
     fn on_move(&mut self, x: f32, y: f32) {
+        if let Some((i, from, width)) = self.col_drag {
+            self.col_w[i - 1] = (width + x - from).clamp(60.0, 600.0);
+            appwin::redraw(self.hwnd);
+            return;
+        }
         if let Some((px, py, _)) = self.press {
             if (x - px).hypot(y - py) > 6.0 {
                 self.press = None;
@@ -1524,6 +1808,7 @@ impl State {
 
     fn on_up(&mut self) {
         self.press = None;
+        self.col_drag = None;
         if self.band.take().is_some() {
             appwin::redraw(self.hwnd);
         }
@@ -1667,8 +1952,11 @@ impl State {
         }
     }
 
-    fn focus_addr(&self) {
+    fn focus_addr(&mut self) {
+        self.editing_addr = true;
+        self.place_boxes();
         unsafe {
+            let _ = SetWindowTextW(self.addr, &HSTRING::from(self.t().loc.address()));
             let _ = SetFocus(Some(self.addr));
             SendMessageW(self.addr, 0x00B1, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
@@ -1994,6 +2282,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_COMMAND => {
             // The search box filters as you type.
             let (id, code) = (wp.0 & 0xFFFF, (wp.0 >> 16) & 0xFFFF);
+            // The address box lost the keyboard: the path's parts come back.
+            if id == ID_ADDR && code == 0x0200 {
+                appwin::redraw(hwnd);
+            }
             if id == ID_SEARCH && code == 0x0300 {
                 with(|s| {
                     let q = State::edit_text(s.search);
@@ -2208,6 +2500,11 @@ pub fn run(start: Option<String>) {
                 last_click: None,
                 side: sidebar(),
                 typed: (String::new(), Instant::now()),
+                col_w: [COLS[1].1, COLS[2].1, COLS[3].1],
+                col_drag: None,
+                editing_addr: false,
+                group: 0,
+                measure: crate::gfx::Measure::new().ok(),
             })
         });
     }
@@ -2216,4 +2513,36 @@ pub fn run(start: Option<String>) {
         s.load();
     });
     appwin::run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_path_in_parts() {
+        let parts = crumbs(&Loc::Path("C:\\Users\\you\\Downloads".into()));
+        let names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["This PC", "Local Disk (C:)", "Users", "you", "Downloads"]);
+        assert_eq!(parts[2].1, Loc::Path("C:\\Users".into()));
+        assert_eq!(parts[1].1, Loc::Path("C:\\".into()));
+        assert_eq!(crumbs(&Loc::Home).len(), 1);
+    }
+
+    #[test]
+    fn groups() {
+        let day = 864_000_000_000u64;
+        let now = 1000 * day;
+        let file = |modified: u64, size: u64| filesio::Item {
+            modified,
+            size: Some(size),
+            kind: "Text Document".into(),
+            ..Default::default()
+        };
+        assert_eq!(group_of(&file(now, 1), 2, now).1, "Today");
+        assert_eq!(group_of(&file(now - day, 1), 2, now).1, "Yesterday");
+        assert_eq!(group_of(&file(now - 400 * day, 1), 2, now).1, "A long time ago");
+        assert_eq!(group_of(&file(now, 5_000_000), 3, now).1, "Medium (1 to 128 MB)");
+        assert_eq!(group_of(&file(now, 0), 1, now).1, "Text Document");
+    }
 }

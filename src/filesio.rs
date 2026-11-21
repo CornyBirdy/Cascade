@@ -99,6 +99,36 @@ pub fn this_pc() -> Loc {
     Loc::Shell("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".into(), "This PC".into())
 }
 
+/// Phones, cameras and the like plugged in (MTP devices): what This PC
+/// lists that's a device rather than a drive or folder. (name, shell name)
+pub fn portable_devices() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(pc) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+            &HSTRING::from("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"),
+            None,
+        ) else {
+            return out;
+        };
+        let Ok(list) = pc.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
+        loop {
+            let mut batch = [None; 1];
+            let mut got = 0u32;
+            if list.Next(&mut batch, Some(&mut got)).is_err() || got == 0 {
+                break;
+            }
+            let Some(it) = batch[0].take() else { break };
+            let parse = it.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING).map(|p| take(p)).unwrap_or_default();
+            // A device's shell name holds its device path (\\?\usb#vid_...).
+            if parse.contains("\\\\?\\") {
+                let name = it.GetDisplayName(SIGDN_NORMALDISPLAY).map(|p| take(p)).unwrap_or_default();
+                out.push((name, parse));
+            }
+        }
+    }
+    out
+}
+
 /// Where a shell item is: its folder on disk if it has one.
 unsafe fn from_item(item: &IShellItem) -> Loc {
     let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).map(|p| take(p)).unwrap_or_default();

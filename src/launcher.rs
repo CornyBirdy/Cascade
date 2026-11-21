@@ -326,6 +326,70 @@ fn record_launch(target: &str) {
     let _ = std::fs::write(launches_path(), text);
 }
 
+// ------------------------------------------------------- what you pick --
+
+/// What you picked for each thing you searched: search "vs", open Visual
+/// Studio Code, and next time "vs" (or "v", or "vsc") lists it first. Kept
+/// in `picks.txt` (one `count<TAB>query<TAB>target` a line).
+static PICKS: Mutex<Option<Vec<(String, String, u32)>>> = Mutex::new(None);
+/// Most remembered; past it the least picked are forgotten.
+const PICKS_MAX: usize = 400;
+
+fn picks_path() -> std::path::PathBuf {
+    crate::config::dir().join("picks.txt")
+}
+
+fn with_picks<R>(f: impl FnOnce(&mut Vec<(String, String, u32)>) -> R) -> R {
+    let mut guard = PICKS.lock().unwrap_or_else(|e| e.into_inner());
+    let list = guard.get_or_insert_with(|| {
+        let text = std::fs::read_to_string(picks_path()).unwrap_or_default();
+        text.lines()
+            .filter_map(|l| {
+                let mut parts = l.splitn(3, '\t');
+                let n = parts.next()?.parse().ok()?;
+                Some((parts.next()?.to_string(), parts.next()?.to_string(), n))
+            })
+            .collect()
+    });
+    f(list)
+}
+
+/// How strongly `target` was picked for searches like `query`: what you
+/// typed then and what you've typed now, one the start of the other.
+fn picked(query: &str, target: &str) -> u32 {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return 0;
+    }
+    with_picks(|list| {
+        list.iter()
+            .filter(|(pq, t, _)| t == target && (pq.starts_with(&q) || q.starts_with(pq.as_str())))
+            // The same words count most; a longer or shorter search less.
+            .map(|(pq, _, n)| if *pq == q { n * 4 } else { *n })
+            .sum()
+    })
+}
+
+fn record_pick(query: &str, target: &str) {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() || q.contains('\t') {
+        return;
+    }
+    let text = with_picks(|list| {
+        match list.iter_mut().find(|(pq, t, _)| *pq == q && t == target) {
+            Some(p) => p.2 += 1,
+            None => list.push((q.clone(), target.to_string(), 1)),
+        }
+        if list.len() > PICKS_MAX {
+            list.sort_by_key(|p| std::cmp::Reverse(p.2));
+            list.truncate(PICKS_MAX * 3 / 4);
+        }
+        list.iter().map(|(q, t, n)| format!("{n}\t{q}\t{t}\n")).collect::<String>()
+    });
+    let _ = std::fs::create_dir_all(crate::config::dir());
+    let _ = std::fs::write(picks_path(), text);
+}
+
 /// Lower is better; None = no match.
 fn score(name: &str, query: &str) -> Option<u32> {
     let n = name.to_lowercase();
@@ -345,6 +409,26 @@ fn score(name: &str, query: &str) -> Option<u32> {
     // Letters in order, e.g. "vsc" -> "Visual Studio Code".
     let mut chars = n.chars();
     q.chars().all(|qc| qc == ' ' || chars.any(|c| c == qc)).then_some(3)
+}
+
+/// The icon an answer shows, where it has one: Settings' for a setting, the
+/// program's for a command (Device Manager's), the file's for a file.
+fn answer_icon(a: &Answer) -> Option<String> {
+    let settings = || Some(crate::appwin::own_app_id("Cascade.Settings"));
+    match (&a.kind, &a.run) {
+        (smart::Kind::Setting, _) => settings(),
+        (smart::Kind::Command, smart::Run::Open(t)) if t.starts_with("ms-settings:") => settings(),
+        (smart::Kind::Command, smart::Run::Open(t)) => {
+            if t.contains('\\') {
+                return Some(t.clone());
+            }
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+            let path = format!("{root}\\System32\\{t}");
+            std::path::Path::new(&path).exists().then_some(path)
+        }
+        (smart::Kind::File, smart::Run::Open(p)) => Some(p.clone()),
+        _ => None,
+    }
 }
 
 fn letter_of(name: &str) -> char {
@@ -755,14 +839,17 @@ impl Launcher {
         let searching = self.searching();
         // Names that start a word count as one kind of match; within a kind
         // the apps you open most come first, then the closer matches.
-        let mut scored: Vec<(u32, std::cmp::Reverse<u32>, u32, usize)> = self
+        // What you've picked for searches like this one comes before all of it.
+        type Rank = (std::cmp::Reverse<u32>, u32, std::cmp::Reverse<u32>, u32, usize);
+        let mut scored: Vec<Rank> = self
             .apps
             .iter()
             .enumerate()
             .filter_map(|(i, a)| {
                 let s = score(&a.name, &self.query)?;
-                let used = if searching { launches_of(&a.target) } else { 0 };
-                Some((s.saturating_sub(1), std::cmp::Reverse(used), s, i))
+                let (used, chosen) =
+                    if searching { (launches_of(&a.target), picked(&self.query, &a.target)) } else { (0, 0) };
+                Some((std::cmp::Reverse(chosen), s.saturating_sub(1), std::cmp::Reverse(used), s, i))
             })
             .collect();
         scored.sort();
@@ -802,6 +889,21 @@ impl Launcher {
         } else {
             Vec::new()
         };
+        // One of each: a setting that's also a command (Device Manager) or
+        // an app shows once, as the command or app, which opens it directly.
+        let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+        let apps: Vec<&str> = self.results.iter().filter_map(|&i| self.apps.get(i)).map(|a| a.name.as_str()).collect();
+        let bottom: Vec<Answer> = bottom
+            .into_iter()
+            .filter(|a| a.kind != smart::Kind::Command || !apps.iter().any(|n| same(n, &a.title)))
+            .collect();
+        let settings: Vec<Answer> = settings
+            .into_iter()
+            .filter(|s| {
+                !apps.iter().any(|n| same(n, &s.title))
+                    && !bottom.iter().any(|a| a.kind == smart::Kind::Command && same(&a.title, &s.title))
+            })
+            .collect();
         self.answers_top = top.len();
         self.answers = top.into_iter().chain(settings).chain(self.files.iter().cloned()).chain(bottom).collect();
     }
@@ -917,10 +1019,12 @@ impl Launcher {
             Action::Settings
         } else if let Some((_, _, flag)) = OWN_APPS.iter().find(|a| a.1 == target) {
             record_launch(&target);
+            record_pick(&self.query, &target);
             crate::appwin::launch(&[flag]);
             Action::Close
         } else {
             record_launch(&target);
+            record_pick(&self.query, &target);
             Action::Launch(target)
         }
     }
@@ -1214,7 +1318,9 @@ impl Launcher {
         for &(_, row) in &visible {
             row_icons.push(match row {
                 Row::App(i) => dock.icon(self.icon_id(&self.apps[i].target), gfx, row_px),
-                Row::Letter(_) | Row::Answer(_) => None,
+                // Settings, commands and files with their own icons, not a glyph.
+                Row::Answer(j) => self.answers.get(j).and_then(answer_icon).and_then(|id| dock.icon(&id, gfx, row_px)),
+                Row::Letter(_) => None,
             });
         }
         let (pinned_icons, recent_icons): (Vec<_>, Vec<_>) = if searching {
@@ -1307,7 +1413,14 @@ impl Launcher {
                             if selected {
                                 p.rrect(x, y + 14.0, 3.0, RESULT_ROW - 28.0, 1.5, theme::accent().alpha(e));
                             }
-                            answer_glyph(&p, a.kind, g.mx + 23.0, y + RESULT_ROW / 2.0, Color::white(0.85 * e));
+                            match icon {
+                                Some(_) => {
+                                    draw_icon(&p, icon.as_ref(), g.mx + 8.0, y + (RESULT_ROW - 30.0) / 2.0, 30.0, e)
+                                }
+                                None => {
+                                    answer_glyph(&p, a.kind, g.mx + 23.0, y + RESULT_ROW / 2.0, Color::white(0.85 * e))
+                                }
+                            }
                             let font = if a.kind == smart::Kind::Sum || a.kind == smart::Kind::Unit {
                                 &f.title
                             } else {
