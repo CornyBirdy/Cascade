@@ -732,9 +732,9 @@ unsafe fn press(b: Button) {
 
 /// The area picked: snip it, or record it.
 unsafe fn done(r: RECT, outline: Option<Vec<POINT>>) {
-    let record = snip().as_ref().map(|s| (s.record, s.origin));
+    let record = snip().as_ref().map(|s| (s.record, s.origin, s.delay));
     match record {
-        Some((true, origin)) => {
+        Some((true, origin, delay)) => {
             finish();
             let screen = RECT {
                 left: r.left + origin.0,
@@ -742,9 +742,11 @@ unsafe fn done(r: RECT, outline: Option<Vec<POINT>>) {
                 right: r.right + origin.0,
                 bottom: r.bottom + origin.1,
             };
-            crate::recorder::start(screen, SOUND.load(Ordering::Relaxed));
+            // A countdown first: the delay picked on the bar, or three seconds.
+            let countdown = if delay > 0 { delay } else { 3 };
+            crate::recorder::start(screen, SOUND.load(Ordering::Relaxed), countdown);
         }
-        Some((false, _)) => keep(r, outline),
+        Some((false, _, _)) => keep(r, outline),
         None => {}
     }
 }

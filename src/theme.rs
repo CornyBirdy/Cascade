@@ -46,9 +46,11 @@ pub enum Glass {
 pub enum Rim {
     /// One line, lighter along the top than the bottom (light from above).
     Lit(Color, Color),
-    /// The web's liquid glass rim: inset lines along the top and bottom
-    /// (their brightness) and a hairline all round.
-    Inset { top: f32, bottom: f32, hairline: f32 },
+    /// The web liquid glass's shine (its two inset box-shadows: 2px 2px 1px
+    /// and -1px -1px 1px 1px of 50% white): bright along the top and left,
+    /// and again along the bottom and right, fading where they meet, with a
+    /// soft glow just inside and a hairline all round.
+    Shine { lit: f32, back: f32, hairline: f32 },
 }
 
 /// What thick glass does to the light. Every effect is off at 0.
@@ -124,14 +126,18 @@ pub const THEMES: [Theme; 2] = [
         name: "Liquid Glass",
         about: "Apple's liquid glass: a light blur, a soft sheen, a lit rim, and an edge that bends what's behind it like a lens.",
         glass: Glass::Blur,
-        tint: (0.10, 0.10, 0.11),
-        tint_scale: 0.35,
-        solid: (0.17, 0.17, 0.18),
-        // The web recipe's 10% white, a little brighter where the light comes from.
-        film: (white(0.10), white(0.05)),
-        rim: Rim::Inset { top: 0.6, bottom: 0.15, hairline: 0.2 },
-        // The drawn band stands in for the bending when Refraction is off.
-        light: Light { lens: (9.0, 0.07), dispersion: 0.0, sheen: 0.35, depth: 0.0 },
+        tint: (0.08, 0.08, 0.09),
+        tint_scale: 0.30,
+        solid: (0.19, 0.19, 0.2),
+        // The web recipe's white tint (rgba(255,255,255,.25) there, on a
+        // dark bar a little less so white text still reads), brighter
+        // where the light comes from.
+        film: (white(0.17), white(0.08)),
+        rim: Rim::Shine { lit: 0.55, back: 0.38, hairline: 0.10 },
+        // Light gathered in the curved edge (drawn always: where the bar
+        // meets the screen's edge there's nothing for the bending to show),
+        // and the sheen from the top left.
+        light: Light { lens: (12.0, 0.11), dispersion: 0.04, sheen: 0.45, depth: 0.0 },
         // 24 px of curved rim, bent up to 30 px (1.25 of it), colours barely split.
         refract: Some(crate::lens::Lens { band: 24.0, bend: 1.25, split: 0.05 }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
@@ -268,7 +274,7 @@ fn edged(mut t: Theme) -> Theme {
     let c = |c: Color| Color(c.0, c.1, c.2, (c.3 * k).min(1.0));
     t.rim = match t.rim {
         Rim::Lit(a, b) => Rim::Lit(c(a), c(b)),
-        Rim::Inset { top, bottom, hairline } => Rim::Inset { top: top * k, bottom: bottom * k, hairline: hairline * k },
+        Rim::Shine { lit, back, hairline } => Rim::Shine { lit: lit * k, back: back * k, hairline: hairline * k },
     };
     let l = &mut t.light;
     l.lens.1 *= k;
@@ -298,12 +304,7 @@ pub fn lighten(c: Color, t: f32) -> Color {
 }
 
 pub fn current() -> Theme {
-    let mut t = resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]);
-    // The bent light shows the edge: the drawn band would only fight it.
-    if lens_of(&t).is_some() {
-        t.light.lens = (0.0, 0.0);
-    }
-    t
+    resolve(THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)])
 }
 
 static REFRACT: AtomicBool = AtomicBool::new(true);
@@ -408,6 +409,7 @@ fn look() -> u64 {
         ACCENT.load(Ordering::Relaxed) as u64,
         ACCENT_GLASS.load(Ordering::Relaxed) as u64,
         EDGE.load(Ordering::Relaxed) as u64,
+        REFRACT.load(Ordering::Relaxed) as u64,
     ];
     parts.iter().fold(0xcbf2_9ce4_8422_2325, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3))
 }
@@ -473,33 +475,43 @@ pub fn paint(
                 p.stroke_rrect_with(lx, ly, lw, lh, r, &brush, line);
             }
         }
-        Rim::Inset { top, bottom, hairline } => {
-            inset_rim(p, x, y, w, h, r, top * alpha, bottom * alpha, hairline * alpha)
-        }
+        Rim::Shine { lit, back, hairline } => shine_rim(p, x, y, w, h, r, lit * alpha, back * alpha, hairline * alpha),
     }
 }
 
-/// The web liquid glass's rim (its three inset box-shadows): a hairline
-/// all round, then a lit line along the top and a faint one along the
-/// bottom, a pixel inside it, following the rounded corners.
+/// The web liquid glass's shine: a line lit along the top and left edges
+/// and another along the bottom and right, fading out where the two meet
+/// (the top right and bottom left), each with a softer glow a pixel further
+/// in, standing in for the blur on the box-shadows. On a long, low bar the
+/// diagonal is kept steep, so the light runs along the edges rather than
+/// sweeping across the whole bar.
 #[allow(clippy::too_many_arguments)]
-fn inset_rim(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, top: f32, bottom: f32, hairline: f32) {
+fn shine_rim(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, lit: f32, back: f32, hairline: f32) {
     let line = p.px(1.0);
     if hairline > 0.0 {
         p.stroke_rrect(x + line / 2.0, y + line / 2.0, w - line, h - line, r, white(hairline.min(1.0)), line);
     }
-    // The top and bottom lines: only where the edge faces up or down (the
-    // corners' curve, a few pixels), clear down the sides.
-    let reach = (r.max(4.0) / h).min(0.45);
-    if let Some(b) = p.linear(
-        x,
-        y,
-        x,
-        y + h,
-        &[(0.0, white(top.min(1.0))), (reach, white(0.0)), (1.0 - reach, white(0.0)), (1.0, white(bottom.min(1.0)))],
-    ) {
-        let i = line * 1.5;
-        p.stroke_rrect_with(x + i, y + i, w - 2.0 * i, h - 2.0 * i, (r - i).max(0.0), &b, line);
+    let run = w.min(h * 6.0);
+    let stops = |k: f32| {
+        [(0.0, white((lit * k).min(1.0))), (0.42, white(0.0)), (0.58, white(0.0)), (1.0, white((back * k).min(1.0)))]
+    };
+    // From the top-left corner to the bottom-right one, over `run`.
+    let (x0, y0, x1, y1) = (x + w / 2.0 - run / 2.0, y, x + w / 2.0 + run / 2.0, y + h);
+    for (inset, k, width) in [(line * 1.5, 1.0, line * 1.5), (line * 3.0, 0.35, line * 2.0)] {
+        if w <= 2.0 * inset || h <= 2.0 * inset {
+            break;
+        }
+        if let Some(b) = p.linear(x0, y0, x1, y1, &stops(k)) {
+            p.stroke_rrect_with(
+                x + inset,
+                y + inset,
+                w - 2.0 * inset,
+                h - 2.0 * inset,
+                (r - inset).max(0.0),
+                &b,
+                width,
+            );
+        }
     }
 }
 

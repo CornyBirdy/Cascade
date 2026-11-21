@@ -26,8 +26,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config;
 
-const BAR: f32 = 50.0;
-const PAD: f32 = 16.0;
+const BAR: f32 = 56.0;
+const PAD: f32 = 20.0;
+/// The status line along the bottom.
+const FOOT: f32 = 30.0;
+/// Hover fades.
+const ANIM: usize = 7;
 /// The editor's own message: text recognised (a boxed `Result<String, String>`).
 const WM_TEXT: u32 = WM_APP + 1;
 
@@ -88,6 +92,11 @@ struct Editor {
     /// Changed since it was last saved.
     dirty: bool,
     status: String,
+    /// Direct2D, for the bar and the frame round the snip (taken while painting).
+    gfx: Option<crate::gfx::Gfx>,
+    /// How lit each recently hovered button is.
+    glow: Vec<(Button, f32)>,
+    last: std::time::Instant,
 }
 
 thread_local! {
@@ -174,6 +183,9 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
                 saved,
                 dirty: false,
                 status,
+                gfx: crate::gfx::Gfx::new().ok(),
+                glow: Vec::new(),
+                last: std::time::Instant::now(),
             })
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -196,37 +208,76 @@ impl Editor {
         unsafe { GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0 }
     }
 
+    /// The bar's buttons (client pixels) and their labels: the tools, the
+    /// colours and the size on the left, what to do with the snip on the right.
     fn buttons(&self) -> Vec<(Button, RECT, &'static str)> {
         let k = self.k();
+        let mut client = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut client);
+        }
+        let width = client.right as f32 / k;
         // (button, width, label, gap after it)
-        let mut list: Vec<(Button, f32, &'static str, f32)> = vec![
-            (Button::Tool(Tool::Pen), 56.0, "Pen", 4.0),
-            (Button::Tool(Tool::Highlighter), 84.0, "Highlighter", 4.0),
-            (Button::Tool(Tool::Eraser), 64.0, "Eraser", 4.0),
-            (Button::Tool(Tool::Crop), 56.0, "Crop", 12.0),
+        let mut left: Vec<(Button, f32, &'static str, f32)> = vec![
+            (Button::Tool(Tool::Pen), 74.0, "Pen", 4.0),
+            (Button::Tool(Tool::Highlighter), 112.0, "Highlighter", 4.0),
+            (Button::Tool(Tool::Eraser), 86.0, "Eraser", 4.0),
+            (Button::Tool(Tool::Crop), 74.0, "Crop", 18.0),
         ];
         for i in 0..COLOURS.len() {
-            list.push((Button::Colour(i), 28.0, "", 4.0));
+            left.push((Button::Colour(i), 30.0, "", if i + 1 == COLOURS.len() { 10.0 } else { 2.0 }));
         }
-        list.push((Button::Size, 58.0, "", 12.0));
-        list.push((Button::Undo, 54.0, "Undo", 4.0));
-        list.push((Button::Redo, 54.0, "Redo", 12.0));
-        list.push((Button::Text, 94.0, "Copy text", 4.0));
-        list.push((Button::Copy, 54.0, "Copy", 4.0));
-        list.push((Button::Save, 76.0, "Save as\u{2026}", 4.0));
-        let mut x = 10.0;
-        list.into_iter()
-            .map(|(b, w, label, gap)| {
-                let r = RECT {
-                    left: (x * k) as i32,
-                    top: (8.0 * k) as i32,
-                    right: ((x + w) * k) as i32,
-                    bottom: ((BAR - 8.0) * k) as i32,
-                };
-                x += w + gap;
-                (b, r, label)
-            })
-            .collect()
+        left.push((Button::Size, 64.0, "", 0.0));
+        let right: Vec<(Button, f32, &'static str, f32)> = vec![
+            (Button::Undo, 36.0, "", 2.0),
+            (Button::Redo, 36.0, "", 14.0),
+            (Button::Text, 108.0, "Copy text", 4.0),
+            (Button::Copy, 78.0, "Copy", 4.0),
+            (Button::Save, 100.0, "Save as\u{2026}", 0.0),
+        ];
+        let rect = |x: f32, w: f32| RECT {
+            left: (x * k) as i32,
+            top: (10.0 * k) as i32,
+            right: ((x + w) * k) as i32,
+            bottom: ((BAR - 10.0) * k) as i32,
+        };
+        let mut out = Vec::new();
+        let mut x = 12.0;
+        for (b, w, label, gap) in left {
+            out.push((b, rect(x, w), label));
+            x += w + gap;
+        }
+        let used = x;
+        let total: f32 = right.iter().map(|r| r.1 + r.3).sum();
+        let mut x = (width - 12.0 - total).max(used + 16.0);
+        for (b, w, label, gap) in right {
+            out.push((b, rect(x, w), label));
+            x += w + gap;
+        }
+        out
+    }
+
+    /// How lit `b` is (0 to 1).
+    fn lit(&self, b: Button) -> f32 {
+        self.glow.iter().find(|(g, _)| *g == b).map_or(0.0, |g| g.1)
+    }
+
+    /// Moves the hover fades on; true while any is still moving.
+    fn fade(&mut self) -> bool {
+        let dt = self.last.elapsed().as_secs_f32().min(0.05);
+        self.last = std::time::Instant::now();
+        if let Some(h) = self.hot {
+            if !self.glow.iter().any(|(g, _)| *g == h) {
+                self.glow.push((h, 0.0));
+            }
+        }
+        let hot = self.hot;
+        for (g, a) in &mut self.glow {
+            let to = if Some(*g) == hot { 1.0 } else { 0.0 };
+            *a = if to > *a { (*a + dt / 0.1).min(1.0) } else { (*a - dt / 0.18).max(0.0) };
+        }
+        self.glow.retain(|(g, a)| *a > 0.0 || Some(*g) == hot);
+        self.glow.iter().any(|(g, a)| (Some(*g) == hot && *a < 1.0) || (Some(*g) != hot && *a > 0.0))
     }
 
     /// Where the image is drawn (client pixels) and its scale.
@@ -236,7 +287,7 @@ impl Editor {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let k = self.k();
-        let (aw, ah) = (r.right as f32 - 2.0 * PAD * k, r.bottom as f32 - (BAR + 2.0 * PAD + 22.0) * k);
+        let (aw, ah) = (r.right as f32 - 2.0 * PAD * k, r.bottom as f32 - (BAR + 2.0 * PAD + FOOT) * k);
         let (iw, ih) = (self.image.w as f32, self.image.h as f32);
         let s = (aw / iw).min(ah / ih).clamp(0.05, 1.0);
         let x = (r.right as f32 - iw * s) / 2.0;
@@ -381,6 +432,128 @@ unsafe fn fill(dc: HDC, r: RECT, colour: u32) {
     let _ = DeleteObject(b.into());
 }
 
+/// A glyph from Windows' icon font for each button with one.
+fn glyph_of(b: Button) -> Option<u32> {
+    Some(match b {
+        Button::Tool(Tool::Pen) => 0xE70F,
+        Button::Tool(Tool::Highlighter) => 0xE7E6,
+        Button::Tool(Tool::Eraser) => 0xE75C,
+        Button::Tool(Tool::Crop) => 0xE7A8,
+        Button::Undo => 0xE7A7,
+        Button::Redo => 0xE7A6,
+        Button::Text => 0xE8D2,
+        Button::Copy => 0xE8C8,
+        Button::Save => 0xE74E,
+        _ => return None,
+    })
+}
+
+fn colour_of(c: u32) -> crate::gfx::Color {
+    crate::gfx::Color(
+        (c & 0xFF) as f32 / 255.0,
+        ((c >> 8) & 0xFF) as f32 / 255.0,
+        ((c >> 16) & 0xFF) as f32 / 255.0,
+        1.0,
+    )
+}
+
+/// The bar, the frame round the snip and the status line, in Direct2D.
+fn paint_chrome(e: &Editor, gfx: &mut crate::gfx::Gfx, dc: HDC, client: RECT) {
+    use crate::gfx::{Align, Color};
+    let k = e.k();
+    let (pw, ph) = (client.right.max(1), client.bottom.max(1));
+    let bg = Color(0.085, 0.085, 0.09, 1.0);
+    if gfx.begin_dc(dc, pw, ph, k, bg).is_err() {
+        return;
+    }
+    {
+        let p = gfx.painter();
+        let f = &gfx.fonts;
+        let (w, h) = (pw as f32 / k, ph as f32 / k);
+        let accent = crate::theme::accent();
+        // The bar.
+        p.rrect(0.0, 0.0, w, BAR, 0.0, Color(0.125, 0.125, 0.13, 1.0));
+        p.line(0.0, BAR - 0.5, w, BAR - 0.5, Color::white(0.07), 1.0);
+        let unit = |r: RECT| {
+            (r.left as f32 / k, r.top as f32 / k, (r.right - r.left) as f32 / k, (r.bottom - r.top) as f32 / k)
+        };
+        let buttons = e.buttons();
+        for (i, (b, r, label)) in buttons.iter().enumerate() {
+            let (x, y, bw, bh) = unit(*r);
+            let lit = e.lit(*b);
+            // A divider before the colours and between the two sides.
+            if i > 0 && matches!(b, Button::Colour(0) | Button::Undo) {
+                p.line(x - 9.0, y + 6.0, x - 9.0, y + bh - 6.0, Color::white(0.12), 1.0);
+            }
+            match b {
+                Button::Colour(c) => {
+                    let (cx, cy) = (x + bw / 2.0, y + bh / 2.0);
+                    if *c == e.colour {
+                        p.stroke_circle(cx, cy, 12.0, Color::white(0.9), 2.0);
+                    } else if lit > 0.0 {
+                        p.stroke_circle(cx, cy, 12.0, Color::white(0.3 * lit), 1.5);
+                    }
+                    p.circle(cx, cy, 8.5 + lit, colour_of(COLOURS[*c]));
+                    p.stroke_circle(cx, cy, 8.5 + lit, Color::white(0.18), 1.0);
+                }
+                Button::Size => {
+                    p.rrect(x, y, bw, bh, bh / 2.0, Color::white(0.06 * lit));
+                    for (i, d) in [3.0f32, 5.0, 8.0].iter().enumerate() {
+                        let cx = x + 14.0 + i as f32 * 18.0;
+                        let c = if i == e.size { Color::white(0.95) } else { Color::white(0.32) };
+                        p.circle(cx, y + bh / 2.0, d / 2.0 + 0.5, c);
+                    }
+                }
+                _ => {
+                    let on = matches!(b, Button::Tool(t) if *t == e.tool);
+                    let primary = *b == Button::Save;
+                    let dim = matches!(b, Button::Undo if e.undo.is_empty())
+                        || matches!(b, Button::Redo if e.redo.is_empty());
+                    if on || primary {
+                        let a = if primary { 0.85 + 0.15 * lit } else { 0.9 };
+                        p.rrect(x, y, bw, bh, 8.0, accent.alpha(a));
+                        p.gradient_rrect(x, y, bw, bh, 8.0, &[(0.0, Color::white(0.16)), (1.0, Color::white(0.0))]);
+                    } else if !dim {
+                        p.rrect(x, y, bw, bh, 8.0, Color::white(0.08 * lit));
+                    }
+                    let ink = Color::white(if dim {
+                        0.3
+                    } else if on || primary {
+                        1.0
+                    } else {
+                        0.86 + 0.14 * lit
+                    });
+                    let tw = if label.is_empty() { 0.0 } else { p.measure(label, &f.body) + 8.0 };
+                    let total = 16.0 + tw;
+                    let gx = x + (bw - total) / 2.0;
+                    if let (Some(g), Some(font)) = (glyph_of(*b), &f.icons) {
+                        let ch = char::from_u32(g).map(String::from).unwrap_or_default();
+                        p.text(&ch, font, gx, y, 16.0, bh, Align::Center, ink);
+                    }
+                    if !label.is_empty() {
+                        p.text(label, &f.body, gx + 24.0, y, tw, bh, Align::Left, ink);
+                    }
+                }
+            }
+        }
+        // The frame round the snip: a soft shadow and a fine edge.
+        let (vx, vy, s) = e.view();
+        let (ix, iy, iw, ih) = (vx / k, vy / k, e.image.w as f32 * s / k, e.image.h as f32 * s / k);
+        for i in 1..=10 {
+            let d = i as f32 * 1.6;
+            p.rrect(ix - d, iy - d + 4.0, iw + 2.0 * d, ih + 2.0 * d, 4.0 + d, Color(0.0, 0.0, 0.0, 0.05));
+        }
+        p.stroke_rrect(ix - 0.5, iy - 0.5, iw + 1.0, ih + 1.0, 1.0, Color::white(0.1), 1.0);
+        // The status line.
+        let fy = h - FOOT;
+        p.line(0.0, fy, w, fy, Color::white(0.05), 1.0);
+        let dims = format!("{} \u{d7} {}", e.image.w, e.image.h);
+        p.text(&e.status, &f.small, PAD, fy, w - 2.0 * PAD - 120.0, FOOT, Align::Left, Color::white(0.6));
+        p.text(&dims, &f.small, w - PAD - 120.0, fy, 120.0, FOOT, Align::Right, Color::white(0.45));
+    }
+    let _ = gfx.end();
+}
+
 unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let dc = BeginPaint(hwnd, &mut ps);
@@ -390,82 +563,13 @@ unsafe fn paint(hwnd: HWND) {
     let buf = CreateCompatibleBitmap(dc, client.right.max(1), client.bottom.max(1));
     let old = SelectObject(mem, buf.into());
     with(|e| {
-        let k = e.k();
-        fill(mem, client, 0x00201C1C);
-        fill(mem, RECT { bottom: (BAR * k) as i32, ..client }, 0x00302A2A);
-        SetBkMode(mem, TRANSPARENT);
-        let font = CreateFontW(
-            -(13.0 * k) as i32,
-            0,
-            0,
-            0,
-            500,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            0,
-            w!("Segoe UI"),
-        );
-        let of = SelectObject(mem, font.into());
-        let accent = crate::theme::accent();
-        let accent = ((accent.2 * 255.0) as u32) << 16 | ((accent.1 * 255.0) as u32) << 8 | (accent.0 * 255.0) as u32;
-        for (b, r, label) in e.buttons() {
-            let on = match b {
-                Button::Tool(t) => t == e.tool,
-                _ => false,
-            };
-            if on {
-                fill(mem, r, accent);
-            } else if e.hot == Some(b) {
-                fill(mem, r, 0x00483E3E);
-            }
-            match b {
-                Button::Colour(i) => {
-                    let c = (8.0 * k) as i32;
-                    let sw =
-                        RECT { left: r.left + c / 2, top: r.top + c, right: r.right - c / 2, bottom: r.bottom - c };
-                    fill(mem, sw, COLOURS[i]);
-                    if i == e.colour {
-                        let edge = CreateSolidBrush(COLORREF(0x00FFFFFF));
-                        let _ = FrameRect(
-                            mem,
-                            &RECT { left: sw.left - 2, top: sw.top - 2, right: sw.right + 2, bottom: sw.bottom + 2 },
-                            edge,
-                        );
-                        let _ = DeleteObject(edge.into());
-                    }
-                }
-                Button::Size => {
-                    // Three dots, the size in use lit.
-                    for (i, d) in [3.0f32, 5.0, 8.0].iter().enumerate() {
-                        let cx = r.left + ((12.0 + i as f32 * 16.0) * k) as i32;
-                        let cy = (r.top + r.bottom) / 2;
-                        let rad = (d * k / 2.0) as i32;
-                        let c = if i == e.size { 0x00FFFFFF } else { 0x00807070 };
-                        let b = CreateSolidBrush(COLORREF(c));
-                        let ob = SelectObject(mem, b.into());
-                        let op = SelectObject(mem, GetStockObject(NULL_PEN));
-                        let _ = Ellipse(mem, cx - rad, cy - rad, cx + rad + 1, cy + rad + 1);
-                        SelectObject(mem, op);
-                        SelectObject(mem, ob);
-                        let _ = DeleteObject(b.into());
-                    }
-                }
-                _ => {
-                    let dim = matches!(b, Button::Undo if e.undo.is_empty())
-                        || matches!(b, Button::Redo if e.redo.is_empty());
-                    SetTextColor(mem, COLORREF(if dim { 0x00706060 } else { 0x00FFFFFF }));
-                    let mut t: Vec<u16> = label.encode_utf16().collect();
-                    let mut tr = r;
-                    DrawTextW(mem, &mut t, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-            }
+        // The chrome first (Direct2D), then the snip and its marks over it (GDI, as they're saved).
+        if let Some(mut gfx) = e.gfx.take() {
+            paint_chrome(e, &mut gfx, mem, client);
+            e.gfx = Some(gfx);
+        } else {
+            fill(mem, client, 0x00171515);
         }
-        // The image and the marks on it.
         let (x, y, s) = e.view();
         let (iw, ih) = ((e.image.w as f32 * s).round() as i32, (e.image.h as f32 * s).round() as i32);
         let src = CreateCompatibleDC(Some(mem));
@@ -474,6 +578,8 @@ unsafe fn paint(hwnd: HWND) {
         let _ = StretchBlt(mem, x as i32, y as i32, iw, ih, Some(src), 0, 0, e.image.w, e.image.h, SRCCOPY);
         SelectObject(src, os);
         let _ = DeleteDC(src);
+        // Marks stay on the snip.
+        let _ = IntersectClipRect(mem, x as i32, y as i32, x as i32 + iw, y as i32 + ih);
         for st in e.strokes.iter().chain(e.drawing.iter()) {
             draw_stroke(mem, st, x, y, s);
         }
@@ -493,19 +599,7 @@ unsafe fn paint(hwnd: HWND) {
             );
             let _ = DeleteObject(edge.into());
         }
-        // The status line.
-        SetTextColor(mem, COLORREF(0x00A09090));
-        let mut t: Vec<u16> =
-            format!("{}   \u{b7}   {} \u{d7} {}", e.status, e.image.w, e.image.h).encode_utf16().collect();
-        let mut tr = RECT {
-            left: (PAD * k) as i32,
-            top: client.bottom - (24.0 * k) as i32,
-            right: client.right,
-            bottom: client.bottom,
-        };
-        DrawTextW(mem, &mut t, &mut tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(mem, of);
-        let _ = DeleteObject(font.into());
+        let _ = SelectClipRgn(mem, None);
     });
     let _ = BitBlt(dc, 0, 0, client.right, client.bottom, Some(mem), 0, 0, SRCCOPY);
     SelectObject(mem, old);
@@ -680,12 +774,35 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             });
             if changed == Some(true) {
                 let _ = InvalidateRect(Some(hwnd), None, false);
+                SetTimer(Some(hwnd), ANIM, 16, None);
             }
+            let mut t = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut t);
+            LRESULT(0)
+        }
+        0x02A3 => {
+            // WM_MOUSELEAVE: the hover fades out.
+            if with(|e| e.hot.take().is_some()) == Some(true) {
+                SetTimer(Some(hwnd), ANIM, 16, None);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == ANIM => {
+            if with(|e| e.fade()) != Some(true) {
+                let _ = KillTimer(Some(hwnd), ANIM);
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
             let p = point(lp);
-            let on_bar = with(|e| e.buttons().into_iter().any(|(_, r, _)| inside(&r, p))).unwrap_or(false);
+            // Marks start on the snip's side of the bar, never on the bar itself.
+            let on_bar = with(|e| p.y < (BAR * e.k()) as i32).unwrap_or(true);
             if !on_bar {
                 SetCapture(hwnd);
                 with(|e| {

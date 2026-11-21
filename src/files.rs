@@ -73,6 +73,8 @@ enum Hit {
     Up,
     Refresh,
     Cmd(usize),
+    /// Minimise, maximise, close (the window has no title bar of its own).
+    Caption(u8),
     Side(usize),
     Header(usize),
     Item(usize),
@@ -227,8 +229,32 @@ const CMDS: [(u32, &str); 9] = [
     (0xE712, "More"),
 ];
 
-fn cmd_x(i: usize) -> f32 {
-    SIDE_W + 8.0 + i as f32 * 84.0
+/// The command bar as Explorer's: New with its label, then Cut, Copy,
+/// Paste, Rename and Delete as icons, Sort and View with labels, and More,
+/// in groups with a line between them. (x, width) of command `i`.
+fn cmd_rect(i: usize) -> (f32, f32) {
+    const W: [f32; 9] = [84.0, 40.0, 40.0, 40.0, 40.0, 40.0, 84.0, 84.0, 40.0];
+    let mut x = 12.0;
+    for (j, w) in W.iter().enumerate() {
+        if starts_group(j) {
+            x += 14.0;
+        }
+        if j == i {
+            return (x, *w);
+        }
+        x += w + 2.0;
+    }
+    (x, 40.0)
+}
+
+/// Where a new group of commands starts (a line before it).
+fn starts_group(i: usize) -> bool {
+    matches!(i, 1 | 6 | 8)
+}
+
+/// Commands that show their label (and a chevron: they open a menu, or New).
+fn labelled(i: usize) -> bool {
+    matches!(i, 0 | 6 | 7)
 }
 
 impl State {
@@ -840,6 +866,9 @@ impl State {
     fn hit(&self, x: f32, y: f32) -> Option<Hit> {
         let (w, _) = appwin::client(self.hwnd);
         if y < TABS_H {
+            if let Some(b) = appwin::caption_at(x, y, w, TABS_H) {
+                return Some(Hit::Caption(b));
+            }
             let tw = self.tab_w(w);
             for i in 0..self.tabs.len() {
                 let tx = 8.0 + i as f32 * (tw + 4.0);
@@ -860,7 +889,12 @@ impl State {
             };
         }
         if y < TABS_H + BAR_H + CMD_H {
-            return (0..CMDS.len()).find(|&i| x >= cmd_x(i) && x < cmd_x(i) + 80.0).map(Hit::Cmd);
+            return (0..CMDS.len())
+                .find(|&i| {
+                    let (cx, cw) = cmd_rect(i);
+                    x >= cx && x < cx + cw
+                })
+                .map(Hit::Cmd);
         }
         if x < SIDE_W {
             let i = ((y - TABS_H - BAR_H - CMD_H - 8.0) / 32.0).floor();
@@ -897,7 +931,8 @@ impl State {
     }
 
     fn tab_w(&self, w: f32) -> f32 {
-        ((w - 60.0) / self.tabs.len() as f32 - 4.0).clamp(80.0, TAB_W)
+        // Room kept for the new-tab button, somewhere to drag the window by, and its buttons.
+        ((w - 60.0 - 48.0 - 3.0 * appwin::CAPTION_W) / self.tabs.len() as f32 - 4.0).clamp(80.0, TAB_W)
     }
 
     /// The display positions on screen now.
@@ -1010,6 +1045,11 @@ impl State {
             p.rrect(px, 9.0, 30.0, 26.0, 5.0, Color::white(0.08));
         }
         glyph_at(0xE710, px + 5.0, 12.0, 20.0, Color::white(0.8));
+        let lit = match hov {
+            Some(Hit::Caption(b)) => Some(b),
+            _ => None,
+        };
+        appwin::caption_buttons(p, f, self.hwnd, w, TABS_H, lit);
         // The bar: back, forward, up, refresh (the address and search boxes are text boxes over it).
         p.rrect(0.0, TABS_H, w, BAR_H + CMD_H, 0.0, PANEL);
         let t = self.t();
@@ -1028,13 +1068,28 @@ impl State {
         p.rrect(w - sw - 10.0, TABS_H + 7.0, sw, 30.0, 5.0, Color::white(0.06));
         // Commands.
         p.rrect(0.0, TABS_H + BAR_H - 0.5, w, 1.0, 0.0, LINE);
+        let cy = TABS_H + BAR_H;
         for (i, (code, label)) in CMDS.iter().enumerate() {
-            let x = cmd_x(i);
-            if hov == Some(Hit::Cmd(i)) {
-                p.rrect(x, TABS_H + BAR_H + 5.0, 80.0, 30.0, 5.0, Color::white(0.08));
+            let (x, bw) = cmd_rect(i);
+            if starts_group(i) {
+                p.line(x - 8.0, cy + 10.0, x - 8.0, cy + CMD_H - 10.0, Color::white(0.12), 1.0);
             }
-            glyph_at(*code, x + 6.0, TABS_H + BAR_H + 12.0, 16.0, Color::white(0.85));
-            p.text(label, &f.body, x + 28.0, TABS_H + BAR_H + 5.0, 52.0, 30.0, Align::Left, Color::white(0.85));
+            if hov == Some(Hit::Cmd(i)) {
+                p.rrect(x, cy + 5.0, bw, 30.0, 5.0, Color::white(0.08));
+            }
+            // Explorer's colours: New in the accent, Delete in red, the rest plain.
+            let ink = match i {
+                0 => accent,
+                5 => Color(0.95, 0.45, 0.42, 1.0),
+                _ => Color::white(0.85),
+            };
+            if labelled(i) {
+                glyph_at(*code, x + 8.0, cy + 12.0, 16.0, ink);
+                p.text(label, &f.body, x + 30.0, cy + 5.0, bw - 46.0, 30.0, Align::Left, Color::white(0.88));
+                glyph_at(0xE70D, x + bw - 18.0, cy + 15.0, 10.0, Color::white(0.55));
+            } else {
+                glyph_at(*code, x + (bw - 16.0) / 2.0, cy + 12.0, 16.0, ink);
+            }
         }
         // Sidebar.
         let y0 = TABS_H + BAR_H + CMD_H;
@@ -1235,6 +1290,7 @@ impl State {
             Some(Hit::Up) => self.up(),
             Some(Hit::Refresh) => self.load(),
             Some(Hit::Cmd(i)) => self.command(i),
+            Some(Hit::Caption(b)) => appwin::caption_press(self.hwnd, b),
             Some(Hit::Side(i)) => {
                 let loc = self.side[i].2.clone();
                 self.go(loc);
@@ -1767,6 +1823,24 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             return LRESULT(0);
         }
         WM_ERASEBKGND => return LRESULT(1),
+        WM_NCCALCSIZE => {
+            if let Some(r) = appwin::frameless_calc(hwnd, wp, lp) {
+                return r;
+            }
+        }
+        WM_NCHITTEST => {
+            if let Some(r) = appwin::edge_hit(hwnd, lp) {
+                return r;
+            }
+            // The tab row's empty part moves the window, as a title bar does.
+            let mut pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let k = appwin::scale(hwnd);
+            let (x, y) = (pt.x as f32 / k, pt.y as f32 / k);
+            if (0.0..TABS_H).contains(&y) && with(|s| s.hit(x, y)).flatten().is_none() {
+                return LRESULT(HTCAPTION as isize);
+            }
+        }
         WM_SIZE | WM_DPICHANGED => {
             with(|s| {
                 s.place_boxes();
@@ -1921,6 +1995,7 @@ pub fn run(start: Option<String>) {
     appwin::init();
     let Ok(gfx) = Gfx::new() else { return };
     let Some(hwnd) = appwin::create(w!("CascadeFiles"), "Files", 1200, 760, Some(proc)) else { return };
+    appwin::frameless(hwnd);
     // Shell menus and their commands report back to this window (see `deskicons::item_menu`).
     msg::set_target(hwnd);
     let loc = start.as_deref().and_then(Loc::parse).unwrap_or(Loc::Home);

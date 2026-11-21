@@ -1495,7 +1495,7 @@ pub fn on_hotkey(id: i32) -> Option<Hotkey> {
                     let _ = GetCursorPos(&mut p);
                     let _ = GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mut mi);
                 }
-                crate::recorder::start(mi.rcMonitor, true);
+                crate::recorder::start(mi.rcMonitor, true, 3);
             }
         }
         Hotkey::DeskNew => crate::vdesk::create(true),

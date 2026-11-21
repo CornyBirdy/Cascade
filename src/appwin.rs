@@ -10,7 +10,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{Color, Fonts, Gfx, Painter};
@@ -179,4 +179,118 @@ pub fn init() {
     crate::theme::set(&cfg.theme);
     crate::theme::set_accent(&cfg.accent, cfg.accent_glass);
     crate::theme::refresh_accent();
+}
+
+// ------------------------------------------- a frame with no title bar --
+//
+// An app can put its own content (Files' tabs) where the title bar was, with
+// the minimise, maximise and close buttons drawn beside it, as Explorer
+// does: `frameless` removes the caption (keeping the resize edges, the
+// shadow and the rounded corners), `edge_hit` gives back the top resize
+// edge, and `caption_buttons` draws the three buttons.
+
+/// The width of each caption button (as Windows 11's).
+pub const CAPTION_W: f32 = 46.0;
+
+/// Takes the title bar away (call after the window is made).
+pub fn frameless(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+    }
+}
+
+fn frame_px(hwnd: HWND) -> (i32, i32) {
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        (GetSystemMetricsForDpi(SM_CXFRAME, dpi) + pad, GetSystemMetricsForDpi(SM_CYFRAME, dpi) + pad)
+    }
+}
+
+pub fn maximized(hwnd: HWND) -> bool {
+    unsafe { IsZoomed(hwnd).as_bool() }
+}
+
+/// For WM_NCCALCSIZE: the client area reaches the top (no caption), inside
+/// the side and bottom edges; maximised, inside the top edge too (which
+/// Windows puts off the screen).
+pub fn frameless_calc(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+    if wp.0 == 0 {
+        return None;
+    }
+    let (fx, fy) = frame_px(hwnd);
+    unsafe {
+        let params = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
+        let r = &mut params.rgrc[0];
+        r.left += fx;
+        r.right -= fx;
+        r.bottom -= fy;
+        if maximized(hwnd) {
+            r.top += fy;
+        }
+    }
+    Some(LRESULT(0))
+}
+
+/// For WM_NCHITTEST: the top resize edge (Windows still gives the others).
+pub fn edge_hit(hwnd: HWND, lp: LPARAM) -> Option<LRESULT> {
+    if maximized(hwnd) {
+        return None;
+    }
+    let mut pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+    unsafe {
+        let _ = ScreenToClient(hwnd, &mut pt);
+    }
+    let (fx, fy) = frame_px(hwnd);
+    if pt.y >= fy {
+        return None;
+    }
+    let (w, _) = client(hwnd);
+    let w = (w * scale(hwnd)) as i32;
+    Some(LRESULT(if pt.x < fx {
+        HTTOPLEFT
+    } else if pt.x >= w - fx {
+        HTTOPRIGHT
+    } else {
+        HTTOP
+    } as isize))
+}
+
+/// Which caption button (0 minimise, 1 maximise, 2 close) is at `x`, `y`
+/// (logical) in a window `w` wide whose buttons are `h` tall.
+pub fn caption_at(x: f32, y: f32, w: f32, h: f32) -> Option<u8> {
+    if y < 0.0 || y >= h || x < w - 3.0 * CAPTION_W {
+        return None;
+    }
+    Some(((x - (w - 3.0 * CAPTION_W)) / CAPTION_W).floor().clamp(0.0, 2.0) as u8)
+}
+
+/// Draws the three caption buttons at the top right, `lit` the one under the pointer.
+pub fn caption_buttons(p: &Painter, f: &Fonts, hwnd: HWND, w: f32, h: f32, lit: Option<u8>) {
+    let glyphs = [0xE921u32, if maximized(hwnd) { 0xE923 } else { 0xE922 }, 0xE8BB];
+    for (i, g) in glyphs.iter().enumerate() {
+        let x = w - (3 - i) as f32 * CAPTION_W;
+        let on = lit == Some(i as u8);
+        if on {
+            let c = if i == 2 { Color(0.77, 0.11, 0.14, 1.0) } else { Color::white(0.08) };
+            p.rrect(x, 0.0, CAPTION_W, h, 0.0, c);
+        }
+        if let (Some(font), Some(ch)) = (&f.icons, char::from_u32(*g)) {
+            let c = Color::white(if on { 1.0 } else { 0.8 });
+            p.text(&ch.to_string(), font, x, 0.0, CAPTION_W, h, crate::gfx::Align::Center, c);
+        }
+    }
+}
+
+/// Presses caption button `b` (as `caption_at` numbers them).
+pub fn caption_press(hwnd: HWND, b: u8) {
+    unsafe {
+        let cmd = match b {
+            0 => SC_MINIMIZE,
+            1 if maximized(hwnd) => SC_RESTORE,
+            1 => SC_MAXIMIZE,
+            _ => SC_CLOSE,
+        };
+        let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(cmd as usize), LPARAM(0));
+    }
 }

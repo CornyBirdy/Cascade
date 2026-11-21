@@ -1277,6 +1277,50 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_net_reset", "Network reset", "Sets every adapter back to Windows' defaults (needs a restart).", Button("Reset now")),
         ],
         page::DEVICES => vec![
+            heading("h_tablet", "Pen tablet"),
+            row(
+                "tablet",
+                "Built-in tablet driver",
+                "10moon, Vinsa and their relatives, with pressure, without their own driver.",
+                Toggle,
+            ),
+            row(
+                "tablet_mode",
+                "The pen works as",
+                "A pen (Windows Ink: pressure in drawing apps), or a mouse for apps that only take one.",
+                Choice(&[("ink", "Pen"), ("mouse", "Mouse")]),
+            ),
+            row(
+                "tablet_screen",
+                "Maps to",
+                "The whole tablet over every screen, or over the main one.",
+                Choice(&[("all", "Every screen"), ("main", "Main screen")]),
+            ),
+            row(
+                "tablet_keep_shape",
+                "Keep proportions",
+                "Uses the part of the tablet shaped like the screen, so circles stay round.",
+                Toggle,
+            ),
+            row("tablet_left", "Left-handed", "Turns the tablet round, its buttons on the right.", Toggle),
+            row(
+                "tablet_firmness",
+                "Pressure",
+                "Soft (a light touch draws thick) to firm (it takes a press).",
+                Slider { min: 0.3, max: 3.0, step: 0.1, unit: Unit::Times },
+            ),
+            row(
+                "tablet_lower",
+                "Lower pen button",
+                "",
+                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("none", "Nothing")]),
+            ),
+            row(
+                "tablet_upper",
+                "Upper pen button",
+                "",
+                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("none", "Nothing")]),
+            ),
             heading("h_bt", "Bluetooth"),
             row("win_bt", "Bluetooth", "", Toggle),
             row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
@@ -2092,10 +2136,13 @@ impl Settings {
         SECTIONS.get(self.section).copied().unwrap_or("Search results")
     }
 
-    /// Lighting wants a wide window: a narrow one is widened (on its screen).
+    /// Lighting wants a wide window: a narrow one grows to the right (moving
+    /// left only as far as it must to stay on its screen). The window's own
+    /// WM_SIZE can't reach this (it comes while the settings are borrowed),
+    /// so the new size is taken here.
     fn room_for_lighting(&mut self) {
         const WANT: f32 = 1320.0;
-        if self.cw >= WANT {
+        if self.cw >= WANT - 1.0 {
             return;
         }
         unsafe {
@@ -2105,11 +2152,15 @@ impl Settings {
             let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
             let _ = GetMonitorInfoW(mon, &mut mi);
             let work = mi.rcWork;
-            let extra = ((WANT - self.cw) * self.k) as i32;
+            let extra = ((WANT - self.cw) * self.k).ceil() as i32;
             let width = (r.right - r.left + extra).min(work.right - work.left);
-            let x = (r.left - extra / 2).clamp(work.left, (work.right - width).max(work.left));
+            if width <= r.right - r.left {
+                return;
+            }
+            let x = r.left.min(work.right - width).max(work.left);
             let _ = SetWindowPos(self.hwnd, None, x, r.top, width, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        self.on_size();
     }
 
     /// Shows, places or hides the Lighting pane for the page that's open.
@@ -2270,6 +2321,8 @@ impl Settings {
             text
         } else if let Some((text, warn)) = live_desc(r.key, get) {
             return (text.to_string(), if warn { WARN } else { Color::white(0.55) }, None);
+        } else if r.key == "tablet" && get(r.key) == "true" {
+            crate::tablet::status()
         } else if r.key == "admin_helper" && get(r.key) == "true" {
             // Live status, so it's clear whether it's working.
             if crate::helper::running() {

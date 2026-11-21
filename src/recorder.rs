@@ -1,7 +1,8 @@
 //! Screen recording, as the Snipping Tool's: an area or a whole screen,
-//! with the PC's sound, to an MP4 in Videos\Screen Recordings. A small bar
-//! (left out of the recording itself) shows how long it's been going and
-//! stops it; so does the shortcut that started it again.
+//! with the PC's sound, to an MP4 in Videos\Screen Recordings. A countdown
+//! comes first, a small bar (left out of the recording itself) shows how
+//! long it's been going and stops it (so does the shortcut that started it
+//! again), and a preview pops up once it's saved (see `recui`).
 //!
 //! Frames are taken 30 times a second (the pointer drawn in) and sound is
 //! taken from the default output as it plays; Windows' own encoder makes the
@@ -16,13 +17,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use windows::core::{w, HSTRING};
+use windows::core::HSTRING;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -33,9 +33,17 @@ const FPS: u32 = 30;
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
-static BAR: AtomicIsize = AtomicIsize::new(0);
 /// When it began (QPC ticks), for the bar's clock.
 static BEGAN: AtomicIsize = AtomicIsize::new(0);
+
+/// Seconds since the recording began (for the bar's clock).
+pub fn elapsed() -> f32 {
+    let began = BEGAN.load(Ordering::Acquire) as i64;
+    if began == 0 {
+        return 0.0;
+    }
+    hns(qpc() - began) as f32 / 10_000_000.0
+}
 
 pub fn recording() -> bool {
     RECORDING.load(Ordering::Acquire)
@@ -247,8 +255,9 @@ unsafe fn sample(bytes: &[u8], time: i64, duration: i64) -> windows::core::Resul
 
 // ------------------------------------------------------------ recording --
 
-/// Records `area` (screen pixels), with the PC's sound if `audio`.
-pub fn start(area: RECT, audio: bool) {
+/// Records `area` (screen pixels), with the PC's sound if `audio`, after
+/// counting down `countdown` seconds (0 for none).
+pub fn start(area: RECT, audio: bool, countdown: u32) {
     if RECORDING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -260,16 +269,18 @@ pub fn start(area: RECT, audio: bool) {
         ..area
     };
     std::thread::spawn(move || unsafe {
+        BEGAN.store(0, Ordering::Release);
+        if !crate::recui::countdown(area, countdown) {
+            RECORDING.store(false, Ordering::Release);
+            return;
+        }
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let result = record(area, audio);
         RECORDING.store(false, Ordering::Release);
         match result {
-            Ok(path) => {
+            Ok((path, thumb, secs)) => {
                 config::log(&format!("recorder: saved {}", path.display()));
-                msg::note(format!(
-                    "Recording saved in Videos\\Screen Recordings ({})",
-                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                ));
+                crate::recui::preview(path, thumb, secs, area);
             }
             Err(e) => {
                 config::log(&format!("recorder: failed ({e})"));
@@ -279,7 +290,10 @@ pub fn start(area: RECT, audio: bool) {
     });
 }
 
-unsafe fn record(area: RECT, audio: bool) -> windows::core::Result<PathBuf> {
+/// The video file, its last frame and how long it runs.
+type Recorded = (PathBuf, Option<crate::recui::Thumb>, f32);
+
+unsafe fn record(area: RECT, audio: bool) -> windows::core::Result<Recorded> {
     MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
     let (w, h) = ((area.right - area.left) as u32, (area.bottom - area.top) as u32);
     if w < 16 || h < 16 {
@@ -295,7 +309,7 @@ unsafe fn record(area: RECT, audio: bool) -> windows::core::Result<PathBuf> {
     let shared = Arc::new(Mutex::new(Writer(sink.clone())));
 
     // The bar, and an edge round the area, on a thread of their own (left out of the recording).
-    let ui = std::thread::spawn(move || bar(area));
+    let ui = std::thread::spawn(move || crate::recui::bar(area));
 
     // Sound.
     let sound_thread = match (lb, sound) {
@@ -351,6 +365,9 @@ unsafe fn record(area: RECT, audio: bool) -> windows::core::Result<PathBuf> {
         next = (now / frame + 1) * frame;
     }
     STOP.store(true, Ordering::Release);
+    let secs = elapsed();
+    let thumb =
+        crate::recui::Thumb::from_frame(std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize), w, h, 640);
     SelectObject(mem, old);
     let _ = DeleteObject(dib.into());
     let _ = DeleteDC(mem);
@@ -359,16 +376,13 @@ unsafe fn record(area: RECT, audio: bool) -> windows::core::Result<PathBuf> {
         let _ = t.join();
     }
     let finished = shared.lock().unwrap_or_else(|e| e.into_inner()).0.Finalize();
-    let bar = BAR.swap(0, Ordering::AcqRel);
-    if bar != 0 {
-        let _ = PostMessageW(Some(HWND(bar as *mut c_void)), WM_CLOSE, WPARAM(0), LPARAM(0));
-    }
+    crate::recui::close_bar();
     let _ = ui.join();
     let _ = MFShutdown();
     if let Some(e) = failed {
         return Err(e);
     }
-    finished.map(|_| path)
+    finished.map(|_| (path, thumb, secs))
 }
 
 struct SendLoopback(Loopback);
@@ -428,182 +442,5 @@ unsafe fn draw_pointer(dc: HDC, area: RECT) {
     }
     if !ii.hbmColor.is_invalid() {
         let _ = DeleteObject(ii.hbmColor.into());
-    }
-}
-
-// ---------------------------------------------------------------- the bar --
-
-const BAR_W: i32 = 190;
-const BAR_H: i32 = 40;
-
-unsafe extern "system" fn bar_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match m {
-        WM_TIMER => {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            stop();
-            LRESULT(0)
-        }
-        WM_SETCURSOR => {
-            SetCursor(LoadCursorW(None, IDC_HAND).ok());
-            LRESULT(1)
-        }
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let dc = BeginPaint(hwnd, &mut ps);
-            let mut r = RECT::default();
-            let _ = GetClientRect(hwnd, &mut r);
-            let bg = CreateSolidBrush(COLORREF(0x00302828));
-            FillRect(dc, &r, bg);
-            let _ = DeleteObject(bg.into());
-            // A red dot, the time, and Stop.
-            let red = CreateSolidBrush(COLORREF(0x003C3CE8));
-            let old = SelectObject(dc, red.into());
-            let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            let _ = Ellipse(dc, 14, 14, 26, 26);
-            SelectObject(dc, pen);
-            SelectObject(dc, old);
-            let _ = DeleteObject(red.into());
-            let secs = hns(qpc() - BEGAN.load(Ordering::Acquire) as i64) / 10_000_000;
-            let mut text: Vec<u16> = format!("{:02}:{:02}", secs / 60, secs % 60).encode_utf16().collect();
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0x00FFFFFF));
-            let font = CreateFontW(
-                -15,
-                0,
-                0,
-                0,
-                600,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                w!("Segoe UI"),
-            );
-            let of = SelectObject(dc, font.into());
-            let mut tr = RECT { left: 34, top: 0, right: 100, bottom: BAR_H };
-            DrawTextW(dc, &mut text, &mut tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            let stop_bg = CreateSolidBrush(COLORREF(0x004A4040));
-            let sr = RECT { left: 104, top: 7, right: BAR_W - 8, bottom: BAR_H - 7 };
-            FillRect(dc, &sr, stop_bg);
-            let _ = DeleteObject(stop_bg.into());
-            let mut label: Vec<u16> = "\u{25A0} Stop".encode_utf16().collect();
-            let mut lr = sr;
-            DrawTextW(dc, &mut label, &mut lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, of);
-            let _ = DeleteObject(font.into());
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, m, wp, lp),
-    }
-}
-
-unsafe extern "system" fn edge_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, m, wp, lp)
-}
-
-/// Leaves a window out of screen captures (this recording's included).
-unsafe fn exclude(h: HWND) {
-    let _ = SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
-}
-
-/// The bar above the area (inside its top if there's no room) and a thin
-/// edge round it; runs until the recording ends.
-fn bar(area: RECT) {
-    unsafe {
-        let Ok(module) = GetModuleHandleW(None) else { return };
-        let instance: HINSTANCE = module.into();
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(bar_proc),
-            hInstance: instance,
-            lpszClassName: w!("CascadeRecordBar"),
-            ..Default::default()
-        };
-        RegisterClassExW(&wc);
-        let edge = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(edge_proc),
-            hInstance: instance,
-            hbrBackground: CreateSolidBrush(COLORREF(0x003C3CE8)),
-            lpszClassName: w!("CascadeRecordEdge"),
-            ..Default::default()
-        };
-        RegisterClassExW(&edge);
-        let x = (area.left + area.right) / 2 - BAR_W / 2;
-        let above = area.top - BAR_H - 8;
-        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(MonitorFromRect(&area, MONITOR_DEFAULTTONEAREST), &mut mi);
-        let y = if above >= mi.rcMonitor.top { above } else { area.top + 8 };
-        let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-        let Ok(bar) = CreateWindowExW(
-            ex,
-            w!("CascadeRecordBar"),
-            w!("Recording"),
-            WS_POPUP | WS_VISIBLE,
-            x,
-            y,
-            BAR_W,
-            BAR_H,
-            None,
-            None,
-            Some(instance),
-            None,
-        ) else {
-            return;
-        };
-        exclude(bar);
-        BAR.store(bar.0 as isize, Ordering::Release);
-        SetTimer(Some(bar), 1, 500, None);
-        // The edge: four thin strips just outside the area, clicks going through them.
-        let t = 2;
-        let strips = [
-            (area.left - t, area.top - t, area.right - area.left + 2 * t, t),
-            (area.left - t, area.bottom, area.right - area.left + 2 * t, t),
-            (area.left - t, area.top, t, area.bottom - area.top),
-            (area.right, area.top, t, area.bottom - area.top),
-        ];
-        let mut edges = Vec::new();
-        for (sx, sy, sw, sh) in strips {
-            let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED;
-            if let Ok(e) = CreateWindowExW(
-                ex,
-                w!("CascadeRecordEdge"),
-                w!(""),
-                WS_POPUP | WS_VISIBLE,
-                sx,
-                sy,
-                sw,
-                sh,
-                Some(bar),
-                None,
-                Some(instance),
-                None,
-            ) {
-                let _ = SetLayeredWindowAttributes(e, COLORREF(0), 200, LWA_ALPHA);
-                exclude(e);
-                edges.push(e);
-            }
-        }
-        let mut m = MSG::default();
-        while GetMessageW(&mut m, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&m);
-            DispatchMessageW(&m);
-        }
     }
 }

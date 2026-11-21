@@ -47,6 +47,20 @@ notch_fullscreen = false
 battery_saver = false
 # Hold the Win key and drag a window by any part of it.
 super_drag = true
+# The built-in pen tablet driver (10moon, Vinsa and their relatives).
+tablet = true
+# ink (Windows Ink: a pen, with pressure) or mouse.
+tablet_mode = ink
+# all (every screen) or main.
+tablet_screen = all
+tablet_left = false
+# Use the part of the tablet shaped like the screen, so circles stay round.
+tablet_keep_shape = true
+# How firm the pressure is: 1 as it comes, more needs a harder press.
+tablet_firmness = 1.0
+# What the pen's buttons do: right, middle, eraser or none.
+tablet_lower = right
+tablet_upper = middle
 # Shell mode: drag a window to a screen edge or corner to snap it.
 snap_drag = true
 # Auto ducker: while one app is making sound (Discord, with friends talking),
@@ -327,6 +341,14 @@ pub struct Config {
     pub notch_fullscreen: bool,
     pub battery_saver: bool,
     pub super_drag: bool,
+    pub tablet: bool,
+    pub tablet_mode: String,
+    pub tablet_screen: String,
+    pub tablet_left: bool,
+    pub tablet_keep_shape: bool,
+    pub tablet_firmness: f32,
+    pub tablet_lower: String,
+    pub tablet_upper: String,
     pub snap_drag: bool,
     pub ducker: bool,
     pub ducker_trigger: String,
@@ -456,6 +478,14 @@ impl Default for Config {
             notch_fullscreen: false,
             battery_saver: false,
             super_drag: true,
+            tablet: true,
+            tablet_mode: "ink".into(),
+            tablet_screen: "all".into(),
+            tablet_left: false,
+            tablet_keep_shape: true,
+            tablet_firmness: 1.0,
+            tablet_lower: "right".into(),
+            tablet_upper: "middle".into(),
             snap_drag: true,
             ducker: false,
             ducker_trigger: "Discord".into(),
@@ -730,6 +760,14 @@ impl Config {
                 "notch_fullscreen" => set_b(&mut c.notch_fullscreen),
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
+                "tablet" => set_b(&mut c.tablet),
+                "tablet_mode" if matches!(v, "ink" | "mouse") => c.tablet_mode = v.into(),
+                "tablet_screen" if matches!(v, "all" | "main") => c.tablet_screen = v.into(),
+                "tablet_left" => set_b(&mut c.tablet_left),
+                "tablet_keep_shape" => set_b(&mut c.tablet_keep_shape),
+                "tablet_firmness" => set_f(&mut c.tablet_firmness, 0.3, 3.0),
+                "tablet_lower" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_lower = v.into(),
+                "tablet_upper" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_upper = v.into(),
                 "snap_drag" => set_b(&mut c.snap_drag),
                 "ducker" => set_b(&mut c.ducker),
                 "ducker_trigger" => c.ducker_trigger = v.trim_matches('"').to_string(),
@@ -897,6 +935,14 @@ impl Config {
             "notch_fullscreen" => b(self.notch_fullscreen),
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
+            "tablet" => b(self.tablet),
+            "tablet_mode" => self.tablet_mode.clone(),
+            "tablet_screen" => self.tablet_screen.clone(),
+            "tablet_left" => b(self.tablet_left),
+            "tablet_keep_shape" => b(self.tablet_keep_shape),
+            "tablet_firmness" => self.tablet_firmness.to_string(),
+            "tablet_lower" => self.tablet_lower.clone(),
+            "tablet_upper" => self.tablet_upper.clone(),
             "snap_drag" => b(self.snap_drag),
             "ducker" => b(self.ducker),
             "ducker_trigger" => self.ducker_trigger.clone(),

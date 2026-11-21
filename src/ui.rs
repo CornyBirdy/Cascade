@@ -1461,6 +1461,7 @@ impl App {
         crate::drop::register(self.dock.hwnd, 0);
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         desktops::watch();
@@ -3800,6 +3801,7 @@ impl App {
         }
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
+        crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         self.perf = Perf::new(self.cfg.perf_log);

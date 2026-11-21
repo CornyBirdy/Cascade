@@ -747,6 +747,18 @@ impl Painter<'_> {
         }
     }
 
+    /// Draws what `f` draws scaled by `k` round (cx, cy).
+    pub fn scaled(&self, k: f32, cx: f32, cy: f32, f: impl FnOnce()) {
+        unsafe {
+            let mut before = windows_numerics::Matrix3x2::default();
+            self.rt.GetTransform(&mut before);
+            let grow = windows_numerics::Matrix3x2::scale_around(k, k, windows_numerics::Vector2 { X: cx, Y: cy });
+            self.rt.SetTransform(&(grow * before));
+            f();
+            self.rt.SetTransform(&before);
+        }
+    }
+
     /// Builds a path. `f` adds segments to an open sink.
     pub fn path(&self, f: impl FnOnce(&ID2D1GeometrySink)) -> Option<ID2D1PathGeometry> {
         unsafe {
