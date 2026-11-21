@@ -747,6 +747,24 @@ impl Painter<'_> {
         }
     }
 
+    /// A bitmap of BGRA pixels for this painter's target.
+    pub fn bitmap(&self, width: u32, height: u32, pixels: &[u8]) -> Option<ID2D1Bitmap> {
+        self.gfx.bitmap(width, height, pixels).ok()
+    }
+
+    /// Draws what `f` draws mirrored left to right round x = `cx`.
+    pub fn flipped(&self, cx: f32, f: impl FnOnce()) {
+        unsafe {
+            let mut before = windows_numerics::Matrix3x2::default();
+            self.rt.GetTransform(&mut before);
+            let flip =
+                windows_numerics::Matrix3x2::scale_around(-1.0, 1.0, windows_numerics::Vector2 { X: cx, Y: 0.0 });
+            self.rt.SetTransform(&(flip * before));
+            f();
+            self.rt.SetTransform(&before);
+        }
+    }
+
     /// Draws what `f` draws scaled by `k` round (cx, cy).
     pub fn scaled(&self, k: f32, cx: f32, cy: f32, f: impl FnOnce()) {
         unsafe {

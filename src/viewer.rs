@@ -60,6 +60,11 @@ struct Picture {
     full: (u32, u32),
 }
 
+/// A picture file as BGRA pixels and its size (for Paint).
+pub(crate) fn load_pixels(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
+    decode(path).map(|p| (p.pixels, p.w, p.h))
+}
+
 /// Decodes `path` to premultiplied BGRA (on the calling thread).
 fn decode(path: &Path) -> Option<Picture> {
     unsafe {

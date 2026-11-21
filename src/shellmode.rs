@@ -1847,7 +1847,52 @@ pub fn open_in_cascade(target: &str) -> bool {
         crate::appwin::launch(&["--view", t]);
         return true;
     }
+    // Text, music and video whose usual app is a Store app (Notepad, Media
+    // Player), which shell mode can't run: Cascade's own instead.
+    if active() && std::path::Path::new(t).is_file() {
+        let ext = crate::filesio::ext_of(t);
+        const TEXT: [&str; 9] = ["txt", "log", "md", "ini", "cfg", "csv", "json", "xml", "yaml"];
+        const MEDIA: [&str; 15] = [
+            "mp4", "mkv", "mov", "avi", "wmv", "webm", "m4v", "mp3", "m4a", "flac", "wav", "wma", "aac", "ogg", "opus",
+        ];
+        let flag = if TEXT.contains(&ext.as_str()) {
+            Some("--notepad")
+        } else if MEDIA.contains(&ext.as_str()) {
+            Some("--player")
+        } else {
+            None
+        };
+        if let Some(flag) = flag.filter(|_| store_default(&ext)) {
+            crate::appwin::launch(&[flag, t]);
+            return true;
+        }
+    }
     false
+}
+
+/// Whether files ending `.ext` open in a Store app (or in nothing).
+fn store_default(ext: &str) -> bool {
+    use windows::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_EXECUTABLE};
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let found = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_EXECUTABLE,
+            &windows::core::HSTRING::from(format!(".{ext}")),
+            PCWSTR::null(),
+            Some(windows::core::PWSTR(buf.as_mut_ptr())),
+            &mut len,
+        )
+    };
+    if found.is_err() {
+        return true;
+    }
+    let exe = String::from_utf16_lossy(&buf[..(len as usize).saturating_sub(1).min(buf.len())]).to_ascii_lowercase();
+    exe.contains("\\windowsapps\\")
+        || exe.ends_with("\\explorer.exe")
+        || exe.ends_with("openwith.exe")
+        || exe.ends_with("launchwinapp.exe")
 }
 
 /// The Run box (Win+R). Explorer's own shows it; this is the same dialog,

@@ -6,12 +6,24 @@ Settings > Updates > What's new opens the list.
 
 ## 2026-11-21
 
+**New**
+- **Windows' everyday apps, Cascade's way** (in Start, and for text, music and video in shell mode, where the Store versions can't run): **Calculator** (Standard and Scientific, the answer as you type, history, the keyboard), **Camera** (photos to Camera Roll, video with the microphone's sound, switch cameras, mirror, self-timer), **Notepad** (open, save, word wrap, zoom, line and column), **Clock** (timers with rings, stopwatch with laps, alarms, world clock), **Media Player** (video and music, seek, volume, the folder as a playlist, repeat, fullscreen), **Sound Recorder** (the microphone to WAV with a level meter, play, show, delete) and **Paint** (pencil, brush, eraser, fill, picker, lines, rectangles, ellipses, palette, sizes, undo, zoom, PNG and JPEG). Each is its own app on the taskbar, with its own icon.
+- **A built-in pen tablet driver** (Settings > Bluetooth & devices > Pen tablet): 10moon, Vinsa and their relatives (USB 08F2:6811 and 0B57:902E) switched into tablet mode and read directly, as their own driver does, handed to Windows as a real pen (pressure in drawing apps) or as a mouse. Screen, proportions, left-handed, pressure firmness and the pen's two buttons can be set.
+- **Recording with Cascade Snip**: a 3, 2, 1 countdown first (Esc cancels, click starts now), a new bar in Snip's look (a pulsing dot, the time, Stop; drag it anywhere) and, once saved, a preview card at the bottom right as Snip & Sketch's: the last frame, its length and size, Play, Folder, Copy and Delete.
+- **Widgets' edit mode** (the pencil on the panel): each card made smaller or bigger and its corners rounded, square or round; every card drags into place, Notifications too.
+- **Files, more like Explorer**: no separate title bar (the window's buttons sit in the tab row, drag by its empty part), Explorer's command bar (New, then Cut, Copy, Paste, Rename and Delete as icons, Sort, View, More), Windows' coloured icons in the sidebar, drive bars that turn red when nearly full, **folder sizes** in the Size column with TreeSize-style bars (at once from the instant-search index, else added up in the background), and its own icon on the taskbar (Photos and Disk Usage too).
+
 **Improved**
+- **Liquid Glass, visibly**: the web recipe's white tint, a shine along every edge (lit at the top left and bottom right), the light in the curved edge always drawn (the taskbar meets the screen's edge, where bending has nothing to show), a stronger sheen.
+- **Settings look the part**: the accent glowing in behind the page, the open page lit in the sidebar, an icon by each page's title, cards with a light along their top and the accent along their edge under the pointer, headings marked with the accent.
+- **The snip editor** is drawn as the rest of Cascade: icon buttons, round colour swatches, hover fades, a shadow round the snip.
 - **Lighting is part of Cascade's settings**: Settings > Personalisation > Lighting (Lighting in Start opens it there too), no separate window. It keeps its first look (profiles and devices down the side, Lighting / Layout / Devices / Settings along the top), and now every button, toggle, slider, swatch and row lights up under the pointer and when pressed; toggles slide, selections glide, tabs slide in, and the live preview glows like the real LEDs. A narrow settings window widens to fit it.
 - **OpenRGB sets itself up**: the first time Lighting opens it gets OpenRGB (with a progress bar), unpacks it, starts it and connects, and devices appear as OpenRGB finds them. It stays connected, reconnects if OpenRGB restarts, and says plainly what's wrong if it can't, with Try again and Use my own OpenRGB.
 - **Administrator rights in one step**: turning them on installs the PawnIO driver (if it isn't there), sets OpenRGB to start with the rights and restarts it, all under one Windows permission prompt.
 
 **Fixed**
+- **The settings window smeared after opening Lighting**: widening it for Lighting moved it left each time and its new size never reached it (the black strip and leftover toggles on the right).
+- **Snip editor: marks could be drawn over the toolbar**; they start below it now and stay on the snip.
 - **Lighting couldn't find OpenRGB**: nothing fetched it unless Get OpenRGB was clicked, a dropped download failed without saying why, and Lighting stopped waiting for OpenRGB after ten seconds. Downloads now resume from scratch up to three times, are checked for size, and every step goes to `cascade.log`.
 
 ## 2026-11-20

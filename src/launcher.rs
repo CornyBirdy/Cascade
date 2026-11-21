@@ -48,10 +48,17 @@ const SIDE_ROW: f32 = 38.0;
 /// Opens Cascade's settings window (listed with the apps).
 pub const SETTINGS_TARGET: &str = "cascade:settings";
 /// Cascade's own apps in Start: (name, target, the flag that starts them).
-pub const OWN_APPS: [(&str, &str, &str); 3] = [
+pub const OWN_APPS: [(&str, &str, &str); 10] = [
     ("Files", "cascade:files", "--files"),
     ("Disk Usage", "cascade:disk", "--disk"),
     ("Lighting", "cascade:lighting", "--rgb"),
+    ("Calculator", "cascade:calc", "--calc"),
+    ("Camera", "cascade:camera", "--camera"),
+    ("Notepad", "cascade:notepad", "--notepad"),
+    ("Clock", "cascade:clock", "--clock"),
+    ("Media Player", "cascade:player", "--player"),
+    ("Sound Recorder", "cascade:soundrec", "--soundrec"),
+    ("Paint", "cascade:paint", "--paint"),
 ];
 
 /// Sidebar places: label, what to open, glyph.
@@ -128,7 +135,10 @@ unsafe fn take(p: PWSTR) -> String {
 unsafe fn scan() -> Result<Vec<AppEntry>> {
     let folder: IShellItem = SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)?;
     let items: IEnumShellItems = folder.BindToHandler(None, &BHID_EnumItems)?;
-    let mut out: Vec<AppEntry> = Vec::new();
+    // Cascade's own apps first: where Windows has one of the same name (its
+    // Calculator, Camera...: Store apps, which shell mode can't run), Cascade's stays.
+    let mut out: Vec<AppEntry> =
+        OWN_APPS.iter().map(|(name, target, _)| AppEntry { name: (*name).into(), target: (*target).into() }).collect();
     loop {
         let mut batch = [None; 1];
         let mut fetched = 0u32;
@@ -156,9 +166,6 @@ unsafe fn scan() -> Result<Vec<AppEntry>> {
         out.push(AppEntry { name, target: format!("shell:AppsFolder\\{id}") });
     }
     out.push(AppEntry { name: "Cascade Settings".into(), target: SETTINGS_TARGET.into() });
-    for (name, target, _) in OWN_APPS {
-        out.push(AppEntry { name: name.into(), target: target.into() });
-    }
     out.sort_by_key(|a| a.name.to_lowercase());
     out.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     Ok(out)

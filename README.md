@@ -163,6 +163,20 @@ It drives the hardware through [OpenRGB](https://openrgb.org) (free and open sou
 
 Everything on the page lights under the pointer and moves smoothly; the settings window widens to fit it when it's narrow.
 
+## Apps
+
+Cascade brings its own versions of Windows' everyday apps, each in a process of its own and its own app on the taskbar (they're in Start; in shell mode, where Store apps can't run, text, music and video files open in them too):
+
+- **Files** (`--files`): tabs in the title bar, Explorer's command bar, coloured sidebar, folder sizes with TreeSize-style bars, drive bars.
+- **Photos** (`--view`), **Disk Usage** (`--disk`).
+- **Calculator** (`--calc`): Standard and Scientific, the answer as you type, history.
+- **Camera** (`--camera`): photos and video (with sound) to Pictures\Camera Roll, mirror, self-timer, more than one camera.
+- **Notepad** (`--notepad`), **Clock** (`--clock`: timers, stopwatch, alarms, world clock), **Media Player** (`--player`), **Sound Recorder** (`--soundrec`) and **Paint** (`--paint`).
+
+## Pen tablet
+
+Settings > Bluetooth & devices > Pen tablet: a driver built in for 10moon, Vinsa and their relatives (USB 08F2:6811, 0B57:902E), so their own driver can go. Cascade switches the tablet into tablet mode and reads the pen directly (as OpenTabletDriver does for the 10moon 1060N), and hands it to Windows as a real pen through Windows' synthetic pointer input (pressure in Krita, Photoshop, OneNote...) or as a mouse. It maps to every screen or the main one, keeps the screen's proportions if asked, turns round for the left hand, takes the pressure softer or firmer, and the pen's two buttons can be right-click, middle-click, eraser or nothing. Close the tablet's own driver (`TabletService.exe`) first: Settings says if it's running.
+
 ## Settings
 
 Search **Cascade Settings** in Cascade's Start menu or the Windows one, or right-click the notch, taskbar or tray icon and choose **Settings…**. The box at the top of the sidebar searches every page by a setting's name, description or page; a result works just like the setting on its own page. Every option has a toggle, slider, choice or text box, and changes apply immediately. A ↺ button appears next to anything you've changed; it puts that setting back to its default. Settings that wouldn't do anything as things are set up stay out of the way: the lip's length shows only in Lip style, the notch's width only in Notch style, the custom colour only with Custom picked, the Start menu's parts only with Cascade's Start menu on, and so on. They come back as soon as they'd make a difference. When one needs something on another page (Win+N needs Cascade's taskbar), its description says so, in amber. Starting Cascade again while it's already running also opens Settings.

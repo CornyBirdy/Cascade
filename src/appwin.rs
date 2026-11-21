@@ -302,11 +302,20 @@ pub fn caption_press(hwnd: HWND, b: u8) {
 // window says which it is (its AppUserModelID), and `shell::open` starts one
 // from that id.
 
-/// Cascade's apps as the taskbar knows them: (AppUserModelID, name, how it's started, its icon).
-pub const OWN_APPS: [(&str, &str, &str, i32); 3] = [
-    ("Cascade.Files", "Files", "--files", 3),         // SIID_FOLDER
-    ("Cascade.Photos", "Photos", "--view", 72),       // SIID_IMAGEFILES
-    ("Cascade.DiskUsage", "Disk Usage", "--disk", 8), // SIID_DRIVEFIXED
+/// Cascade's apps as the taskbar knows them: (AppUserModelID, name, how
+/// it's started, Windows' stock icon for it, and a file whose icon is
+/// better where there is one: Windows' own app of the same kind).
+pub const OWN_APPS: [(&str, &str, &str, i32, &str); 10] = [
+    ("Cascade.Files", "Files", "--files", 3, ""),
+    ("Cascade.Photos", "Photos", "--view", 72, ""),
+    ("Cascade.DiskUsage", "Disk Usage", "--disk", 8, ""),
+    ("Cascade.Calculator", "Calculator", "--calc", 2, "calc.exe"),
+    ("Cascade.Camera", "Camera", "--camera", 73, ""),
+    ("Cascade.Notepad", "Notepad", "--notepad", 1, "notepad.exe"),
+    ("Cascade.Clock", "Clock", "--clock", 2, "timedate.cpl"),
+    ("Cascade.MediaPlayer", "Media Player", "--player", 73, "%ProgramFiles%\\Windows Media Player\\wmplayer.exe"),
+    ("Cascade.SoundRecorder", "Sound Recorder", "--soundrec", 71, ""),
+    ("Cascade.Paint", "Paint", "--paint", 72, "mspaint.exe"),
 ];
 
 /// The taskbar's id for one of Cascade's apps (`cascade-app:<AppUserModelID>`).
@@ -319,10 +328,42 @@ pub fn own_app(aumid: &str) -> Option<(&'static str, &'static str, i32)> {
     OWN_APPS.iter().find(|a| a.0.eq_ignore_ascii_case(aumid)).map(|a| (a.1, a.2, a.3))
 }
 
+/// The icon in `file` (in System32 unless it says where; %vars% expanded).
+fn file_icon(file: &str, large: bool) -> Option<HICON> {
+    use windows::Win32::UI::Shell::ExtractIconExW;
+    if file.is_empty() {
+        return None;
+    }
+    let mut path = file.to_string();
+    for (var, val) in std::env::vars() {
+        path = path.replace(&format!("%{var}%"), &val);
+    }
+    if !path.contains('\\') {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        path = format!("{root}\\System32\\{path}");
+    }
+    if !std::path::Path::new(&path).exists() {
+        return None;
+    }
+    let mut icon = HICON::default();
+    let got = unsafe {
+        if large {
+            ExtractIconExW(&HSTRING::from(path), 0, Some(&mut icon), None, 1)
+        } else {
+            ExtractIconExW(&HSTRING::from(path), 0, None, Some(&mut icon), 1)
+        }
+    };
+    (got > 0 && !icon.is_invalid()).then_some(icon)
+}
+
 /// The icon of Cascade's app `aumid` (`large` or small), from Windows' own set.
 pub fn own_app_icon(aumid: &str, large: bool) -> Option<HICON> {
     use windows::Win32::UI::Shell::*;
     let (_, _, stock) = own_app(aumid)?;
+    let file = OWN_APPS.iter().find(|a| a.0.eq_ignore_ascii_case(aumid)).map_or("", |a| a.4);
+    if let Some(icon) = file_icon(file, large) {
+        return Some(icon);
+    }
     let mut info = SHSTOCKICONINFO { cbSize: std::mem::size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
     let size = if large { SHGSI_LARGEICON } else { SHGSI_SMALLICON };
     unsafe { SHGetStockIconInfo(SHSTOCKICONID(stock), SHGSI_ICON | size, &mut info).ok()? };

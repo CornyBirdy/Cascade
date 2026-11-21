@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::{config, msg};
 
-const FPS: u32 = 30;
+pub(crate) const FPS: u32 = 30;
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -59,7 +59,7 @@ struct Writer(IMFSinkWriter);
 // The sink writer may be called from any thread (calls are made one at a time, under a lock).
 unsafe impl Send for Writer {}
 
-fn qpc() -> i64 {
+pub(crate) fn qpc() -> i64 {
     let mut t = 0i64;
     unsafe {
         let _ = QueryPerformanceCounter(&mut t);
@@ -76,7 +76,7 @@ fn qpc_freq() -> i64 {
 }
 
 /// QPC ticks as Media Foundation's 100 ns units.
-fn hns(ticks: i64) -> i64 {
+pub(crate) fn hns(ticks: i64) -> i64 {
     (ticks as i128 * 10_000_000 / qpc_freq() as i128) as i64
 }
 
@@ -104,18 +104,23 @@ fn output_path() -> PathBuf {
 
 /// The default output's sound as it plays (loopback), and how to turn its
 /// samples into 16-bit stereo PCM.
-struct Loopback {
-    client: IAudioClient,
-    capture: IAudioCaptureClient,
-    rate: u32,
+pub(crate) struct Loopback {
+    pub(crate) client: IAudioClient,
+    pub(crate) capture: IAudioCaptureClient,
+    pub(crate) rate: u32,
     channels: u16,
     float: bool,
     bits: u16,
 }
 
 unsafe fn open_loopback() -> Option<Loopback> {
+    open_sound(false)
+}
+
+/// The PC's sound as it plays, or (`mic`) the default microphone.
+pub(crate) unsafe fn open_sound(mic: bool) -> Option<Loopback> {
     let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let dev = e.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+    let dev = e.GetDefaultAudioEndpoint(if mic { eCapture } else { eRender }, eConsole).ok()?;
     let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).ok()?;
     let fmt = client.GetMixFormat().ok()?;
     let f = *fmt;
@@ -130,7 +135,8 @@ unsafe fn open_loopback() -> Option<Loopback> {
         }
         _ => false,
     };
-    let r = client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10_000_000, 0, fmt, None);
+    let flags = if mic { 0 } else { AUDCLNT_STREAMFLAGS_LOOPBACK };
+    let r = client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10_000_000, 0, fmt, None);
     let lb = Loopback {
         client: client.clone(),
         capture: client.GetService().ok()?,
@@ -146,7 +152,7 @@ unsafe fn open_loopback() -> Option<Loopback> {
 }
 
 /// `frames` frames of the loopback's samples at `data` as 16-bit stereo.
-unsafe fn to_pcm16(lb: &Loopback, data: *const u8, frames: usize, silent: bool) -> Vec<u8> {
+pub(crate) unsafe fn to_pcm16(lb: &Loopback, data: *const u8, frames: usize, silent: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(frames * 4);
     let ch = lb.channels.max(1) as usize;
     for i in 0..frames {
@@ -173,7 +179,7 @@ unsafe fn to_pcm16(lb: &Loopback, data: *const u8, frames: usize, silent: bool) 
 // ------------------------------------------------------------- the file --
 
 /// The MP4 writer, with a video stream (and a sound one at `audio`'s rate, if any).
-unsafe fn writer(
+pub(crate) unsafe fn writer(
     path: &std::path::Path,
     w: u32,
     h: u32,
@@ -239,7 +245,7 @@ unsafe fn writer(
     Ok((sink, video, sound))
 }
 
-unsafe fn sample(bytes: &[u8], time: i64, duration: i64) -> windows::core::Result<IMFSample> {
+pub(crate) unsafe fn sample(bytes: &[u8], time: i64, duration: i64) -> windows::core::Result<IMFSample> {
     let buf = MFCreateMemoryBuffer(bytes.len() as u32)?;
     let mut at: *mut u8 = std::ptr::null_mut();
     buf.Lock(&mut at, None, None)?;

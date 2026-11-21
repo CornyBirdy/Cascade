@@ -4,6 +4,7 @@
 #[cfg(not(windows))]
 compile_error!("Cascade is a Windows app.");
 
+mod apps;
 mod appwin;
 mod audio;
 mod backdrop;
@@ -210,6 +211,35 @@ fn main() {
     }
     if args.iter().any(|a| a == "--rgb") {
         rgb::app::run();
+        return;
+    }
+    // Windows' everyday apps, Cascade's way (see `apps`).
+    if args.iter().any(|a| a == "--calc") {
+        apps::calc::run();
+        return;
+    }
+    if args.iter().any(|a| a == "--camera") {
+        apps::camera::run();
+        return;
+    }
+    if args.iter().any(|a| a == "--clock") {
+        apps::clock::run();
+        return;
+    }
+    if args.iter().any(|a| a == "--soundrec") {
+        apps::soundrec::run();
+        return;
+    }
+    if let Some(file) = after("--notepad") {
+        apps::notepad::run(file);
+        return;
+    }
+    if let Some(file) = after("--player") {
+        apps::player::run(file);
+        return;
+    }
+    if let Some(file) = after("--paint") {
+        apps::paint::run(file);
         return;
     }
     if let Some(path) = after("--files") {

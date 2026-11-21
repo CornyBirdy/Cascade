@@ -188,6 +188,25 @@ pub fn calc(q: &str) -> Option<f64> {
     (p.peek().is_none() && v.is_finite()).then_some(v)
 }
 
+/// The value of any expression (a lone number included), as Calculator works it out.
+pub fn eval(q: &str) -> Option<f64> {
+    let s: String = q
+        .trim()
+        .to_ascii_lowercase()
+        .replace('\u{d7}', "*")
+        .replace('\u{f7}', "/")
+        .replace('\u{2212}', "-")
+        .replace('\u{3c0}', "pi")
+        .replace('\u{221a}', "sqrt")
+        .replace(',', "");
+    if s.is_empty() || !s.bytes().all(|c| c.is_ascii()) {
+        return None;
+    }
+    let mut p = Parser { s: s.as_bytes(), i: 0 };
+    let v = p.expr()?;
+    (p.peek().is_none() && v.is_finite()).then_some(v)
+}
+
 /// A number as people write it: up to 10 significant digits, no trailing
 /// zeros, very large or small ones in scientific notation.
 pub fn number(v: f64) -> String {
