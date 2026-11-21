@@ -14,7 +14,6 @@ use std::time::Duration;
 /// OpenRGB's Windows build (portable, 64-bit), from its own release page.
 pub const DOWNLOAD: &str =
     "https://codeberg.org/OpenRGB/OpenRGB/releases/download/release_1.1/OpenRGB_1.1_Windows_64_8e16de2.zip";
-pub const PAWNIO: &str = "https://pawnio.eu";
 const TASK: &str = "Cascade OpenRGB";
 
 /// Where Cascade keeps the copy it gets.
@@ -92,37 +91,123 @@ pub fn run_elevated() {
     }
 }
 
-/// Sets up (asks for permission once) or removes the task that starts OpenRGB with administrator rights.
-pub fn set_admin(on: bool) -> bool {
+/// PawnIO's installer (it takes `-install -silent`).
+const PAWNIO_SETUP: &str = "https://github.com/namazso/PawnIO.Setup/releases/latest/download/PawnIO_setup.exe";
+
+/// Whether the PawnIO driver is installed (what OpenRGB reaches RAM,
+/// motherboard and graphics card lighting through).
+pub fn pawnio_installed() -> bool {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    crate::winset::reg_text(
+        HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO",
+        "InstallLocation",
+    )
+    .is_some()
+        || std::path::Path::new(r"C:\Windows\System32\drivers\PawnIO.sys").exists()
+}
+
+/// Whether OpenRGB is set up to start with administrator rights.
+pub fn admin_ready() -> bool {
+    crate::helper::task_exists(TASK)
+}
+
+/// Turns administrator rights on (PawnIO installed if it isn't, the task that
+/// starts OpenRGB with them made, and a running OpenRGB stopped so it comes
+/// back with them) or off, all under one permission prompt. `step` hears
+/// what's happening. Slow: call off the window's thread.
+pub fn set_admin(on: bool, step: &dyn Fn(String)) -> Result<(), String> {
+    let mut parts: Vec<String> = Vec::new();
     if on {
-        crate::helper::ensure_task(
+        let d = dir();
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        if !pawnio_installed() {
+            let setup = d.join("PawnIO_setup.exe");
+            let mut last = String::new();
+            for _ in 0..3 {
+                step("Getting the PawnIO driver\u{2026}".into());
+                match crate::http::download(PAWNIO_SETUP, &setup, &|done, total| {
+                    if let Some(pct) = (done * 100).checked_div(total) {
+                        step(format!("Getting the PawnIO driver\u{2026} {pct}%"));
+                    }
+                }) {
+                    Ok(_) => {
+                        last.clear();
+                        break;
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            if !last.is_empty() {
+                return Err(format!("couldn't get PawnIO ({last})"));
+            }
+            parts.push(format!("\"{}\" -install -silent", setup.display()));
+        }
+        let xml = crate::helper::task_file(
             TASK,
             "--openrgb",
             "Starts OpenRGB with administrator rights for Cascade's lighting (RAM, motherboard and graphics card RGB).",
         )
+        .ok_or("couldn't write the task")?;
+        parts.push(format!("schtasks /Create /F /TN \"{TASK}\" /XML \"{}\"", xml.display()));
     } else {
-        crate::helper::delete_task(TASK);
-        true
+        parts.push(format!("schtasks /Delete /F /TN \"{TASK}\""));
     }
+    // A running OpenRGB is stopped either way, to come back with (or without) the rights.
+    parts.push("taskkill /F /IM OpenRGB.exe".into());
+    step("Waiting for Windows to ask for permission\u{2026}".into());
+    // Starts with `cd` so cmd keeps every quote (see `cmd /?` on /C and quotes).
+    let line = format!("cd /d \"{}\" & {}", dir().display(), parts.join(" & "));
+    let r = crate::winset::run_admin(&line);
+    let _ = std::fs::remove_file(dir().join("PawnIO_setup.exe"));
+    if r.is_none() {
+        return Err("Windows' permission prompt was turned down".into());
+    }
+    crate::config::log(&format!("lighting: administrator rights {}", if on { "on" } else { "off" }));
+    if on && !admin_ready() {
+        return Err("the task wasn't made".into());
+    }
+    if on && !pawnio_installed() {
+        return Err("PawnIO didn't install (a restart may finish it)".into());
+    }
+    Ok(())
 }
 
-/// Gets OpenRGB (its portable build) into Cascade's folder. Slow: call off the window's thread.
-pub fn download() -> Result<PathBuf, String> {
-    let resp = crate::http::get(DOWNLOAD, &[], true).ok_or("couldn't reach codeberg.org")?;
-    if resp.status != 200 || resp.body.len() < 1_000_000 {
-        return Err(format!("the download failed (HTTP {})", resp.status));
-    }
+/// Gets OpenRGB (its portable build) into Cascade's folder, telling `progress`
+/// how far it is (0..1). Slow: call off the window's thread.
+pub fn download(progress: &dyn Fn(f32)) -> Result<PathBuf, String> {
     let d = dir();
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     let zip = d.join("OpenRGB.zip");
-    std::fs::write(&zip, &resp.body).map_err(|e| e.to_string())?;
+    let mut last = String::new();
+    for i in 0..3 {
+        match crate::http::download(DOWNLOAD, &zip, &|done, total| {
+            if total > 0 {
+                progress(done as f32 / total as f32);
+            }
+        }) {
+            Ok(n) if n > 1_000_000 => {
+                last.clear();
+                break;
+            }
+            Ok(n) => last = format!("only {n} bytes came"),
+            Err(e) => last = e,
+        }
+        crate::config::log(&format!("lighting: OpenRGB download try {}: {last}", i + 1));
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    if !last.is_empty() {
+        return Err(last);
+    }
     // Windows' own tar unpacks zips.
     let ok = crate::winset::run_hidden("tar.exe", &["-xf", &zip.to_string_lossy(), "-C", &d.to_string_lossy()], true);
     let _ = std::fs::remove_file(&zip);
     if !ok {
         return Err("couldn't unpack it".into());
     }
-    find_in(&d, 2).ok_or_else(|| "OpenRGB.exe wasn't in the download".into())
+    let exe = find_in(&d, 2).ok_or_else(|| "OpenRGB.exe wasn't in the download".to_string())?;
+    crate::config::log(&format!("lighting: OpenRGB is at {}", exe.display()));
+    Ok(exe)
 }
 
 /// The vendors' RGB apps that are running (they hold their devices, and

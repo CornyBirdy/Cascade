@@ -4,6 +4,16 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-21
+
+**Improved**
+- **Lighting, made over**: a side bar with the pages (Lighting, Layout, Devices, Settings) and your profiles, a back arrow on every page you went to (Esc and the mouse's back button work too), devices as cards that open their own page, settings in rows like Windows' own. Every button, toggle, slider, swatch and row lights up under the pointer and when pressed; toggles slide, selections glide, pages slide in, and the live preview glows like the real LEDs.
+- **OpenRGB sets itself up**: the first time Lighting opens it gets OpenRGB (with a progress bar), unpacks it, starts it and connects, and devices appear as OpenRGB finds them. It stays connected, reconnects if OpenRGB restarts, and says plainly what's wrong if it can't, with Try again and Use my own OpenRGB.
+- **Administrator rights in one step**: turning them on installs the PawnIO driver (if it isn't there), sets OpenRGB to start with the rights and restarts it, all under one Windows permission prompt.
+
+**Fixed**
+- **Lighting couldn't find OpenRGB**: nothing fetched it unless Get OpenRGB was clicked, a dropped download failed without saying why, and Lighting stopped waiting for OpenRGB after ten seconds. Downloads now resume from scratch up to three times, are checked for size, and every step goes to `cascade.log`.
+
 ## 2026-11-20
 
 **New**

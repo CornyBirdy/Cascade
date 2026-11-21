@@ -449,6 +449,25 @@ pub fn ensure_task(name: &str, args: &str, desc: &str) -> bool {
     create_task(name, &task_xml(&exe.to_string_lossy(), args, desc, true))
 }
 
+/// Whether task `name` is set up (no prompt).
+pub fn task_exists(name: &str) -> bool {
+    schtasks(&format!("/Query /TN \"{name}\""), false)
+}
+
+/// Writes the definition of an elevated sign-in task running `cascade.exe {args}`
+/// to a file, for `schtasks /Create /XML` run with others under one prompt.
+pub fn task_file(name: &str, args: &str, desc: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let xml = task_xml(&exe.to_string_lossy(), args, desc, true);
+    let slug: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let path = crate::config::dir().join(format!("task-{slug}.xml"));
+    let _ = std::fs::create_dir_all(crate::config::dir());
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
 /// Starts task `name` now (no prompt: it was approved when it was made).
 pub fn run_task(name: &str) -> bool {
     schtasks(&format!("/Run /TN \"{name}\""), false)

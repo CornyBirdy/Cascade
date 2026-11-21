@@ -413,6 +413,13 @@ impl Client {
         Ok(out)
     }
 
+    /// How many devices the server has (cheap: also tells whether it's still there).
+    pub fn count(&mut self) -> std::io::Result<u32> {
+        self.send(0, REQUEST_CONTROLLER_COUNT, &[])?;
+        let p = self.recv_for(REQUEST_CONTROLLER_COUNT)?;
+        Ok(p.get(..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap_or_default())))
+    }
+
     /// Puts a device in the mode for setting each LED ("Direct").
     pub fn custom_mode(&mut self, device: u32) -> std::io::Result<()> {
         self.send(device, SETCUSTOMMODE, &[])

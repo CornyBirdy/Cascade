@@ -106,6 +106,90 @@ pub fn get(url: &str, headers: &[(&str, &str)], follow: bool) -> Option<Response
     }
 }
 
+/// Downloads `url` (redirects followed) into `to`, calling `progress(done, total)`
+/// as it goes (`total` is 0 when the server doesn't say). Checks that all of
+/// it arrived. Slow: call off the window's thread.
+pub fn download(url: &str, to: &std::path::Path, progress: &dyn Fn(u64, u64)) -> Result<u64, String> {
+    use std::io::Write;
+    let (host, path) = split(url).ok_or("not an https link")?;
+    unsafe {
+        let session =
+            WinHttpOpen(w!("Cascade"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
+        if session.is_null() {
+            return Err("WinHTTP isn't available".into());
+        }
+        let conn = WinHttpConnect(session, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        let req = if conn.is_null() {
+            std::ptr::null_mut()
+        } else {
+            WinHttpOpenRequest(
+                conn,
+                w!("GET"),
+                &HSTRING::from(path),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            )
+        };
+        let result = (|| -> Result<u64, String> {
+            if req.is_null() {
+                return Err(format!("couldn't reach {host}"));
+            }
+            WinHttpSendRequest(req, None, None, 0, 0, 0).map_err(|_| format!("couldn't reach {host}"))?;
+            WinHttpReceiveResponse(req, std::ptr::null_mut()).map_err(|_| format!("no answer from {host}"))?;
+            let number = |what: u32| {
+                let mut v = 0u32;
+                let mut len = 4u32;
+                let ok = WinHttpQueryHeaders(
+                    req,
+                    what | WINHTTP_QUERY_FLAG_NUMBER,
+                    PCWSTR::null(),
+                    Some(&mut v as *mut u32 as *mut _),
+                    &mut len,
+                    std::ptr::null_mut(),
+                )
+                .is_ok();
+                ok.then_some(v)
+            };
+            let status = number(WINHTTP_QUERY_STATUS_CODE).unwrap_or(0);
+            if status != 200 {
+                return Err(format!("{host} answered {status}"));
+            }
+            let total = number(WINHTTP_QUERY_CONTENT_LENGTH).unwrap_or(0) as u64;
+            let mut file = std::fs::File::create(to).map_err(|e| format!("writing {}: {e}", to.display()))?;
+            let mut done = 0u64;
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let mut read = 0u32;
+                WinHttpReadData(req, buf.as_mut_ptr() as *mut _, buf.len() as u32, &mut read)
+                    .map_err(|_| "the connection dropped".to_string())?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buf[..read as usize]).map_err(|e| e.to_string())?;
+                done += read as u64;
+                progress(done, total);
+            }
+            if total > 0 && done != total {
+                return Err(format!("only {done} of {total} bytes arrived"));
+            }
+            Ok(done)
+        })();
+        if !req.is_null() {
+            let _ = WinHttpCloseHandle(req);
+        }
+        if !conn.is_null() {
+            let _ = WinHttpCloseHandle(conn);
+        }
+        let _ = WinHttpCloseHandle(session);
+        if result.is_err() {
+            let _ = std::fs::remove_file(to);
+        }
+        result
+    }
+}
+
 /// GET returning the body as text when the server answers 200.
 pub fn get_text(url: &str) -> Option<String> {
     let r = get(url, &[], true)?;

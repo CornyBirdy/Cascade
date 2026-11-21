@@ -535,6 +535,11 @@ impl Painter<'_> {
         unsafe { self.rt.DrawGeometry(g, self.brush(c), width, None) };
     }
 
+    /// Width of `text` in layout units.
+    pub fn measure(&self, text: &str, font: &IDWriteTextFormat) -> f32 {
+        self.gfx.measure(text, font)
+    }
+
     pub fn rrect(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
         let rr = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: r, radiusY: r };
         unsafe { self.rt.FillRoundedRectangle(&rr, self.brush(c)) };
