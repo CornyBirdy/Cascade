@@ -258,7 +258,14 @@ pub fn start(instance: HINSTANCE, record: bool) {
 }
 
 fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
+    // A snip left over whose window is gone (it ended without tidying up)
+    // mustn't stop every snip after it.
+    if snip().as_ref().is_some_and(|s| !unsafe { IsWindow(Some(s.window)) }.as_bool()) {
+        config::log("snip: a stale snip was in the way; cleared");
+        *snip() = None;
+    }
     if snip().is_some() || crate::recorder::recording() {
+        config::log(&format!("snip: not opened (one open: {}, recording)", snip().is_some()));
         return;
     }
     unsafe {
@@ -552,7 +559,17 @@ unsafe fn keep(r: RECT, outline: Option<Vec<POINT>>) {
     }
     let saved = screenshots_path().and_then(|p| save_image(&p, &pixels, w, h).then_some(p));
     config::log(&format!("snip: {w}x{h}, copied: {copied}, saved: {saved:?}"));
-    crate::snipedit::open(pixels, w, h, saved);
+    // A preview card in the corner, as Windows' Snipping Tool shows (Edit
+    // opens the editor); straight into the editor if it couldn't be saved.
+    match saved {
+        Some(path) => {
+            let mut p = POINT::default();
+            let _ = GetCursorPos(&mut p);
+            let near = RECT { left: p.x, top: p.y, right: p.x + 1, bottom: p.y + 1 };
+            crate::recui::screenshot_preview(path, pixels, w, h, near);
+        }
+        None => crate::snipedit::open(pixels, w, h, None),
+    }
 }
 
 /// Where a new screenshot goes: Pictures\Screenshots\Screenshot (date time).png.

@@ -42,13 +42,14 @@ const COMPACT_H: f32 = 52.0;
 const TOP: f32 = 104.0;
 const BG: Color = Color(0.125, 0.125, 0.13, 1.0);
 const CARD: Color = Color(1.0, 1.0, 1.0, 0.048);
-/// The sidebar: a page's height, a group title's, and where the list starts.
+/// The sidebar: a page's height.
 const NAV_H: f32 = 36.0;
-const GROUP_H: f32 = 34.0;
 /// The timer that runs the window's animations.
 pub const ANIM_TIMER: usize = 77;
 /// How long a page takes to slide in.
 const PAGE_S: f32 = 0.30;
+/// How long a row brought in by another setting takes to grow open.
+const GROW_S: f32 = 0.24;
 
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -136,15 +137,103 @@ pub mod page {
     pub const SYSTEM: usize = 23;
 }
 
-/// Where sidebar entry `i` starts (before scrolling): under its group's title.
-fn nav_y(i: usize) -> f32 {
-    let groups = if i >= page::DISPLAY { 2.0 } else { 1.0 };
-    NAV_TOP + groups * GROUP_H + i as f32 * NAV_H
+/// The sidebar's pages, in order: as Windows 11's Settings has them, with
+/// Cascade's own parts (the notch, taskbar, Start menu...) after
+/// Personalisation. Appearance, Screens and About have no entry of their
+/// own: they're parts of Personalisation, Display and System (see `merged`).
+const NAV: [usize; 21] = [
+    0,
+    page::LOOK,
+    2,
+    3,
+    4,
+    6,
+    5,
+    8,
+    page::DISPLAY,
+    page::SOUND,
+    page::NETWORK,
+    page::DEVICES,
+    page::APPS,
+    page::GAMING,
+    page::POWER,
+    page::TIME,
+    page::ACCESS,
+    page::PRIVACY,
+    page::DEBLOAT,
+    9,
+    page::SYSTEM,
+];
+
+/// The page an old page number means now (Appearance, Screens and About
+/// were merged into others).
+fn merged(section: usize) -> usize {
+    match section {
+        1 => page::LOOK,
+        7 => page::DISPLAY,
+        10 => page::SYSTEM,
+        s => s,
+    }
+}
+
+/// Where page `section` is in the sidebar.
+fn nav_pos(section: usize) -> Option<usize> {
+    NAV.iter().position(|&s| s == merged(section))
+}
+
+/// Where sidebar entry `pos` starts (before scrolling).
+fn nav_y(pos: usize) -> f32 {
+    NAV_TOP + 6.0 + pos as f32 * NAV_H
 }
 
 /// The sidebar list's whole height.
 fn nav_total() -> f32 {
-    nav_y(SECTIONS.len()) - NAV_TOP + 16.0
+    nav_y(NAV.len()) - NAV_TOP + 16.0
+}
+
+/// The blurred wallpaper behind the window (see `Settings::backdrop`): made
+/// on a thread, for the screen it's for.
+type Mica = (RECT, u32, u32, Vec<u8>);
+static MICA_DONE: std::sync::Mutex<Option<Mica>> = std::sync::Mutex::new(None);
+static MICA_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The wallpaper of `screen`, a sixteenth of its size and blurred: drawn
+/// back at full size, it's as soft as Windows' Mica.
+fn mica_picture(screen: RECT) -> Option<Mica> {
+    let (w, h) = (((screen.right - screen.left) / 16).max(8), ((screen.bottom - screen.top) / 16).max(8));
+    let mut px = crate::wallpaper::thumbnail(w, h)?;
+    for _ in 0..3 {
+        blur(&mut px, w as usize, h as usize, 3);
+    }
+    Some((screen, w as u32, h as u32, px))
+}
+
+/// A box blur of `radius` over BGRA pixels, across then down.
+fn blur(px: &mut [u8], w: usize, h: usize, radius: usize) {
+    let mut line = Vec::new();
+    for (len, step, count, stride) in [(w, 4, h, w * 4), (h, w * 4, w, 4)] {
+        for n in 0..count {
+            let base = n * stride;
+            line.clear();
+            line.extend((0..len).map(|i| {
+                let o = base + i * step;
+                [px[o] as u32, px[o + 1] as u32, px[o + 2] as u32, px[o + 3] as u32]
+            }));
+            for i in 0..len {
+                let (a, b) = (i.saturating_sub(radius), (i + radius).min(len - 1));
+                let mut sum = [0u32; 4];
+                for v in &line[a..=b] {
+                    for c in 0..4 {
+                        sum[c] += v[c];
+                    }
+                }
+                let o = base + i * step;
+                for c in 0..4 {
+                    px[o + c] = (sum[c] / (b - a + 1) as u32) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// The page that lists what the search box found: one past the real sections,
@@ -275,6 +364,11 @@ enum Ctl {
     Board(Board),
     /// The screens as they sit on the desk, to drag into place and click to choose.
     Arrange,
+    /// The pen tablet's pressure curve, with points to drag (tip, softness,
+    /// full press) and the pen's pressure now on it.
+    PenCurve,
+    /// A pad to try the pen on.
+    PenPad,
     Note,
     /// A group title with no control.
     Heading,
@@ -303,6 +397,8 @@ fn row_h(r: &Row) -> f32 {
         Ctl::Accents => BOARD_HEAD + accent_rows() as f32 * (DOT + DOT_GAP) - DOT_GAP + 16.0,
         Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
         Ctl::Arrange => BOARD_HEAD + ARRANGE_H + 16.0,
+        Ctl::PenCurve => BOARD_HEAD + CURVE_H + 16.0,
+        Ctl::PenPad => BOARD_HEAD + PAD_H + 16.0,
         Ctl::Note => ROW_H,
         _ if r.desc.is_empty() => COMPACT_H,
         _ => ROW_H,
@@ -315,6 +411,9 @@ fn slider(min: f32, max: f32, step: f32, unit: Unit) -> Ctl {
 
 /// Room for a board row's title and description, above its lanes.
 const BOARD_HEAD: f32 = 58.0;
+/// The pressure graph's height (and width), and the test pad's height.
+const CURVE_H: f32 = 190.0;
+const PAD_H: f32 = 220.0;
 /// The screen arrangement's height, and the room around the screens in it.
 const ARRANGE_H: f32 = 230.0;
 const ARRANGE_PAD: f32 = 20.0;
@@ -369,8 +468,11 @@ const DOT_GAP: f32 = 10.0;
 const DOT_COLS: usize = 13;
 
 fn accent_rows() -> usize {
-    (theme::PALETTE.len() + 1).div_ceil(DOT_COLS)
+    (CUSTOM_DOT + 1).div_ceil(DOT_COLS)
 }
+
+/// The last dot: any colour, from a colour picker.
+const CUSTOM_DOT: usize = theme::PALETTE.len() + 1;
 
 /// Dot `k`'s centre in an accent grid filling `area`.
 fn dot_at(area: (f32, f32, f32, f32), k: usize) -> (f32, f32) {
@@ -387,11 +489,16 @@ fn accent_value(k: usize) -> Option<String> {
     }
 }
 
+/// The colour picked with the picker, if `accent` is one not in the palette.
+fn custom_accent(value: &str) -> Option<u32> {
+    theme::parse_accent(value).filter(|c| !theme::PALETTE.iter().any(|(p, _)| p == c))
+}
+
 /// Which dot `accent` is.
 fn accent_index(value: &str) -> Option<usize> {
     match theme::parse_accent(value) {
         None => Some(0),
-        Some(c) => theme::PALETTE.iter().position(|(p, _)| *p == c).map(|i| i + 1),
+        Some(c) => Some(theme::PALETTE.iter().position(|(p, _)| *p == c).map_or(CUSTOM_DOT, |i| i + 1)),
     }
 }
 
@@ -662,56 +769,12 @@ fn rows(section: usize) -> Vec<Row> {
                 "Drag a window to a screen's edge to snap it to that half, a corner for a quarter, the top to maximise.",
                 Toggle,
             ),
-            row(
-                "battery_saver",
-                "Battery saver",
-                "On battery, turn off the visualizer bars and read stats less often.",
-                Toggle,
-            ),
-            row(
-                "ducker",
-                "Auto ducker",
-                "While one app is making sound (Discord, with friends talking), turn the others down. They come back when it stops.",
-                Toggle,
-            ),
-            row("ducker_trigger", "When this app makes sound", "Pick from the apps with sound (several if you like).", Pick),
-            row("ducker_targets", "Turn these apps down", "Pick the apps, or every other app.", Pick),
-            row(
-                "ducker_threshold",
-                "Counts as sound above",
-                "Lower hears quiet voices too; higher only loud sound.",
-                slider(-60.0, -10.0, 1.0, Unit::Db),
-            ),
-            row(
-                "ducker_level",
-                "Turn them down to",
-                "A share of their own volume.",
-                slider(0.0, 1.0, 0.05, Unit::Percent),
-            ),
-            row(
-                "ducker_release",
-                "Bring them back after",
-                "How long it has to be quiet first.",
-                slider(200.0, 5000.0, 100.0, Unit::Ms),
-            ),
             row("alt_tab", "Alt+Tab switcher", "Cascade's own, with live previews, instead of Windows'.", Toggle),
             row(
                 "alt_tab_style",
                 "Alt+Tab look",
                 "Cards with live previews, larger previews, big app icons, or a list of titles.",
                 Choice(&[("cards", "Cards"), ("large", "Large"), ("icons", "Icons"), ("list", "List")]),
-            ),
-            row(
-                "file_manager",
-                "Open folders in",
-                "Cascade's Files (tabs, instant search, no Explorer needed) or File Explorer.",
-                Choice(&[("cascade", "Files"), ("explorer", "File Explorer")]),
-            ),
-            row(
-                "photo_viewer",
-                "Open pictures in",
-                "Auto: Cascade's viewer in shell mode (where Photos can't open), your usual app otherwise.",
-                Choice(&[("auto", "Auto"), ("cascade", "Cascade"), ("windows", "Usual app")]),
             ),
             row(
                 "priority",
@@ -726,64 +789,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(30.0, 240.0, 10.0, Unit::Fps),
             ),
         ],
-        // Everything about the look, on one page: the theme (the title and
-        // description show the one picked), its colour, and the glass.
-        1 => vec![
-            row("theme", "Theme", "", Gallery),
-            heading("h_colour", "Colour"),
-            row("accent", "Accent colour", "", Accents),
-            row(
-                "accent_glass",
-                "Accent colour on the glass",
-                "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
-                Toggle,
-            ),
-            heading("h_windows", "Windows"),
-            row(
-                "min_animation",
-                "Minimise animation",
-                "Windows go into their taskbar button when minimised, and come back out of it (where Windows doesn't animate them itself).",
-                Toggle,
-            ),
-            row(
-                "wobbly",
-                "Wobbly windows",
-                "Windows bend like jelly while you drag them, and wobble as they settle.",
-                Toggle,
-            ),
-            heading("h_glass", "Glass"),
-            row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
-            row(
-                "taskbar_corners",
-                "Corners",
-                "Taskbar, Start menu, panels and the lip.",
-                Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
-            ),
-            row(
-                "taskbar_opacity",
-                "Tint",
-                "How strong the glass's tint is: taskbar, panels and the lip.",
-                slider(0.0, 1.0, 0.05, Unit::Percent),
-            ),
-            row(
-                "start_opacity",
-                "Start menu tint",
-                "The same, for the Start menu.",
-                slider(0.0, 1.0, 0.05, Unit::Percent),
-            ),
-            row(
-                "theme_edge",
-                "Edge",
-                "How strongly the edge catches the light (and, with Refraction, how far it bends). 0% = no outline.",
-                slider(0.0, 2.0, 0.05, Unit::Percent),
-            ),
-            row(
-                "refraction",
-                "Refraction",
-                "The edge bends what's behind it like a lens, as Apple's liquid glass does. Reads the screen just around each panel a few times a second; off draws the edge instead.",
-                Toggle,
-            ),
-        ],
+        1 => vec![],
         2 => vec![
             row("notch", "Show the notch", "The island at the top of your main screen.", Toggle),
             row(
@@ -999,6 +1005,13 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             heading("h_side", "Sidebar buttons"),
             row("start_show_profile", "Account button", "Your name at the top of the sidebar.", Toggle),
+            row(
+                "profile_picture_choose",
+                "Profile picture",
+                "On the account button. Your Windows account's picture until you choose one.",
+                Button("Choose\u{2026}"),
+            ),
+            row("profile_picture_clear", "Your own picture", "", Button("Use Windows'")),
             row("start_show_cascade", "Cascade button", "Opens Cascade's settings, above Power.", Toggle),
             heading("h_places", "Sidebar shortcuts"),
             row("start_place_settings", "Settings", "", Toggle),
@@ -1116,27 +1129,7 @@ fn rows(section: usize) -> Vec<Row> {
                 slider(1.0, 10.0, 1.0, Unit::Seconds),
             ),
         ],
-        7 => vec![
-            row(
-                "mouse_match",
-                "Match the pointer across screens",
-                "Keeps the pointer's real-world height when it crosses between screens of different sizes.",
-                Toggle,
-            ),
-            row(
-                "mouse_align",
-                "Screens line up at the",
-                "Auto reads it from the Windows arrangement.",
-                Choice(&[("auto", "Auto"), ("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")]),
-            ),
-            row(
-                "screen_inches",
-                "Screen sizes",
-                "Diagonal inches, left to right (27,24). Empty = read from the screens.",
-                Text { secret: false },
-            ),
-            row("screens_info", "Detected", "", Note),
-        ],
+        7 => vec![],
         8 => vec![
             row("focus_minutes", "Focus length", "Length of a focus session.", slider(5.0, 90.0, 5.0, Unit::Min)),
             row("break_minutes", "Break length", "Length of a break.", slider(1.0, 30.0, 1.0, Unit::Min)),
@@ -1176,11 +1169,15 @@ fn rows(section: usize) -> Vec<Row> {
             ),
         ],
         9 => vec![
+            heading("h_cascade_update", "Cascade"),
+            row("update_check_now", "Updates", "Look for a newer build of Cascade.", Button("Check for updates")),
             row("update_now", "Update Cascade", "Download and install the newest build.", Button("Update now")),
             row("update_branch", "Update from", "Stable releases, or the newest build of a branch.", Pick),
             row("update_check", "Check automatically", "Look for a new build every few hours.", Toggle),
             row("changelog", "What's new", "What changed in each build.", Button("Open changelog")),
             row("github_token", "GitHub token", "Only needed while the repo is private.", Text { secret: true }),
+            heading("h_windows_update", "Windows Update"),
+            row("win_update", "Windows Update", "Look for updates now.", Button("Check")),
         ],
         page::DISPLAY => vec![
             heading("h_screens", "Screens"),
@@ -1206,7 +1203,27 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_night_strength", "Strength", "How warm the colours get.", slider(0.1, 1.0, 0.05, Unit::Percent)),
             row("win_night_schedule", "Schedule", "When it comes on.", Pick),
             row("win_gpu_note", "Graphics", "Which GPU each app uses, Auto HDR and variable refresh rate are on the Gaming page.", Note),
-        ],
+            heading("h_crossing", "Moving between screens"),
+            row(
+                "mouse_match",
+                "Match the pointer across screens",
+                "Keeps the pointer's real-world height when it crosses between screens of different sizes.",
+                Toggle,
+            ),
+            row(
+                "mouse_align",
+                "Screens line up at the",
+                "Auto reads it from the Windows arrangement.",
+                Choice(&[("auto", "Auto"), ("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")]),
+            ),
+            row(
+                "screen_inches",
+                "Screen sizes",
+                "Diagonal inches, left to right (27,24). Empty = read from the screens.",
+                Text { secret: false },
+            ),
+            row("screens_info", "Detected", "", Note),
+                ],
         page::SOUND => vec![
             heading("h_output", "Output"),
             row("win_output", "Play sound through", "The default output, for every app.", Pick),
@@ -1241,6 +1258,33 @@ fn rows(section: usize) -> Vec<Row> {
                 "More sound settings",
                 "Enhancements, spatial sound and system sounds.",
                 Button("Open"),
+            ),
+            heading("h_ducker", "Auto ducker"),
+            row(
+                "ducker",
+                "Auto ducker",
+                "While one app is making sound (Discord, with friends talking), turn the others down. They come back when it stops.",
+                Toggle,
+            ),
+            row("ducker_trigger", "When this app makes sound", "Pick from the apps with sound (several if you like).", Pick),
+            row("ducker_targets", "Turn these apps down", "Pick the apps, or every other app.", Pick),
+            row(
+                "ducker_threshold",
+                "Counts as sound above",
+                "Lower hears quiet voices too; higher only loud sound.",
+                slider(-60.0, -10.0, 1.0, Unit::Db),
+            ),
+            row(
+                "ducker_level",
+                "Turn them down to",
+                "A share of their own volume.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "ducker_release",
+                "Bring them back after",
+                "How long it has to be quiet first.",
+                slider(200.0, 5000.0, 100.0, Unit::Ms),
             ),
         ],
         page::NETWORK => vec![
@@ -1317,11 +1361,12 @@ fn rows(section: usize) -> Vec<Row> {
             ),
             row("tablet_left", "Left-handed", "Turns the tablet round, its buttons on the right.", Toggle),
             row(
-                "tablet_firmness",
+                "tablet_curve",
                 "Pressure",
-                "Soft (a light touch draws thick) to firm (it takes a press).",
-                Slider { min: 0.3, max: 3.0, step: 0.1, unit: Unit::Times },
+                "Drag the points: where the pen starts drawing, how soft or firm it feels, and how hard is a full press. The dot is your pen now.",
+                PenCurve,
             ),
+            row("tablet_test", "Try it", "Draw here with the pen: the line follows your pressure.", PenPad),
             row(
                 "tablet_lower",
                 "Lower pen button",
@@ -1353,7 +1398,86 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_kb_blink", "Cursor blink rate", "The gap between blinks of the text cursor.", slider(100.0, 1200.0, 50.0, Unit::Ms)),
             row("win_kb_cues", "Underline access keys", "Shows the underlined letter for Alt shortcuts in menus.", Toggle),
         ],
+        // Everything about the look, Cascade's and Windows', on one page: the
+        // theme (the title and description show the one picked), its colours, the glass.
         page::LOOK => vec![
+
+            row("theme", "Theme", "", Gallery),
+            heading("h_colour", "Colour"),
+            row("accent", "Cascade's accent colour", "", Accents),
+            row(
+                "accent_glass",
+                "Accent colour on the glass",
+                "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
+                Toggle,
+            ),
+            row("win_accent", "Windows' accent colour", "Windows' colour for highlights, buttons and links in its own windows.", Pick),
+            row("win_accent_bars", "Accent colour on title bars", "And on window borders.", Toggle),
+            heading("h_mode", "Light and dark"),
+            row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
+            row("win_dark_windows", "Dark mode for Windows", "Windows' own menus and dialogs.", Toggle),
+            row("win_transparency", "Transparency effects", "Windows' and apps' see-through surfaces.", Toggle),
+            heading("h_glass", "Glass"),
+            row("acrylic", "Blur", "Blur what's behind panels and the lip.", Toggle),
+            row(
+                "taskbar_corners",
+                "Corners",
+                "Taskbar, Start menu, panels and the lip.",
+                Choice(&[("round", "Round"), ("small", "Small"), ("square", "Square")]),
+            ),
+            row(
+                "taskbar_opacity",
+                "Tint",
+                "How strong the glass's tint is: taskbar, panels and the lip.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "start_opacity",
+                "Start menu tint",
+                "The same, for the Start menu.",
+                slider(0.0, 1.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "theme_edge",
+                "Edge",
+                "How strongly the edge catches the light (and, with Refraction, how far it bends). 0% = no outline.",
+                slider(0.0, 2.0, 0.05, Unit::Percent),
+            ),
+            row(
+                "refraction",
+                "Refraction",
+                "The edge bends what's behind it like a lens, as Apple's liquid glass does. Reads the screen just around each panel a few times a second; off draws the edge instead.",
+                Toggle,
+            ),
+            heading("h_windows", "Windows"),
+            row(
+                "min_animation",
+                "Minimise animation",
+                "Windows go into their taskbar button when minimised, and come back out of it (where Windows doesn't animate them itself).",
+                Toggle,
+            ),
+            row(
+                "wobbly",
+                "Wobbly windows",
+                "Windows bend like jelly while you drag them, and wobble as they settle.",
+                Toggle,
+            ),
+            row(
+                "wobbly_strength",
+                "Wobbliness",
+                "How far windows bend and swing.",
+                slider(0.3, 2.0, 0.1, Unit::Times),
+            ),
+            row(
+                "wobbly_friction",
+                "Settling",
+                "Low keeps them wobbling a while; high settles them at once.",
+                slider(0.1, 1.0, 0.05, Unit::Percent),
+            ),
+            heading("h_wall", "Background"),
+            row("win_wallpaper", "Wallpaper", "A picture for the desktop.", Button("Choose\u{2026}")),
+            row("win_wallpaper_fit", "Fit", "How the picture fills each screen.", Pick),
+            row("win_lockscreen", "Lock screen picture", "The picture behind the sign-in and lock screen (Windows asks for permission).", Button("Choose\u{2026}")),
             heading("h_rgb", "Lighting"),
             row(
                 "lighting_open",
@@ -1361,27 +1485,26 @@ fn rows(section: usize) -> Vec<Row> {
                 "Profiles, effects and layout for Corsair, ASUS Aura, RGB Fusion, Razer, Logitech, HyperX and more, without their apps.",
                 Button("Open"),
             ),
-            heading("h_mode", "Light and dark"),
-            row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
-            row("win_dark_windows", "Dark mode for Windows", "Windows' own menus and dialogs.", Toggle),
-            row("win_transparency", "Transparency effects", "Windows' and apps' see-through surfaces.", Toggle),
-            heading("h_colour", "Colour"),
-            row("win_accent", "Accent colour", "Windows' colour for highlights, buttons and links.", Pick),
-            row("win_accent_bars", "Accent colour on title bars", "And on window borders.", Toggle),
-            heading("h_wall", "Background"),
-            row("win_wallpaper", "Wallpaper", "A picture for the desktop.", Button("Choose\u{2026}")),
-            row("win_wallpaper_fit", "Fit", "How the picture fills each screen.", Pick),
-            row("win_lockscreen", "Lock screen picture", "The picture behind the sign-in and lock screen (Windows asks for permission).", Button("Choose\u{2026}")),
-            heading("h_files", "Files"),
-            row("win_file_ext", "Show file extensions", "\u{201c}photo.jpg\u{201d} rather than \u{201c}photo\u{201d}, on the desktop and in Open boxes.", Toggle),
-            row("win_hidden", "Show hidden files", "On the desktop and in Open boxes.", Toggle),
-            row("win_look_note", "Cascade's look", "Cascade's own theme and colours are on the Appearance page.", Note),
         ],
         page::APPS => vec![
+            heading("h_installed", "Installed apps"),
             row("win_uninstall", "Uninstall an app", "Desktop programs and Store apps.", Pick),
             row("win_startup", "Startup apps", "Which apps start when you sign in (ticked: on).", Pick),
             row("win_appwiz", "Programs and Features", "Windows' classic list: repair, change and updates.", Button("Open")),
             row("win_features", "Windows features", "Turn optional parts of Windows on or off.", Button("Open")),
+            heading("h_defaults", "Default apps"),
+            row(
+                "file_manager",
+                "Open folders in",
+                "Cascade's Files (tabs, instant search, no Explorer needed) or File Explorer.",
+                Choice(&[("cascade", "Files"), ("explorer", "File Explorer")]),
+            ),
+            row(
+                "photo_viewer",
+                "Open pictures in",
+                "Auto: Cascade's viewer in shell mode (where Photos can't open), your usual app otherwise.",
+                Choice(&[("auto", "Auto"), ("cascade", "Cascade"), ("windows", "Usual app")]),
+            ),
             row(
                 "win_defaults_note",
                 "Default apps",
@@ -1416,6 +1539,12 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_hibernate_dc", "Hibernate after", "On battery.", Pick),
             row("win_saver_at", "Energy saver", "Turns on by itself at this much battery.", Pick),
             row("win_saver_dim", "Lower brightness in energy saver", "", Toggle),
+            row(
+                "battery_saver",
+                "Battery saver",
+                "On battery, turn off the visualizer bars and read stats less often.",
+                Toggle,
+            ),
             heading("h_buttons", "Buttons and lid"),
             row("win_pbutton_ac", "Power button", "What pressing it does (plugged in).", Pick),
             row("win_pbutton_dc", "Power button on battery", "", Pick),
@@ -1520,7 +1649,19 @@ fn rows(section: usize) -> Vec<Row> {
         ],
         page::SYSTEM => vec![
             heading("h_about", "About"),
+            row("about", "Cascade", "A tiny native notch, taskbar and Start menu for Windows.", Note),
             row("win_about", "This PC", "Its name, Windows and hardware.", Note),
+            row("resources", "Cascade's resource use", "", Note),
+            heading("h_cascade_files", "Cascade's files"),
+            row("open_config", "Config file", "Every setting, as plain text.", Button("Open")),
+            row("open_folder", "Data folder", "Config, pinned apps and logs.", Button("Open")),
+            row(
+                "defender_exclude",
+                "Stop Windows Security deleting Cascade",
+                "Adds Cascade's folder to Windows Security's exclusions (Windows asks for permission once).",
+                Button("Add exclusion"),
+            ),
+            heading("h_pc", "This PC"),
             row("win_rename", "Rename this PC", "The name other devices see.", Button("Rename")),
             row("win_account", "Account", "", Note),
             row("win_accounts", "User accounts", "Add, remove and change accounts and passwords.", Button("Open")),
@@ -1533,7 +1674,6 @@ fn rows(section: usize) -> Vec<Row> {
             heading("h_system_more", "System"),
             row("win_clip_history", "Clipboard history", "Keeps what you copy, for Win+V.", Toggle),
             row("win_rdp", "Remote Desktop", "Lets you connect to this PC from another (Windows asks for permission).", Toggle),
-            row("win_update", "Windows Update", "Look for updates now.", Button("Check")),
             row("win_devmgr", "Device Manager", "Drivers and hardware.", Button("Open")),
             row("win_env", "Environment variables", "PATH and the like.", Button("Open")),
             row(
@@ -1543,23 +1683,15 @@ fn rows(section: usize) -> Vec<Row> {
                 Button("Open"),
             ),
             row("win_taskmgr", "Task Manager", "What's running, and how hard the PC is working.", Button("Open")),
+            heading("h_files", "Files"),
+            row("win_file_ext", "Show file extensions", "\u{201c}photo.jpg\u{201d} rather than \u{201c}photo\u{201d}, on the desktop and in Open boxes.", Toggle),
+            row("win_hidden", "Show hidden files", "On the desktop and in Open boxes.", Toggle),
             heading("h_recovery", "Recovery"),
             row("win_restore", "System Restore", "Puts system files and settings back to an earlier point.", Button("Open")),
             row("win_advanced_startup", "Advanced startup", "Restarts into recovery: safe mode, startup settings, UEFI.", Button("Restart now")),
             row("win_reset_pc", "Reset this PC", "Reinstalls Windows, keeping your files or not.", Button("Reset")),
         ],
-        10 => vec![
-            row("about", "Cascade", "A tiny native notch, taskbar and Start menu for Windows.", Note),
-            row("resources", "Resource use", "", Note),
-            row("open_config", "Config file", "Every setting, as plain text.", Button("Open")),
-            row("open_folder", "Data folder", "Config, pinned apps and logs.", Button("Open")),
-            row(
-                "defender_exclude",
-                "Stop Windows Security deleting Cascade",
-                "Adds Cascade's folder to Windows Security's exclusions (Windows asks for permission once).",
-                Button("Add exclusion"),
-            ),
-        ],
+        10 => vec![],
         _ => vec![],
     }
 }
@@ -1581,13 +1713,17 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         return false;
     }
     match (section, key) {
-        (1, "refraction") => get("theme") == "liquid_glass" && on("acrylic"),
+        (page::LOOK, "wobbly_strength" | "wobbly_friction") => on("wobbly"),
+        // Check first; Update now once there's something to update to.
+        (9, "update_now") => on("update_available"),
+        (9, "update_check_now") => !on("update_available"),
+        (page::LOOK, "refraction") => get("theme") == "liquid_glass" && on("acrylic"),
         (0, "alt_tab_style") => on("alt_tab"),
         // Explorer snaps windows when it's the shell; Cascade does when it is.
         (0, "snap_drag") => on("shell_mode") || on("shell_active"),
         // As the shell, Windows starts Cascade itself.
         (0, "autostart") => !on("shell_active"),
-        (0, "battery_saver") => on("battery"),
+        (page::POWER, "battery_saver") => on("battery"),
         // Notch.
         (2, "notch") => true,
         (2, _) if !on("notch") => false,
@@ -1599,7 +1735,7 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (2, "lip_visualizer") => on("live_activity") && (lip || side),
         (2, "hide_windows_flyout") => on("volume_osd") || on("brightness_osd"),
         (2, "usb_unplug" | "edit_devices") => get("usb_popups") != "off",
-        (0, "ducker_trigger" | "ducker_targets" | "ducker_threshold" | "ducker_level" | "ducker_release") => {
+        (page::SOUND, "ducker_trigger" | "ducker_targets" | "ducker_threshold" | "ducker_level" | "ducker_release") => {
             on("ducker")
         }
         // Taskbar.
@@ -1615,6 +1751,10 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         (4, "start_columns" | "start_pinned_rows") => on("start_show_pinned"),
         (4, k) if k.starts_with("start_place_") => on("start_show_sidebar"),
         (4, "start_sidebar_compact" | "start_show_profile" | "start_show_cascade") => on("start_show_sidebar"),
+        (4, "profile_picture_choose") => on("start_show_sidebar") && on("start_show_profile"),
+        (4, "profile_picture_clear") => {
+            on("start_show_sidebar") && on("start_show_profile") && !get("profile_picture").trim().is_empty()
+        }
         // Widgets: settings for widgets that aren't placed anywhere.
         (6, "widget_visualizer") => {
             let bar = Board::Taskbar.read(get);
@@ -1635,7 +1775,9 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
             Board::Taskbar.read(get)[..2].iter().flatten().any(|n| *n == "gpu")
         }
         // Screens.
-        (7, "mouse_align" | "screen_inches") => on("mouse_match"),
+        // The pen tablet's settings only with the driver on.
+        (page::DEVICES, k) if k.starts_with("tablet_") => on("tablet"),
+        (page::DISPLAY, "mouse_align" | "screen_inches") => on("mouse_match"),
         // Weather.
         (8, "weather_location" | "fahrenheit" | "weather_click") => on("weather"),
         (8, "weather_url") => on("weather") && get("weather_click") == "custom",
@@ -1731,6 +1873,66 @@ fn fmt(v: f32, unit: Unit) -> String {
     }
 }
 
+/// The pen tablet's pressure curve: where it starts drawing, where a press
+/// is full, and how firm it is between (see `tablet::curve`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct PenCurve {
+    tip: f32,
+    full: f32,
+    firmness: f32,
+}
+
+impl PenCurve {
+    fn read(get: &dyn Fn(&str) -> String) -> PenCurve {
+        let num = |k: &str, d: f32| get(k).parse::<f32>().unwrap_or(d);
+        PenCurve {
+            tip: num("tablet_tip", 0.04).clamp(0.0, 0.3),
+            full: num("tablet_full", 0.9).clamp(0.4, 1.0),
+            firmness: num("tablet_firmness", 1.0).clamp(0.3, 3.0),
+        }
+    }
+
+    fn at(&self, level: f32) -> f32 {
+        crate::tablet::curve(level, self.tip, self.full, self.firmness)
+    }
+
+    /// The draggable points (level, pressure): the tip, the bend, a full press.
+    fn points(&self) -> [(f32, f32); 3] {
+        let mid = (self.tip + self.full) / 2.0;
+        [(self.tip, 0.0), (mid, self.at(mid)), (self.full, 1.0)]
+    }
+
+    /// Point `which` dragged to (level, pressure).
+    fn moved(mut self, which: u8, level: f32, pressure: f32) -> PenCurve {
+        match which {
+            0 => self.tip = level.clamp(0.0, 0.3_f32.min(self.full - 0.1)),
+            2 => self.full = level.clamp(0.4_f32.max(self.tip + 0.1), 1.0),
+            _ => self.firmness = (pressure.clamp(0.04, 0.96).ln() / 0.5f32.ln()).clamp(0.3, 3.0),
+        }
+        self
+    }
+
+    fn change(&self) -> Change {
+        let r = |v: f32| format!("{:.2}", v);
+        Change::Many(vec![
+            ("tablet_tip", r(self.tip)),
+            ("tablet_full", r(self.full)),
+            ("tablet_firmness", r(self.firmness)),
+        ])
+    }
+}
+
+/// The graph's plot inside the pressure row's control (x, y, w, h).
+fn curve_plot(area: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let h = area.3 - 16.0;
+    (area.0 + 10.0, area.1 + 6.0, (area.2 * 0.55).clamp(h, 420.0), h)
+}
+
+/// The test pad's Clear button (x, y, w, h).
+fn pad_clear(area: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    (area.0 + area.2 - 86.0, area.1 + 10.0, 76.0, 28.0)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
     Nav(usize),
@@ -1787,6 +1989,21 @@ pub struct Settings {
     drag: Option<(usize, f32)>,
     tile_drag: Option<TileDrag>,
     screen_drag: Option<ScreenDrag>,
+    /// A point of the pressure graph being dragged: row, which point, and
+    /// the curve as it's being set (tip, full press, firmness).
+    pen_drag: Option<(usize, u8, PenCurve)>,
+    /// The test pad's lines (points in the pad, logical units, with their
+    /// pressure), whether the pen's drawing one now, and the pen reading
+    /// last shown.
+    pad: RefCell<Vec<Vec<(f32, f32, f32)>>>,
+    pad_down: bool,
+    pen_seq: u64,
+    /// Rows that just came into view (a setting turned on brought them):
+    /// when, so they grow open rather than appear at once.
+    appear: RefCell<HashMap<&'static str, Instant>>,
+    /// The wallpaper, blurred, behind everything as Windows 11's Mica is
+    /// (see `backdrop`), and the screen it was made for.
+    mica: RefCell<Option<Mica>>,
     /// Text boxes: window, row key, and the text they were loaded with (only
     /// a box the user actually edited is written back). Every text row of the
     /// section has one; those of rows left out are hidden.
@@ -1843,7 +2060,7 @@ impl Settings {
     /// Shows page `section` (see `SECTIONS`).
     pub fn show_section(&mut self, section: usize) {
         if section < SECTIONS.len() || section == LIGHTING {
-            self.go_to(section);
+            self.go_to(merged(section));
         }
     }
 
@@ -1860,8 +2077,8 @@ impl Settings {
             self.room_for_lighting();
         }
         // The sidebar scrolls to show the page.
-        if section < SECTIONS.len() {
-            let y = nav_y(section) - self.nav_scroll;
+        if let Some(pos) = nav_pos(section) {
+            let y = nav_y(pos) - self.nav_scroll;
             let view = self.ch - 16.0;
             if y < NAV_TOP {
                 self.nav_scroll -= NAV_TOP - y;
@@ -1918,9 +2135,8 @@ impl Settings {
         self.scroll_to = self.scroll_to.clamp(0.0, max);
         follow(&mut self.scroll, self.scroll_to, 16.0);
         let mark = match self.section {
-            s if s < SECTIONS.len() => nav_y(s),
-            LIGHTING => nav_y(page::LOOK),
-            _ => self.nav_mark,
+            LIGHTING => nav_pos(page::LOOK).map_or(self.nav_mark, nav_y),
+            s => nav_pos(s).map_or(self.nav_mark, nav_y),
         };
         follow(&mut self.nav_mark, mark, 18.0);
         let hovered = self.hovered;
@@ -1938,22 +2154,67 @@ impl Settings {
             *pos = if *to > *pos { (*pos + dt / 0.16).min(*to) } else { (*pos - dt / 0.16).max(*to) };
         }
         let sliding = self.page_since.elapsed().as_secs_f32() < PAGE_S;
-        if before != self.scroll || sliding {
+        let growing = self.appear.borrow().values().any(|t| t.elapsed().as_secs_f32() < GROW_S);
+        if before != self.scroll || sliding || growing {
             self.place_edits();
         }
         let busy = sliding
             || self.scroll != self.scroll_to
             || self.nav_mark != mark
             || self.glow.iter().any(|(g, a)| *a < 1.0 && Some(*g) == hovered || *a > 0.0 && Some(*g) != hovered)
-            || self.knobs.borrow().values().any(|(p, t)| p != t);
+            || self.knobs.borrow().values().any(|(p, t)| p != t)
+            || self.pen_drag.is_some()
+            || self.appear.borrow().values().any(|t| t.elapsed().as_secs_f32() < GROW_S);
+        // With the pen's settings showing, the pen is followed (redrawn only as it moves).
+        let watching = self.rows().iter().any(|r| matches!(r.ctl, Ctl::PenCurve | Ctl::PenPad));
+        let mut pen_moved = false;
+        if watching {
+            let live = crate::tablet::live();
+            if live.seq != self.pen_seq {
+                self.pen_seq = live.seq;
+                self.follow_pen(&live);
+                pen_moved = true;
+            }
+        }
         unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-            if !busy {
+            if busy || pen_moved {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+            if !busy && !watching {
                 let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
                 self.animating.set(false);
             }
         }
-        busy
+        busy || watching
+    }
+
+    /// The pen's latest reading: it draws on the test pad while it touches inside it.
+    fn follow_pen(&mut self, live: &crate::tablet::Live) {
+        let rows = self.rows();
+        let Some(i) = rows.iter().position(|r| matches!(r.ctl, Ctl::PenPad)) else { return };
+        let (ax, ay, aw, ah) = self.ctl_rect(i, &rows[i].ctl);
+        let mut pt = POINT { x: live.x, y: live.y };
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut pt);
+        }
+        let (lx, ly) = (pt.x as f32 / self.k - ax, pt.y as f32 / self.k - ay);
+        let inside = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah && ay + ly >= TOP - 8.0;
+        if !(live.touching && inside) {
+            self.pad_down = false;
+            return;
+        }
+        let mut pad = self.pad.borrow_mut();
+        if !self.pad_down || pad.is_empty() {
+            // Only so much is kept: the oldest lines go first.
+            if pad.len() > 400 {
+                pad.remove(0);
+            }
+            pad.push(Vec::new());
+        }
+        if let Some(line) = pad.last_mut() {
+            line.push((lx, ly, live.pressure));
+        }
+        self.pad_down = true;
     }
 
     pub fn create(instance: HINSTANCE) -> Result<Self> {
@@ -1988,6 +2249,12 @@ impl Settings {
                 drag: None,
                 tile_drag: None,
                 screen_drag: None,
+                pen_drag: None,
+                pad: RefCell::default(),
+                pad_down: false,
+                pen_seq: 0,
+                mica: RefCell::new(None),
+                appear: RefCell::default(),
                 edits: Vec::new(),
                 font: HFONT::default(),
                 brush: CreateSolidBrush(COLORREF(0x002B2B2B)),
@@ -2141,6 +2408,62 @@ impl Settings {
         self.invalidate();
     }
 
+    /// Windows 11's Mica, drawn: the wallpaper of the screen the window is
+    /// on, blurred away and darkened, lying still behind the window as it
+    /// moves (see `moved`). The blurred picture is made on a thread of its
+    /// own the first time; until then it's the plain background.
+    fn backdrop(&self, p: &Painter, cw: f32, ch: f32) {
+        let screen = unsafe {
+            let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let _ = GetMonitorInfoW(mon, &mut mi);
+            mi.rcMonitor
+        };
+        if !self.mica.borrow().as_ref().is_some_and(|m| m.0 == screen) {
+            let done = MICA_DONE.lock().unwrap_or_else(|e| e.into_inner());
+            if done.as_ref().is_some_and(|m| m.0 == screen) {
+                *self.mica.borrow_mut() = done.clone();
+            } else if !MICA_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                let hwnd = self.hwnd.0 as isize;
+                std::thread::spawn(move || {
+                    let made = mica_picture(screen);
+                    *MICA_DONE.lock().unwrap_or_else(|e| e.into_inner()) = made;
+                    MICA_PENDING.store(false, std::sync::atomic::Ordering::Release);
+                    unsafe {
+                        let _ = InvalidateRect(Some(HWND(hwnd as *mut _)), None, false);
+                    }
+                });
+            }
+        }
+        let mica = self.mica.borrow();
+        let Some((_, w, h, px)) = mica.as_ref() else { return };
+        let Some(bmp) = p.bitmap(*w, *h, px) else { return };
+        let mut origin = POINT::default();
+        unsafe {
+            let _ = ClientToScreen(self.hwnd, &mut origin);
+        }
+        let k = self.k;
+        p.image(
+            &bmp,
+            (screen.left - origin.x) as f32 / k,
+            (screen.top - origin.y) as f32 / k,
+            (screen.right - screen.left) as f32 / k,
+            (screen.bottom - screen.top) as f32 / k,
+            1.0,
+        );
+        // Mica's tint: the picture's colour only just showing through.
+        p.rrect(0.0, 0.0, cw, ch, 0.0, Color(0.118, 0.118, 0.125, 0.86));
+    }
+
+    /// The window moved: the backdrop stays where the wallpaper is.
+    pub fn moved(&self) {
+        if self.mica.borrow().is_some() {
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+    }
+
     /// The page's title.
     fn title(&self) -> &'static str {
         if self.section == LIGHTING {
@@ -2276,11 +2599,19 @@ impl Settings {
         }
     }
 
+    /// How far open row `key` is (1: fully; less while it grows in).
+    fn grown(&self, key: &str) -> f32 {
+        match self.appear.borrow().get(key) {
+            Some(t) => ease(t.elapsed().as_secs_f32() / GROW_S),
+            None => 1.0,
+        }
+    }
+
     /// Distance from the top of the first row to the top of row `i`.
     fn offset(&self, i: usize) -> f32 {
         let fit = self.fit.borrow();
         if fit.section == Some(self.section) {
-            return fit.heights.iter().take(i).map(|h| h + ROW_GAP).sum();
+            return fit.heights.iter().zip(&fit.keys).take(i).map(|(h, k)| (h + ROW_GAP) * self.grown(k)).sum();
         }
         drop(fit);
         self.rows().iter().take(i).map(|r| row_h(r) + ROW_GAP).sum()
@@ -2300,7 +2631,14 @@ impl Settings {
     fn text_w(&self, i: usize, r: &Row) -> f32 {
         let cw = self.content_w();
         match r.ctl {
-            Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents | Ctl::Note | Ctl::Heading => cw - 36.0,
+            Ctl::Board(_)
+            | Ctl::Gallery
+            | Ctl::Arrange
+            | Ctl::Accents
+            | Ctl::PenCurve
+            | Ctl::PenPad
+            | Ctl::Note
+            | Ctl::Heading => cw - 36.0,
             _ => {
                 let (rx, ..) = self.reset_rect(i, &r.ctl);
                 rx - 8.0 - (self.x0() + 18.0)
@@ -2321,7 +2659,7 @@ impl Settings {
                 None => "Your Windows accent colour, followed when you change it.".to_string(),
                 Some(c) => match theme::PALETTE.iter().find(|(p, _)| *p == c) {
                     Some((_, name)) => format!("{name}, picked here."),
-                    None => format!("#{c:06X}, from the config file."),
+                    None => format!("#{c:06X}, your own colour (+ to pick another)."),
                 },
             }
         } else if r.key == "about" && build > 0 {
@@ -2334,6 +2672,12 @@ impl Settings {
             text
         } else if let Some((text, warn)) = live_desc(r.key, get) {
             return (text.to_string(), if warn { WARN } else { Color::white(0.55) }, None);
+        } else if r.key == "profile_picture_clear" {
+            get("profile_picture")
+        } else if r.key == "update_check_now" && !crate::update::status().is_empty() {
+            crate::update::status()
+        } else if r.key == "update_now" && crate::update::available() > 0 {
+            format!("Build {} is ready: it downloads, and Cascade restarts into it.", crate::update::available())
         } else if r.key == "tablet" && get(r.key) == "true" {
             crate::tablet::status()
         } else if r.key == "admin_helper" && get(r.key) == "true" {
@@ -2376,6 +2720,24 @@ impl Settings {
                 segs,
             },
         );
+        // Rows new to the page as it was (not a page just opened) grow open.
+        if before.section == Some(self.section) {
+            let fit = self.fit.borrow();
+            let fresh: Vec<&'static str> = fit.keys.iter().filter(|k| !before.keys.contains(k)).copied().collect();
+            drop(fit);
+            if !fresh.is_empty() {
+                let now = Instant::now();
+                let mut appear = self.appear.borrow_mut();
+                appear.retain(|_, t| t.elapsed().as_secs_f32() < GROW_S);
+                for k in fresh {
+                    appear.insert(k, now);
+                }
+                drop(appear);
+                self.invalidate();
+            }
+        } else {
+            self.appear.borrow_mut().clear();
+        }
         let Some(m) = m else {
             let fit = self.fit.borrow();
             return before.section != fit.section || before.keys != fit.keys;
@@ -2385,7 +2747,16 @@ impl Settings {
             .enumerate()
             .map(|(i, r)| {
                 let base = row_h(r);
-                if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents | Ctl::Heading) {
+                if matches!(
+                    r.ctl,
+                    Ctl::Board(_)
+                        | Ctl::Gallery
+                        | Ctl::Arrange
+                        | Ctl::Accents
+                        | Ctl::PenCurve
+                        | Ctl::PenPad
+                        | Ctl::Heading
+                ) {
                     return base;
                 }
                 let (desc, _, mark) = self.desc(r, get, build);
@@ -2469,6 +2840,8 @@ impl Settings {
             ),
             // The screens, under the title.
             Ctl::Arrange => (self.x0() + 18.0, y + BOARD_HEAD, self.content_w() - 36.0, ARRANGE_H),
+            Ctl::PenCurve => (self.x0() + 18.0, y + BOARD_HEAD, self.content_w() - 36.0, CURVE_H),
+            Ctl::PenPad => (self.x0() + 18.0, y + BOARD_HEAD, self.content_w() - 36.0, PAD_H),
             Ctl::Note | Ctl::Heading => (x1, y, 0.0, 0.0),
         }
     }
@@ -2568,7 +2941,7 @@ impl Settings {
                 return None;
             }
             let y = ly + self.nav_scroll;
-            return (0..SECTIONS.len()).find(|&i| y >= nav_y(i) && y < nav_y(i) + NAV_H).map(Hit::Nav);
+            return (0..NAV.len()).find(|&p| y >= nav_y(p) && y < nav_y(p) + NAV_H).map(|p| Hit::Nav(NAV[p]));
         }
         for (i, r) in self.rows().iter().enumerate() {
             let (rx, ry, rs) = self.reset_rect(i, &r.ctl);
@@ -2599,7 +2972,7 @@ impl Settings {
             }
             if let Ctl::Accents = r.ctl {
                 let area = self.ctl_rect(i, &r.ctl);
-                for k in 0..=theme::PALETTE.len() {
+                for k in 0..=CUSTOM_DOT {
                     let (dx, dy) = dot_at(area, k);
                     let d = DOT / 2.0 + 3.0;
                     if (lx - dx).abs() < d && (ly - dy).abs() < d && ly >= TOP - 8.0 {
@@ -2668,6 +3041,16 @@ impl Settings {
             self.invalidate();
             return;
         }
+        if let Some((i, which, curve)) = self.pen_drag {
+            let rows = self.rows();
+            let Some(r) = rows.get(i) else { return };
+            let (gx, gy, gw, gh) = curve_plot(self.ctl_rect(i, &r.ctl));
+            let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+            let moved = curve.moved(which, (lx - gx) / gw, (gy + gh - ly) / gh);
+            self.pen_drag = Some((i, which, moved));
+            self.invalidate();
+            return;
+        }
         if let Some((i, _)) = self.drag {
             if let Some(v) = self.slider_value(i, x) {
                 self.drag = Some((i, v));
@@ -2721,6 +3104,10 @@ impl Settings {
                 }
                 self.invalidate();
                 None
+            }
+            Hit::Accent(_, CUSTOM_DOT) => {
+                self.invalidate();
+                Some(Change::Action("accent_custom"))
             }
             Hit::Accent(i, k) => {
                 let r = self.rows().into_iter().nth(i)?;
@@ -2779,6 +3166,36 @@ impl Settings {
                         (get(r.key) != value).then(|| Change::Set(r.key, value.to_string()))
                     }
                     Ctl::Button(_) => Some(Change::Action(r.key)),
+                    Ctl::PenCurve => {
+                        let (gx, gy, gw, gh) = curve_plot(self.ctl_rect(i, &r.ctl));
+                        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+                        let curve = PenCurve::read(get);
+                        // The nearest point, if the press is near one.
+                        let (which, d) = curve
+                            .points()
+                            .iter()
+                            .enumerate()
+                            .map(|(j, &(u, v))| (j as u8, (gx + u * gw - lx).hypot(gy + gh - v * gh - ly)))
+                            .fold((0u8, f32::MAX), |a, b| if b.1 < a.1 { b } else { a });
+                        if d > 26.0 {
+                            return None;
+                        }
+                        self.pen_drag = Some((i, which, curve));
+                        unsafe {
+                            SetCapture(self.hwnd);
+                        }
+                        self.invalidate();
+                        None
+                    }
+                    Ctl::PenPad => {
+                        let (bx, by, bw, bh) = pad_clear(self.ctl_rect(i, &r.ctl));
+                        let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
+                        if lx >= bx && lx < bx + bw && ly >= by && ly < by + bh {
+                            self.pad.borrow_mut().clear();
+                            self.invalidate();
+                        }
+                        None
+                    }
                     // The list drops down from the control.
                     Ctl::Pick => {
                         let (cx, cy, cw, ch) = self.ctl_rect(i, &r.ctl);
@@ -2799,6 +3216,13 @@ impl Settings {
     }
 
     pub fn on_up(&mut self, x: i32, y: i32, get: &dyn Fn(&str) -> String) -> Option<Change> {
+        if let Some((_, _, curve)) = self.pen_drag.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            self.invalidate();
+            return (curve != PenCurve::read(get)).then(|| curve.change());
+        }
         if let Some(d) = self.screen_drag.take() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -2885,72 +3309,30 @@ impl Settings {
             {
                 let p = gfx.painter();
                 let f = &gfx.fonts;
-                let accent = theme::accent();
-                // The backdrop: the sidebar a shade darker, and the accent's
-                // light glowing in from the top right of the page.
-                p.rrect(0.0, 0.0, SIDEBAR, chin, 0.0, Color(0.0, 0.0, 0.0, 0.14));
-                p.line(SIDEBAR - 0.5, 0.0, SIDEBAR - 0.5, chin, Color::white(0.05), 1.0);
-                if let Some(b) = p.elliptic(
-                    cwin,
-                    0.0,
-                    (cwin - SIDEBAR) * 0.9,
-                    chin * 0.7,
-                    &[(0.0, accent.alpha(0.13)), (0.5, accent.alpha(0.04)), (1.0, accent.alpha(0.0))],
-                ) {
-                    p.fill_rrect_with(SIDEBAR, 0.0, cwin - SIDEBAR, chin, 0.0, &b);
-                }
-                if let Some(b) = p.elliptic(
-                    0.0,
-                    chin,
-                    SIDEBAR * 1.6,
-                    chin * 0.5,
-                    &[(0.0, accent.alpha(0.07)), (1.0, accent.alpha(0.0))],
-                ) {
-                    p.fill_rrect_with(0.0, 0.0, SIDEBAR, chin, 0.0, &b);
-                }
-                // Sidebar: the search box, then each page with its icon, in two groups.
+                // The backdrop: the wallpaper, blurred and darkened, as
+                // Windows 11's Settings sits on Mica.
+                self.backdrop(&p, cwin, chin);
+                // Sidebar: the search box, then each page with its icon.
                 let (bx, by, bw, bh) = SEARCH_BOX;
-                p.rrect(bx, by, bw, bh, 6.0, BOX_BG);
-                p.rrect(bx + 1.0, by + bh - 1.5, bw - 2.0, 1.5, 0.75, Color::white(0.14));
+                p.rrect(bx, by, bw, bh, 5.0, BOX_BG);
+                p.stroke_rrect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 5.0, Color::white(0.06), 1.0);
+                p.rrect(bx + 1.0, by + bh - 1.0, bw - 2.0, 1.0, 0.5, Color::white(0.16));
                 p.stroke_circle(bx + 17.0, by + 15.0, 5.0, Color::white(0.55), 1.5);
                 p.line(bx + 20.5, by + 18.5, bx + 24.0, by + 22.0, Color::white(0.55), 1.5);
                 p.clip(0.0, NAV_TOP, SIDEBAR, chin - NAV_TOP);
                 let ns = self.nav_scroll;
-                for (g, title) in [(0usize, "Cascade"), (page::DISPLAY, "Windows")] {
-                    let gy = nav_y(g) - GROUP_H - ns;
-                    p.text(
-                        title,
-                        &f.label,
-                        26.0,
-                        gy + 8.0,
-                        SIDEBAR - 40.0,
-                        GROUP_H - 8.0,
-                        Align::Left,
-                        Color::white(0.5),
-                    );
-                }
-                for (i, name) in SECTIONS.iter().enumerate() {
-                    let y = nav_y(i) - ns;
+                for (pos, &i) in NAV.iter().enumerate() {
+                    let y = nav_y(pos) - ns;
                     if y + NAV_H < NAV_TOP || y > chin {
                         continue;
                     }
                     let active = i == self.section || (self.section == LIGHTING && i == page::LOOK);
                     let lit = self.glow(Hit::Nav(i));
-                    if active {
-                        // The open page: lit with the accent, brightest at its marker.
-                        if let Some(b) = p.linear(
-                            12.0,
-                            0.0,
-                            SIDEBAR - 12.0,
-                            0.0,
-                            &[(0.0, accent.alpha(0.22)), (1.0, accent.alpha(0.05))],
-                        ) {
-                            p.fill_rrect_with(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 6.0, &b);
-                        }
-                    } else if lit > 0.0 {
-                        p.rrect(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 6.0, Color::white(0.05 * lit));
+                    let a = if active { 0.06 + 0.02 * lit } else { 0.04 * lit };
+                    if a > 0.0 {
+                        p.rrect(12.0, y + 2.0, SIDEBAR - 24.0, NAV_H - 4.0, 5.0, Color::white(a));
                     }
-                    let c = Color::white(if active { 0.98 } else { 0.78 + 0.15 * lit });
+                    let c = Color::white(if active { 0.96 } else { 0.80 + 0.12 * lit });
                     let (ix, iy) = (34.0, y + NAV_H / 2.0);
                     match (nav_icon(i), &f.icons) {
                         (Some(ch), Some(font)) => {
@@ -2964,15 +3346,15 @@ impl Settings {
                         }
                         _ => p.circle(ix, iy, 2.5, c),
                     }
-                    p.text(name, &f.body, 56.0, y, SIDEBAR - 68.0, NAV_H, Align::Left, c);
+                    p.text(SECTIONS[i], &f.body, 56.0, y, SIDEBAR - 68.0, NAV_H, Align::Left, c);
                 }
                 // The marker beside the open page, gliding to it.
-                if self.section < SECTIONS.len() || self.section == LIGHTING {
+                if nav_pos(self.section).is_some() || self.section == LIGHTING {
                     let my = self.nav_mark - ns + NAV_H / 2.0;
                     p.rrect(12.0, my - 8.0, 3.0, 16.0, 1.5, theme::accent());
                 }
                 p.unclip();
-                let foot = nav_y(SECTIONS.len()) - ns + 8.0;
+                let foot = nav_y(NAV.len()) - ns + 8.0;
                 if build > 0 && foot < chin - 30.0 {
                     p.text(
                         &format!("Build {build}"),
@@ -2992,54 +3374,40 @@ impl Settings {
                 let dy = self.page_dy();
                 let fade = ease(self.page_since.elapsed().as_secs_f32() / PAGE_S);
                 p.clip(SIDEBAR, 0.0, cwin - SIDEBAR, chin);
-                // The title, with the page's icon on an accent tile.
-                let ty = 30.0 - self.scroll() + dy;
-                let page_icon = match self.section {
-                    LIGHTING => Some('\u{E706}'),
-                    s if s < SECTIONS.len() => nav_icon(s),
-                    _ => Some('\u{E721}'),
-                };
-                let mut tx = x0;
-                if let (Some(ch), Some(font)) = (page_icon, &f.icons) {
-                    let a = fade.max(0.2);
-                    p.gradient_rrect(
-                        x0,
-                        ty + 4.0,
-                        40.0,
-                        40.0,
-                        10.0,
-                        &[(0.0, accent.alpha(0.9 * a)), (1.0, theme::lighten(accent, 0.2).alpha(0.6 * a))],
-                    );
-                    p.text(&ch.to_string(), font, x0, ty + 4.0, 40.0, 40.0, Align::Center, Color::white(a));
-                    tx += 54.0;
-                }
-                p.text(self.title(), &f.big, tx, ty, cw, 48.0, Align::Left, Color::white(0.96 * fade.max(0.2)));
+                p.text(
+                    self.title(),
+                    &f.big,
+                    x0,
+                    30.0 - self.scroll() + dy,
+                    cw,
+                    48.0,
+                    Align::Left,
+                    Color::white(0.96 * fade.max(0.2)),
+                );
                 for (i, r) in self.rows().iter().enumerate() {
                     let y = self.row_y(i);
                     let h = self.row_h(i);
                     if y + h < 0.0 || y > chin {
                         continue;
                     }
+                    // A row growing open (brought in by another setting) shows
+                    // only as much of itself as has opened.
+                    let grow = self.grown(r.key);
+                    if grow < 1.0 {
+                        p.clip(SIDEBAR, y, cwin - SIDEBAR, (h + ROW_GAP) * grow);
+                    }
                     if matches!(r.ctl, Ctl::Heading) {
-                        p.rrect(x0 + 2.0, y + 22.0, 3.0, 12.0, 1.5, accent);
-                        p.text(r.title, &f.title, x0 + 12.0, y + 16.0, cw, 24.0, Align::Left, Color::white(0.94));
+                        p.text(r.title, &f.title, x0 + 2.0, y + 16.0, cw, 24.0, Align::Left, Color::white(0.92));
+                        if grow < 1.0 {
+                            p.unclip();
+                        }
                         continue;
                     }
                     let lit = self.glow(Hit::Row(i)).max(self.glow(Hit::Reset(i)) * 0.6);
-                    // A card: a soft light along its top, and the accent along its edge under the pointer.
-                    p.rrect(x0, y, cw, h, 8.0, CARD.alpha(CARD.3 + 0.022 * lit));
-                    p.gradient_rrect(
-                        x0,
-                        y,
-                        cw,
-                        h,
-                        8.0,
-                        &[(0.0, Color::white(0.025)), (0.6, Color::white(0.0)), (1.0, Color::white(0.0))],
-                    );
-                    p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 8.0, Color::white(0.045), 1.0);
-                    if lit > 0.0 {
-                        p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 8.0, accent.alpha(0.35 * lit), 1.0);
-                    }
+                    // A card, as Windows 11's: a faint layer over the backdrop
+                    // with a hairline edge, a touch lighter under the pointer.
+                    p.rrect(x0, y, cw, h, 6.0, CARD.alpha(CARD.3 + 0.03 * lit));
+                    p.stroke_rrect(x0 + 0.5, y + 0.5, cw - 1.0, h - 1.0, 6.0, Color(0.0, 0.0, 0.0, 0.22), 1.0);
                     let text_w = self.text_w(i, r);
                     // The gallery's title and description are the picked theme's.
                     let picked = matches!(r.ctl, Ctl::Gallery)
@@ -3073,7 +3441,10 @@ impl Settings {
                             dx += 15.0;
                         }
                         let dw = text_w - (dx - x0 - 18.0);
-                        if matches!(r.ctl, Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents) {
+                        if matches!(
+                            r.ctl,
+                            Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents | Ctl::PenCurve | Ctl::PenPad
+                        ) {
                             p.text(&desc, &f.small, dx, y + 34.0, dw, 18.0, Align::Left, tone);
                         } else {
                             // Wrapped onto as many lines as the row was sized for.
@@ -3223,10 +3594,18 @@ impl Settings {
                         Ctl::Accents => {
                             let picked = accent_index(&get(r.key));
                             let area = (cx, cy, cwid, ch);
-                            for k in 0..=theme::PALETTE.len() {
+                            let custom = custom_accent(&get(r.key));
+                            for k in 0..=CUSTOM_DOT {
                                 let (dx, dy) = dot_at(area, k);
                                 let colour = match k {
                                     0 => theme::windows_accent(),
+                                    CUSTOM_DOT => match custom {
+                                        Some(c) => {
+                                            let f = |s: u32| ((c >> s) & 0xFF) as f32 / 255.0;
+                                            Color(f(16), f(8), f(0), 1.0)
+                                        }
+                                        None => Color::white(0.10),
+                                    },
                                     k => {
                                         let c = theme::PALETTE[k - 1].0;
                                         let f = |s: u32| ((c >> s) & 0xFF) as f32 / 255.0;
@@ -3243,6 +3622,12 @@ impl Settings {
                                     let ink = Color(0.0, 0.0, 0.0, 0.75);
                                     p.line(dx - 5.0, dy, dx - 1.5, dy + 3.5, ink, 2.0);
                                     p.line(dx - 1.5, dy + 3.5, dx + 5.5, dy - 4.0, ink, 2.0);
+                                } else if k == CUSTOM_DOT {
+                                    // Any colour: a plus, opening the picker.
+                                    p.stroke_circle(dx, dy, DOT / 2.0 - 0.5, Color::white(0.35), 1.0);
+                                    let ink = Color::white(0.9);
+                                    p.line(dx - 6.0, dy, dx + 6.0, dy, ink, 1.6);
+                                    p.line(dx, dy - 6.0, dx, dy + 6.0, ink, 1.6);
                                 } else if k == 0 {
                                     // The Windows accent: Windows' four panes on it.
                                     let ink = Color::white(0.9);
@@ -3428,6 +3813,139 @@ impl Settings {
                                 }
                             }
                         }
+                        Ctl::PenCurve => {
+                            let curve = match self.pen_drag {
+                                Some((d, _, c)) if d == i => c,
+                                _ => PenCurve::read(get),
+                            };
+                            let dragging = self.pen_drag.map(|(d, w, _)| (d == i).then_some(w)).unwrap_or(None);
+                            let (gx, gy, gw, gh) = curve_plot((cx, cy, cwid, ch));
+                            let at = |u: f32, v: f32| (gx + u * gw, gy + gh - v * gh);
+                            p.rrect(gx, gy, gw, gh, 6.0, Color::white(0.03));
+                            p.stroke_rrect(gx + 0.5, gy + 0.5, gw - 1.0, gh - 1.0, 6.0, Color::white(0.07), 1.0);
+                            for q in 1..4 {
+                                let t = q as f32 / 4.0;
+                                p.line(gx + gw * t, gy + 1.0, gx + gw * t, gy + gh - 1.0, Color::white(0.04), 1.0);
+                                p.line(gx + 1.0, gy + gh * t, gx + gw - 1.0, gy + gh * t, Color::white(0.04), 1.0);
+                            }
+                            // Straight through, for comparison.
+                            let (ax, ay) = at(0.0, 0.0);
+                            let (bx, by) = at(1.0, 1.0);
+                            p.line(ax, ay, bx, by, Color::white(0.10), 1.0);
+                            // The curve.
+                            let accent = theme::accent();
+                            let n = 64;
+                            let mut last = at(0.0, curve.at(0.0));
+                            for q in 1..=n {
+                                let u = q as f32 / n as f32;
+                                let next = at(u, curve.at(u));
+                                p.line(last.0, last.1, next.0, next.1, accent, 2.2);
+                                last = next;
+                            }
+                            // The pen now.
+                            let live = crate::tablet::live();
+                            if live.near {
+                                let (lx, ly) = at(live.level.clamp(0.0, 1.0), live.pressure);
+                                p.line(lx, gy + 2.0, lx, gy + gh - 2.0, accent.alpha(0.35), 1.0);
+                                p.circle(lx, ly, 5.0, if live.touching { accent } else { Color::white(0.6) });
+                            }
+                            // The points to drag.
+                            for (j, &(u, v)) in curve.points().iter().enumerate() {
+                                let (px, py) = at(u, v);
+                                let big = dragging == Some(j as u8);
+                                p.circle(px, py, if big { 8.0 } else { 6.5 }, Color::white(0.95));
+                                p.stroke_circle(px, py, if big { 8.0 } else { 6.5 }, accent, 2.0);
+                            }
+                            p.text("Lighter", &f.small, gx, gy + gh + 1.0, 80.0, 15.0, Align::Left, Color::white(0.4));
+                            p.text(
+                                "Harder",
+                                &f.small,
+                                gx + gw - 80.0,
+                                gy + gh + 1.0,
+                                80.0,
+                                15.0,
+                                Align::Right,
+                                Color::white(0.4),
+                            );
+                            // What it's set to, and what the pen's doing.
+                            let tx = gx + gw + 24.0;
+                            let tw = (cx + cwid - tx).max(0.0);
+                            let feel = match curve.firmness {
+                                v if v < 0.75 => "Soft",
+                                v if v > 1.35 => "Firm",
+                                _ => "Even",
+                            };
+                            let lines = [
+                                ("Starts drawing at", format!("{:.0}%", curve.tip * 100.0)),
+                                ("Feel", format!("{feel} ({:.1}\u{d7})", curve.firmness)),
+                                ("Full pressure at", format!("{:.0}%", curve.full * 100.0)),
+                            ];
+                            for (k, (name, value)) in lines.iter().enumerate() {
+                                let ly = gy + 4.0 + k as f32 * 40.0;
+                                p.text(name, &f.small, tx, ly, tw, 16.0, Align::Left, Color::white(0.55));
+                                p.text(value, &f.body, tx, ly + 16.0, tw, 20.0, Align::Left, Color::white(0.92));
+                            }
+                            let now = if !live.near {
+                                "Bring the pen to the tablet to see its pressure.".to_string()
+                            } else if live.touching {
+                                format!(
+                                    "Pen: {:.0}% pressed, {:.0}% to apps",
+                                    live.level * 100.0,
+                                    live.pressure * 100.0
+                                )
+                            } else {
+                                format!("Pen: hovering ({:.0}%)", live.level * 100.0)
+                            };
+                            p.text_wrap(&now, &f.small, tx, gy + 128.0, tw, 40.0, accent);
+                        }
+                        Ctl::PenPad => {
+                            p.rrect(cx, cy, cwid, ch, 8.0, Color(0.0, 0.0, 0.0, 0.16));
+                            p.stroke_rrect(cx + 0.5, cy + 0.5, cwid - 1.0, ch - 1.0, 8.0, Color::white(0.08), 1.0);
+                            p.clip(cx, cy.max(TOP - 8.0), cwid, ch);
+                            let pad = self.pad.borrow();
+                            if pad.is_empty() {
+                                p.text(
+                                    "Draw here with the pen",
+                                    &f.body,
+                                    cx,
+                                    cy,
+                                    cwid,
+                                    ch,
+                                    Align::Center,
+                                    Color::white(0.3),
+                                );
+                            }
+                            let ink = Color::white(0.92);
+                            for line in pad.iter() {
+                                for w in line.windows(2) {
+                                    let ((x1, y1, p1), (x2, y2, p2)) = (w[0], w[1]);
+                                    let width = 0.8 + 9.0 * (p1 + p2) / 2.0;
+                                    p.line(cx + x1, cy + y1, cx + x2, cy + y2, ink, width);
+                                    p.circle(cx + x2, cy + y2, width / 2.0, ink);
+                                }
+                                if let Some(&(x1, y1, p1)) = line.first() {
+                                    p.circle(cx + x1, cy + y1, (0.8 + 9.0 * p1) / 2.0, ink);
+                                }
+                            }
+                            // Where the pen is over the pad.
+                            let live = crate::tablet::live();
+                            if live.near {
+                                let mut pt = POINT { x: live.x, y: live.y };
+                                unsafe {
+                                    let _ = ScreenToClient(self.hwnd, &mut pt);
+                                }
+                                let (lx, ly) = (pt.x as f32 / self.k, pt.y as f32 / self.k);
+                                if lx >= cx && lx < cx + cwid && ly >= cy && ly < cy + ch {
+                                    p.stroke_circle(lx, ly, 3.0 + 6.0 * live.pressure, theme::accent(), 1.5);
+                                }
+                            }
+                            p.unclip();
+                            let (bx, by, bw, bh) = pad_clear((cx, cy, cwid, ch));
+                            let lit = self.glow(Hit::Row(i));
+                            p.rrect(bx, by, bw, bh, 5.0, Color::white(0.06 + 0.03 * lit));
+                            p.stroke_rrect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 5.0, Color::white(0.08), 1.0);
+                            p.text("Clear", &f.body, bx, by, bw, bh, Align::Center, Color::white(0.9));
+                        }
                         Ctl::Note | Ctl::Heading => {}
                     }
                     let value = match self.drag {
@@ -3445,6 +3963,9 @@ impl Settings {
                         p.arc(cx, cy, 6.0, -0.6, 4.1, c, 1.5);
                         let (ax, ay) = (cx + 6.0 * (-0.6f32).cos(), cy + 6.0 * (-0.6f32).sin());
                         p.polygon(&[(ax - 3.5, ay - 2.0), (ax + 2.5, ay - 3.5), (ax + 1.0, ay + 2.5)], c);
+                    }
+                    if grow < 1.0 {
+                        p.unclip();
                     }
                 }
                 p.unclip();
@@ -3515,7 +4036,10 @@ mod tests {
         assert!(keys(8, &[("weather", "true"), ("weather_click", "custom")]).contains(&"weather_url"));
         assert!(!keys(8, &[("weather", "true"), ("weather_click", "google")]).contains(&"weather_url"));
         assert!(!keys(8, &[("weather", "false"), ("weather_click", "custom")]).contains(&"weather_location"));
-        assert!(keys(1, &[("theme", "liquid_glass")]).contains(&"accent"));
+        assert!(keys(page::LOOK, &[("theme", "liquid_glass")]).contains(&"accent"));
+        // The tablet's settings go with the driver.
+        assert!(keys(page::DEVICES, &[("tablet", "true")]).contains(&"tablet_curve"));
+        assert!(!keys(page::DEVICES, &[("tablet", "false")]).iter().any(|k| k.starts_with("tablet_")));
         assert_eq!(accent_index("windows"), Some(0));
         assert_eq!(accent_value(accent_index("#0078D4").unwrap()).as_deref(), Some("#0078D4"));
         // Widget settings follow where the widgets are.

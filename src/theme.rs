@@ -35,10 +35,15 @@ use crate::gfx::{Color, Painter};
 pub enum Glass {
     /// Frosted acrylic, like the Windows 11 taskbar.
     Acrylic,
-    /// A plain blur with no frost or noise.
+    /// A plain blur with no frost or noise (no theme uses it now; Liquid
+    /// Glass did, before it went clear).
+    #[allow(dead_code)]
     Blur,
     /// No blur: a solid panel (the Blur setting off).
     Solid,
+    /// Clear glass: nothing blurred, what's behind seen sharp through a light
+    /// tint, the glass shown by its edge bending the light (see `lens`).
+    Clear,
 }
 
 /// How a panel's edge is drawn.
@@ -124,22 +129,22 @@ pub const THEMES: [Theme; 2] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Apple's liquid glass: a light blur, a soft sheen, a lit rim, and an edge that bends what's behind it like a lens.",
-        glass: Glass::Blur,
-        tint: (0.08, 0.08, 0.09),
-        tint_scale: 0.30,
+        about: "Apple's liquid glass: clear, not frosted, what's behind it seen sharp and bent round its edge like a lens, with a fine lit rim.",
+        glass: Glass::Clear,
+        // A dark tint, so white text reads on any wallpaper (the Tint
+        // slider sets how dark), and no white haze: the glass is clear.
+        tint: (0.02, 0.02, 0.03),
+        tint_scale: 0.62,
         solid: (0.19, 0.19, 0.2),
-        // The web recipe's white tint (rgba(255,255,255,.25) there, on a
-        // dark bar a little less so white text still reads), brighter
-        // where the light comes from.
-        film: (white(0.17), white(0.08)),
-        rim: Rim::Shine { lit: 0.55, back: 0.38, hairline: 0.10 },
-        // Light gathered in the curved edge (drawn always: where the bar
-        // meets the screen's edge there's nothing for the bending to show),
-        // and the sheen from the top left.
-        light: Light { lens: (12.0, 0.11), dispersion: 0.04, sheen: 0.45, depth: 0.0 },
-        // 24 px of curved rim, bent up to 30 px (1.25 of it), colours barely split.
-        refract: Some(crate::lens::Lens { band: 24.0, bend: 1.25, split: 0.05 }),
+        film: (white(0.035), white(0.012)),
+        // A fine rim catching the light, no outline round it to speak of.
+        rim: Rim::Shine { lit: 0.42, back: 0.22, hairline: 0.035 },
+        // A little light gathered in the curved edge (where the bar meets
+        // the screen's edge there's nothing for the bending to show), its
+        // colours split, and a faint sheen.
+        light: Light { lens: (7.0, 0.05), dispersion: 0.07, sheen: 0.14, depth: 0.0 },
+        // 22 px of curved rim, bent up to 35 px, colours split as they bend.
+        refract: Some(crate::lens::Lens { band: 22.0, bend: 1.6, split: 0.12 }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
@@ -318,7 +323,8 @@ pub fn set_refraction(on: bool) {
 /// scales how far.
 fn lens_of(t: &Theme) -> Option<crate::lens::Lens> {
     let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
-    let lens = t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && t.glass == Glass::Blur)?;
+    let lens =
+        t.refract.filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Blur | Glass::Clear))?;
     (k > 0.0).then_some(crate::lens::Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
 }
 
@@ -434,7 +440,7 @@ pub fn paint(
     }
     // The body: what the glass does to the light coming through it.
     if blurred {
-        if t.glass == Glass::Blur {
+        if matches!(t.glass, Glass::Blur | Glass::Clear) {
             let (cr, cg, cb) = t.tint;
             p.rrect(x, y, w, h, r, Color(cr, cg, cb, (opacity * t.tint_scale).clamp(0.0, 1.0) * alpha));
         }
@@ -601,6 +607,7 @@ pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
             p.rrect(x, y, w, h, r, white(0.04));
         }
         Glass::Blur => p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5)),
+        Glass::Clear => p.rrect(x, y, w, h, r, Color(cr, cg, cb, opacity * t.tint_scale)),
         Glass::Solid => {}
     }
     paint(p, t, x, y, w, h, r, t.glass != Glass::Solid, opacity, 1.0, 1.0);

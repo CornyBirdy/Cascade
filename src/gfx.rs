@@ -628,17 +628,44 @@ impl Painter<'_> {
         unsafe { self.rt.DrawBitmap(bmp, Some(&rect(x, y, w, h)), alpha, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
     }
 
-    /// Draws the part `src` (x, y, w, h in the bitmap's pixels) of a bitmap
-    /// into the same place, as moved by `m`: a texture warped piece by piece.
-    pub fn image_warped(&self, bmp: &ID2D1Bitmap, src: (f32, f32, f32, f32), m: [f32; 6]) {
+    /// A brush that paints `bmp` (for `textured_triangle`).
+    pub fn bitmap_brush(&self, bmp: &ID2D1Bitmap) -> Option<ID2D1BitmapBrush> {
+        let props = D2D1_BITMAP_BRUSH_PROPERTIES {
+            extendModeX: D2D1_EXTEND_MODE_CLAMP,
+            extendModeY: D2D1_EXTEND_MODE_CLAMP,
+            interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        };
+        unsafe { self.rt.CreateBitmapBrush(bmp, Some(&props), None).ok() }
+    }
+
+    /// Fills triangle `dst` with the triangle `src` of `brush`'s bitmap (its
+    /// pixels), stretched to fit exactly. Triangles sharing corners meet
+    /// edge to edge, so a mesh of them bends a picture with no gaps.
+    pub fn textured_triangle(&self, brush: &ID2D1BitmapBrush, src: [(f32, f32); 3], dst: [(f32, f32); 3]) {
+        let (u1, u2) = ((src[1].0 - src[0].0, src[1].1 - src[0].1), (src[2].0 - src[0].0, src[2].1 - src[0].1));
+        let (v1, v2) = ((dst[1].0 - dst[0].0, dst[1].1 - dst[0].1), (dst[2].0 - dst[0].0, dst[2].1 - dst[0].1));
+        let det = u1.0 * u2.1 - u2.0 * u1.1;
+        if det.abs() < 1e-6 {
+            return;
+        }
+        // The linear part taking u1 to v1 and u2 to v2 (row vectors, as Direct2D has them).
+        let m11 = (v1.0 * u2.1 - v2.0 * u1.1) / det;
+        let m21 = (v2.0 * u1.0 - v1.0 * u2.0) / det;
+        let m12 = (v1.1 * u2.1 - v2.1 * u1.1) / det;
+        let m22 = (v2.1 * u1.0 - v1.1 * u2.0) / det;
+        let m31 = dst[0].0 - (src[0].0 * m11 + src[0].1 * m21);
+        let m32 = dst[0].1 - (src[0].0 * m12 + src[0].1 * m22);
+        let Some(g) = self.polygon_path(&dst) else { return };
         unsafe {
-            let mut before = windows_numerics::Matrix3x2::default();
-            self.rt.GetTransform(&mut before);
-            let warp = windows_numerics::Matrix3x2 { M11: m[0], M12: m[1], M21: m[2], M22: m[3], M31: m[4], M32: m[5] };
-            self.rt.SetTransform(&(warp * before));
-            let r = rect(src.0, src.1, src.2, src.3);
-            self.rt.DrawBitmap(bmp, Some(&r), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, Some(&r));
-            self.rt.SetTransform(&before);
+            brush.SetTransform(&windows_numerics::Matrix3x2 {
+                M11: m11,
+                M12: m12,
+                M21: m21,
+                M22: m22,
+                M31: m31,
+                M32: m32,
+            });
+            self.rt.FillGeometry(&g, brush, None);
         }
     }
 

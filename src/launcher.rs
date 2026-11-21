@@ -45,10 +45,13 @@ const RESULT_ROW: f32 = 46.0;
 const RECENT_ROW: f32 = 46.0;
 const SIDE_ROW: f32 = 38.0;
 
+/// The account picture's size in pixels (drawn at 28 layout units, so sharp up to 225% scaling).
+const AVATAR_PX: u32 = 64;
+
 /// Opens Cascade's settings window (listed with the apps).
 pub const SETTINGS_TARGET: &str = "cascade:settings";
 /// Cascade's own apps in Start: (name, target, the flag that starts them).
-pub const OWN_APPS: [(&str, &str, &str); 10] = [
+pub const OWN_APPS: [(&str, &str, &str); 11] = [
     ("Files", "cascade:files", "--files"),
     ("Disk Usage", "cascade:disk", "--disk"),
     ("Lighting", "cascade:lighting", "--rgb"),
@@ -59,6 +62,7 @@ pub const OWN_APPS: [(&str, &str, &str); 10] = [
     ("Media Player", "cascade:player", "--player"),
     ("Sound Recorder", "cascade:soundrec", "--soundrec"),
     ("Paint", "cascade:paint", "--paint"),
+    ("Snip", "cascade:snip", "--snip"),
 ];
 
 /// Sidebar places: label, what to open, glyph.
@@ -529,6 +533,8 @@ pub struct Launcher {
     hits: Vec<(Target, f32, f32, f32, f32)>,
     k: f32,
     exe: String,
+    /// The account button's picture (where it's from, and the circle as BGRA), if there is one.
+    avatar: Option<(String, Vec<u8>)>,
     pub dirty: bool,
 }
 
@@ -598,6 +604,7 @@ impl Launcher {
             hits: Vec::new(),
             k: 1.0,
             exe: std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            avatar: None,
             dirty: false,
         }
     }
@@ -605,10 +612,22 @@ impl Launcher {
     /// Look and layout, from the settings.
     pub fn configure(&mut self, cfg: &Config) {
         self.acrylic = theme::blurs(cfg.acrylic);
-        self.opacity = cfg.start_opacity.clamp(0.0, 1.0);
+        // The Start menu is big and usually over windows, where the same tint
+        // as the taskbar's reads as a flat grey slab: a lighter one keeps it
+        // as see-through as the taskbar looks.
+        self.opacity = cfg.start_opacity.clamp(0.0, 1.0) * 0.72;
         self.radius = cfg.corner_radius();
         self.geo = Geo::new(cfg);
         self.web = cfg.start_web_search.clone();
+        // The account button's picture, read again only when it changed.
+        let source = if cfg.start_show_profile { crate::avatar::source(&cfg.profile_picture) } else { None };
+        let key = source.as_ref().map(|p| p.to_string_lossy().into_owned());
+        if self.avatar.as_ref().map(|a| &a.0) != key.as_ref() {
+            self.avatar = source.and_then(|p| {
+                let px = crate::avatar::circle(&p, AVATAR_PX)?;
+                Some((p.to_string_lossy().into_owned(), px))
+            });
+        }
         self.position = match cfg.start_position.as_str() {
             "center" => Position::Center,
             "left" => Position::Left,
@@ -648,10 +667,25 @@ impl Launcher {
     }
 
     fn icon_id<'a>(&'a self, target: &'a str) -> &'a str {
-        if target == SETTINGS_TARGET || OWN_APPS.iter().any(|a| a.1 == target) {
-            &self.exe
-        } else {
-            target
+        // Cascade's own apps each have their own icon (see `appicons`).
+        const ICONS: [(&str, &str); 12] = [
+            (SETTINGS_TARGET, "cascade-app:Cascade.Settings"),
+            ("cascade:files", "cascade-app:Cascade.Files"),
+            ("cascade:disk", "cascade-app:Cascade.DiskUsage"),
+            ("cascade:lighting", "cascade-app:Cascade.Lighting"),
+            ("cascade:calc", "cascade-app:Cascade.Calculator"),
+            ("cascade:camera", "cascade-app:Cascade.Camera"),
+            ("cascade:notepad", "cascade-app:Cascade.Notepad"),
+            ("cascade:clock", "cascade-app:Cascade.Clock"),
+            ("cascade:player", "cascade-app:Cascade.MediaPlayer"),
+            ("cascade:soundrec", "cascade-app:Cascade.SoundRecorder"),
+            ("cascade:paint", "cascade-app:Cascade.Paint"),
+            ("cascade:snip", "cascade-app:Cascade.Snip"),
+        ];
+        match ICONS.iter().find(|(t, _)| *t == target) {
+            Some((_, icon)) => icon,
+            None if OWN_APPS.iter().any(|a| a.1 == target) => &self.exe,
+            None => target,
         }
     }
 
@@ -1211,7 +1245,7 @@ impl Launcher {
             theme::panel(&p, 0.0, 0.0, g.w, g.h, r, glass, self.opacity, 0.97, 1.0);
             if g.show_side {
                 p.clip(1.0, 1.0, g.side - 1.0, g.h - 2.0);
-                p.rrect(0.0, 0.0, g.side + r * 2.0, g.h, r, Color(0.0, 0.0, 0.0, 0.16));
+                p.rrect(0.0, 0.0, g.side + r * 2.0, g.h, r, Color(0.0, 0.0, 0.0, 0.08));
                 p.unclip();
             }
 
@@ -1565,18 +1599,24 @@ impl Launcher {
                     if self.hovered == Some(Target::Profile) {
                         p.rrect(10.0, py, iw, ph, 6.0, Color::white(0.07));
                     }
-                    p.circle(26.0, py + ph / 2.0, 14.0, theme::accent());
-                    let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                    p.text(
-                        &initial,
-                        &f.label,
-                        12.0,
-                        py + ph / 2.0 - 15.0,
-                        28.0,
-                        30.0,
-                        Align::Center,
-                        Color::white(1.0),
-                    );
+                    match self.avatar.as_ref().and_then(|(_, px)| p.bitmap(AVATAR_PX, AVATAR_PX, px)) {
+                        Some(bmp) => p.image(&bmp, 12.0, py + ph / 2.0 - 14.0, 28.0, 28.0, 1.0),
+                        None => {
+                            p.circle(26.0, py + ph / 2.0, 14.0, theme::accent());
+                            let initial: String =
+                                user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                            p.text(
+                                &initial,
+                                &f.label,
+                                12.0,
+                                py + ph / 2.0 - 15.0,
+                                28.0,
+                                30.0,
+                                Align::Center,
+                                Color::white(1.0),
+                            );
+                        }
+                    }
                     if la > 0.02 {
                         p.text(&user, &f.title, 48.0, py, sw - 60.0, ph, Align::Left, Color::white(0.95 * la));
                     }

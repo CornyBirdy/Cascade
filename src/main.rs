@@ -4,9 +4,11 @@
 #[cfg(not(windows))]
 compile_error!("Cascade is a Windows app.");
 
+mod appicons;
 mod apps;
 mod appwin;
 mod audio;
+mod avatar;
 mod backdrop;
 mod banner;
 mod brightness;
@@ -164,6 +166,8 @@ pub mod msg {
     pub const RELOAD: u32 = WM_APP + 47;
     /// Shell mode: a desktop item's menu, built on a thread of its own, to show (see `deskicons::item_menu`).
     pub const DESK_MENU_SHOW: u32 = WM_APP + 48;
+    /// Start a snip (from `--snip`: Snip's taskbar button or Start).
+    pub const SNIP: u32 = WM_APP + 49;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 
@@ -199,6 +203,20 @@ fn main() {
     // Cascade's own apps, each in a process of its own (see `appwin`).
     let args: Vec<String> = std::env::args().collect();
     let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned());
+    // Snip runs in the Cascade that's running: tell it to start one.
+    if args.iter().any(|a| a == "--snip") {
+        if let Some(main) = helper::main_window() {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(main),
+                    msg::SNIP,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
+        return;
+    }
     if let Some(path) = after("--disk") {
         diskmap::run(path);
         return;

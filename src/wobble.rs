@@ -28,8 +28,14 @@ static ON: AtomicBool = AtomicBool::new(false);
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static RELEASED: AtomicBool = AtomicBool::new(false);
 
-pub fn configure(on: bool) {
+/// How much windows wobble (1 as made) and how quickly they settle (the springs' damping).
+static STRENGTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+static FRICTION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3EB3_3333);
+
+pub fn configure(on: bool, strength: f32, friction: f32) {
     ON.store(on, Ordering::Relaxed);
+    STRENGTH.store(strength.clamp(0.3, 2.0).to_bits(), Ordering::Relaxed);
+    FRICTION.store(friction.clamp(0.1, 1.0).to_bits(), Ordering::Relaxed);
 }
 
 /// Grid cells across and down.
@@ -179,13 +185,15 @@ fn run(hv: isize) {
         let grab =
             (((cur.x - start.left) as f32).clamp(0.0, w as f32), ((cur.y - start.top) as f32).clamp(0.0, h as f32));
         let rest = |i: usize| ((i % (N + 1)) as f32 * w as f32 / N as f32, (i / (N + 1)) as f32 * h as f32 / N as f32);
+        let strength = f32::from_bits(STRENGTH.load(Ordering::Relaxed));
+        let friction = f32::from_bits(FRICTION.load(Ordering::Relaxed));
         let far = (w as f32).hypot(h as f32);
         // Points near the hand follow quickly; far ones lag and swing.
         let stiff: Vec<f32> = (0..n)
             .map(|i| {
                 let (x, y) = rest(i);
                 let d = ((x - grab.0).hypot(y - grab.1) / far).clamp(0.0, 1.0);
-                180.0 + 900.0 * (1.0 - d).powi(3)
+                (180.0 + 900.0 * (1.0 - d).powi(3)) / strength
             })
             .collect();
         let mut layer = Layer::default();
@@ -214,7 +222,7 @@ fn run(hv: isize) {
             let mut moving = 0.0f32;
             for i in 0..n {
                 let k = stiff[i];
-                let c = 2.0 * k.sqrt() * 0.32;
+                let c = 2.0 * k.sqrt() * friction;
                 vel[i].0 += (-k * off[i].0 - c * vel[i].0) * dt;
                 vel[i].1 += (-k * off[i].1 - c * vel[i].1) * dt;
             }
@@ -253,29 +261,28 @@ fn run(hv: isize) {
                             let (x, y) = rest(i);
                             (x + off[i].0 + m, y + off[i].1 + m)
                         };
-                        let (cw, ch) = (w as f32 / N as f32, h as f32 / N as f32);
-                        p.aliased(|| {
-                            for cy in 0..N {
-                                for cx in 0..N {
-                                    let i = cy * (N + 1) + cx;
-                                    let (p00, p10, p01) = (at(i), at(i + 1), at(i + N + 1));
-                                    let (sx, sy) = (cx as f32 * cw, cy as f32 * ch);
-                                    // A hair over, so neighbouring cells meet.
-                                    let (sw, sh) = (cw + 0.75, ch + 0.75);
-                                    let m11 = (p10.0 - p00.0) / cw;
-                                    let m12 = (p10.1 - p00.1) / cw;
-                                    let m21 = (p01.0 - p00.0) / ch;
-                                    let m22 = (p01.1 - p00.1) / ch;
-                                    let m31 = p00.0 - m11 * sx - m21 * sy;
-                                    let m32 = p00.1 - m12 * sx - m22 * sy;
-                                    p.image_warped(
-                                        b,
-                                        (sx, sy, sw.min(w as f32 - sx), sh.min(h as f32 - sy)),
-                                        [m11, m12, m21, m22, m31, m32],
-                                    );
+                        // Each cell as two triangles, each stretched exactly onto
+                        // its moved corners, so neighbours share their edges.
+                        if let Some(brush) = p.bitmap_brush(b) {
+                            p.aliased(|| {
+                                for cy in 0..N {
+                                    for cx in 0..N {
+                                        let i = cy * (N + 1) + cx;
+                                        let (i10, i01, i11) = (i + 1, i + N + 1, i + N + 2);
+                                        p.textured_triangle(
+                                            &brush,
+                                            [rest(i), rest(i10), rest(i01)],
+                                            [at(i), at(i10), at(i01)],
+                                        );
+                                        p.textured_triangle(
+                                            &brush,
+                                            [rest(i11), rest(i01), rest(i10)],
+                                            [at(i11), at(i01), at(i10)],
+                                        );
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                 }
                 let pos = POINT { x: now_r.left - MARGIN, y: now_r.top - MARGIN };

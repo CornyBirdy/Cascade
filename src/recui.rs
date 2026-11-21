@@ -587,6 +587,9 @@ const STAY: f32 = 10.0;
 struct Preview {
     s: Surface,
     path: PathBuf,
+    /// A screenshot's picture (BGRA, its size): Edit opens it in the editor.
+    /// None for a recording, which plays.
+    still: Option<(Vec<u32>, i32, i32)>,
     thumb: Option<Thumb>,
     bmp: Option<(u32, ID2D1Bitmap)>,
     detail: String,
@@ -647,6 +650,7 @@ fn draw_preview(pv: &mut Preview) -> bool {
     let left = (pv.left / STAY).clamp(0.0, 1.0);
     let copied = pv.copied.is_some_and(|t| t.elapsed().as_secs_f32() < 1.6);
     let detail = pv.detail.clone();
+    let still = pv.still.is_some();
     let mut hits = Vec::new();
     let thumb = pv.thumb.as_ref();
     let mut made: Option<ID2D1Bitmap> = None;
@@ -678,10 +682,15 @@ fn draw_preview(pv: &mut Preview) -> bool {
             }
             p.stroke_rrect(tx + 0.5, ty + 0.5, tw - 1.0, th - 1.0, 8.0, Color::white(0.1), 1.0);
             let (pcx, pcy) = (tx + tw / 2.0, ty + th / 2.0);
-            let pr = 26.0 + 3.0 * lit[0];
-            p.circle(pcx, pcy, pr, Color(0.0, 0.0, 0.0, 0.45 + 0.15 * lit[0]));
-            p.stroke_circle(pcx, pcy, pr, Color::white(0.35 + 0.4 * lit[0]), 1.5);
-            p.polygon(&[(pcx - 7.0, pcy - 11.0), (pcx - 7.0, pcy + 11.0), (pcx + 12.0, pcy)], Color::white(0.95));
+            if still {
+                // A screenshot: lit under the pointer, a click opens the editor.
+                p.rrect(tx, ty, tw, th, 8.0, Color::white(0.08 * lit[0]));
+            } else {
+                let pr = 26.0 + 3.0 * lit[0];
+                p.circle(pcx, pcy, pr, Color(0.0, 0.0, 0.0, 0.45 + 0.15 * lit[0]));
+                p.stroke_circle(pcx, pcy, pr, Color::white(0.35 + 0.4 * lit[0]), 1.5);
+                p.polygon(&[(pcx - 7.0, pcy - 11.0), (pcx - 7.0, pcy + 11.0), (pcx + 12.0, pcy)], Color::white(0.95));
+            }
             hits.push((tx, ty, tw, th, Pv::Thumb));
             // Close, over the frame's corner.
             let (qx, qy) = (tx + tw - 34.0, ty + 6.0);
@@ -690,14 +699,15 @@ fn draw_preview(pv: &mut Preview) -> bool {
             hits.push((qx, qy, 28.0, 28.0, Pv::Close));
             // What it is.
             let iy = ty + th + 12.0;
-            p.text("Screen recording saved", &f.title, x + 16.0, iy, cw - 32.0, 22.0, Align::Left, Color::white(0.95));
+            let title = if still { "Screenshot saved" } else { "Screen recording saved" };
+            p.text(title, &f.title, x + 16.0, iy, cw - 32.0, 22.0, Align::Left, Color::white(0.95));
             p.text(&detail, &f.small, x + 16.0, iy + 22.0, cw - 32.0, 18.0, Align::Left, Color::white(0.55));
             // What to do with it.
             let by = iy + 48.0;
             let gap = 6.0;
             let bw = (cw - 24.0 - 3.0 * gap) / 4.0;
             let buttons = [
-                (Pv::Play, 0xE768, "Play"),
+                if still { (Pv::Play, 0xE70F, "Edit") } else { (Pv::Play, 0xE768, "Play") },
                 (Pv::Folder, 0xE8B7, "Folder"),
                 (Pv::Copy, if copied { 0xE73E } else { 0xE8C8 }, if copied { "Copied" } else { "Copy" }),
                 (Pv::Delete, 0xE74D, "Delete"),
@@ -764,7 +774,10 @@ fn press(pv: &mut Preview, b: Pv) {
     let path = pv.path.clone();
     match b {
         Pv::Thumb | Pv::Play => {
-            crate::shell::open(&path.to_string_lossy());
+            match &pv.still {
+                Some((px, w, h)) => crate::snipedit::open(px.clone(), *w, *h, Some(path)),
+                None => crate::shell::open(&path.to_string_lossy()),
+            }
             pv.closing = Some(Instant::now());
         }
         Pv::Folder => {
@@ -857,6 +870,18 @@ unsafe extern "system" fn preview_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
 /// Pops up the preview of a saved recording at the bottom right of the
 /// screen `near` is on; `secs` is how long it runs. Returns at once.
 pub fn preview(path: PathBuf, thumb: Option<Thumb>, secs: f32, near: RECT) {
+    show_preview(path, thumb, None, secs, near);
+}
+
+/// Pops up the preview of a screenshot just taken (`pixels`, `w`×`h`,
+/// saved at `path`), as a recording's: Edit opens it in the editor.
+pub fn screenshot_preview(path: PathBuf, pixels: Vec<u32>, w: i32, h: i32, near: RECT) {
+    let bytes: Vec<u8> = pixels.iter().flat_map(|p| (p | 0xFF00_0000).to_le_bytes()).collect();
+    let thumb = Thumb::from_frame(&bytes, w as u32, h as u32, 640);
+    show_preview(path, thumb, Some((pixels, w, h)), 0.0, near);
+}
+
+fn show_preview(path: PathBuf, thumb: Option<Thumb>, still: Option<(Vec<u32>, i32, i32)>, secs: f32, near: RECT) {
     std::thread::spawn(move || unsafe {
         let _ =
             windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -870,17 +895,16 @@ pub fn preview(path: PathBuf, thumb: Option<Thumb>, secs: f32, near: RECT) {
         let Ok(gfx) = Gfx::new() else { return };
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let s = secs.round() as u32;
-        let detail = format!(
-            "{}:{:02} \u{b7} {} \u{b7} {}",
-            s / 60,
-            s % 60,
-            crate::appwin::size_text(size),
-            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-        );
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let detail = match &still {
+            Some((_, w, h)) => format!("{w}\u{d7}{h} \u{b7} {} \u{b7} {name}", crate::appwin::size_text(size)),
+            None => format!("{}:{:02} \u{b7} {} \u{b7} {name}", s / 60, s % 60, crate::appwin::size_text(size)),
+        };
         PREVIEW.with(|p| {
             *p.borrow_mut() = Some(Preview {
                 s: Surface { hwnd, gfx, layer: Layer::default(), k },
                 path,
+                still,
                 thumb,
                 bmp: None,
                 detail,

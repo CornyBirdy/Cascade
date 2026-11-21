@@ -305,7 +305,7 @@ pub fn caption_press(hwnd: HWND, b: u8) {
 /// Cascade's apps as the taskbar knows them: (AppUserModelID, name, how
 /// it's started, Windows' stock icon for it, and a file whose icon is
 /// better where there is one: Windows' own app of the same kind).
-pub const OWN_APPS: [(&str, &str, &str, i32, &str); 10] = [
+pub const OWN_APPS: [(&str, &str, &str, i32, &str); 11] = [
     ("Cascade.Files", "Files", "--files", 3, ""),
     ("Cascade.Photos", "Photos", "--view", 72, ""),
     ("Cascade.DiskUsage", "Disk Usage", "--disk", 8, ""),
@@ -316,6 +316,7 @@ pub const OWN_APPS: [(&str, &str, &str, i32, &str); 10] = [
     ("Cascade.MediaPlayer", "Media Player", "--player", 73, "%ProgramFiles%\\Windows Media Player\\wmplayer.exe"),
     ("Cascade.SoundRecorder", "Sound Recorder", "--soundrec", 71, ""),
     ("Cascade.Paint", "Paint", "--paint", 72, "mspaint.exe"),
+    ("Cascade.Snip", "Snip", "--snip", 72, ""),
 ];
 
 /// The taskbar's id for one of Cascade's apps (`cascade-app:<AppUserModelID>`).
@@ -356,9 +357,16 @@ fn file_icon(file: &str, large: bool) -> Option<HICON> {
     (got > 0 && !icon.is_invalid()).then_some(icon)
 }
 
-/// The icon of Cascade's app `aumid` (`large` or small), from Windows' own set.
+/// The icon of Cascade's app `aumid` (`large` or small): its own (see
+/// `appicons`), else Windows' icon for its kind of app.
 pub fn own_app_icon(aumid: &str, large: bool) -> Option<HICON> {
     use windows::Win32::UI::Shell::*;
+    if crate::appicons::has(aumid) {
+        let size = unsafe { GetSystemMetrics(if large { SM_CXICON } else { SM_CXSMICON }) };
+        if let Some(icon) = crate::appicons::hicon(aumid, size.max(16)) {
+            return Some(icon);
+        }
+    }
     let (_, _, stock) = own_app(aumid)?;
     let file = OWN_APPS.iter().find(|a| a.0.eq_ignore_ascii_case(aumid)).map_or("", |a| a.4);
     if let Some(icon) = file_icon(file, large) {

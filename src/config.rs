@@ -51,6 +51,9 @@ super_drag = true
 min_animation = true
 # Windows bend like jelly while you drag them about.
 wobbly = false
+# How much they wobble (0.3 to 2), and how quickly they settle (0.1 to 1).
+wobbly_strength = 1.0
+wobbly_friction = 0.35
 # The built-in pen tablet driver (10moon, Vinsa and their relatives).
 tablet = true
 # ink (Windows Ink: a pen, with pressure) or mouse.
@@ -62,6 +65,9 @@ tablet_left = false
 tablet_keep_shape = true
 # How firm the pressure is: 1 as it comes, more needs a harder press.
 tablet_firmness = 1.0
+# How hard the pen has to press before it draws (0 to 0.3), and how hard is a full press (0.4 to 1).
+tablet_tip = 0.04
+tablet_full = 0.9
 # What the pen's buttons do: right, middle, eraser or none.
 tablet_lower = right
 tablet_upper = middle
@@ -262,6 +268,8 @@ file_manager = cascade
 # open; your usual app otherwise), cascade, or windows.
 photo_viewer = auto
 start_show_profile = true
+# The picture on Start's account button (empty: the Windows account's picture).
+profile_picture =
 # Show the Cascade (settings) button above Power.
 start_show_cascade = true
 # Sidebar shortcuts (each can be turned off).
@@ -349,12 +357,16 @@ pub struct Config {
     pub super_drag: bool,
     pub min_animation: bool,
     pub wobbly: bool,
+    pub wobbly_strength: f32,
+    pub wobbly_friction: f32,
     pub tablet: bool,
     pub tablet_mode: String,
     pub tablet_screen: String,
     pub tablet_left: bool,
     pub tablet_keep_shape: bool,
     pub tablet_firmness: f32,
+    pub tablet_tip: f32,
+    pub tablet_full: f32,
     pub tablet_lower: String,
     pub tablet_upper: String,
     pub snap_drag: bool,
@@ -446,6 +458,7 @@ pub struct Config {
     pub file_manager: String,
     pub photo_viewer: String,
     pub start_show_profile: bool,
+    pub profile_picture: String,
     pub start_show_cascade: bool,
     /// Sidebar shortcuts, in `PLACE_KEYS` order.
     pub start_places: [bool; 8],
@@ -489,12 +502,16 @@ impl Default for Config {
             super_drag: true,
             min_animation: true,
             wobbly: false,
+            wobbly_strength: 1.0,
+            wobbly_friction: 0.35,
             tablet: true,
             tablet_mode: "ink".into(),
             tablet_screen: "all".into(),
             tablet_left: false,
             tablet_keep_shape: true,
             tablet_firmness: 1.0,
+            tablet_tip: 0.04,
+            tablet_full: 0.9,
             tablet_lower: "right".into(),
             tablet_upper: "middle".into(),
             snap_drag: true,
@@ -560,6 +577,7 @@ impl Default for Config {
             file_manager: "cascade".into(),
             photo_viewer: "auto".into(),
             start_show_profile: true,
+            profile_picture: String::new(),
             start_show_cascade: true,
             start_places: [true; 8],
             start_show_all_apps: true,
@@ -774,12 +792,16 @@ impl Config {
                 "super_drag" => set_b(&mut c.super_drag),
                 "min_animation" => set_b(&mut c.min_animation),
                 "wobbly" => set_b(&mut c.wobbly),
+                "wobbly_strength" => set_f(&mut c.wobbly_strength, 0.3, 2.0),
+                "wobbly_friction" => set_f(&mut c.wobbly_friction, 0.1, 1.0),
                 "tablet" => set_b(&mut c.tablet),
                 "tablet_mode" if matches!(v, "ink" | "mouse") => c.tablet_mode = v.into(),
                 "tablet_screen" if matches!(v, "all" | "main") => c.tablet_screen = v.into(),
                 "tablet_left" => set_b(&mut c.tablet_left),
                 "tablet_keep_shape" => set_b(&mut c.tablet_keep_shape),
                 "tablet_firmness" => set_f(&mut c.tablet_firmness, 0.3, 3.0),
+                "tablet_tip" => set_f(&mut c.tablet_tip, 0.0, 0.3),
+                "tablet_full" => set_f(&mut c.tablet_full, 0.4, 1.0),
                 "tablet_lower" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_lower = v.into(),
                 "tablet_upper" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_upper = v.into(),
                 "snap_drag" => set_b(&mut c.snap_drag),
@@ -837,6 +859,7 @@ impl Config {
                 "file_manager" if matches!(v, "cascade" | "explorer") => c.file_manager = v.into(),
                 "photo_viewer" if matches!(v, "auto" | "cascade" | "windows") => c.photo_viewer = v.into(),
                 "start_show_profile" => set_b(&mut c.start_show_profile),
+                "profile_picture" => c.profile_picture = v.to_string(),
                 "start_show_cascade" => set_b(&mut c.start_show_cascade),
                 _ if place_index(k).is_some() => {
                     if let (Some(i), Some(on)) = (place_index(k), parse_bool(v)) {
@@ -952,12 +975,16 @@ impl Config {
             "super_drag" => b(self.super_drag),
             "min_animation" => b(self.min_animation),
             "wobbly" => b(self.wobbly),
+            "wobbly_strength" => self.wobbly_strength.to_string(),
+            "wobbly_friction" => self.wobbly_friction.to_string(),
             "tablet" => b(self.tablet),
             "tablet_mode" => self.tablet_mode.clone(),
             "tablet_screen" => self.tablet_screen.clone(),
             "tablet_left" => b(self.tablet_left),
             "tablet_keep_shape" => b(self.tablet_keep_shape),
             "tablet_firmness" => self.tablet_firmness.to_string(),
+            "tablet_tip" => self.tablet_tip.to_string(),
+            "tablet_full" => self.tablet_full.to_string(),
             "tablet_lower" => self.tablet_lower.clone(),
             "tablet_upper" => self.tablet_upper.clone(),
             "snap_drag" => b(self.snap_drag),
@@ -1013,6 +1040,7 @@ impl Config {
             "photo_viewer" => self.photo_viewer.clone(),
             "start_show_pinned" => b(self.start_show_pinned),
             "start_show_profile" => b(self.start_show_profile),
+            "profile_picture" => self.profile_picture.clone(),
             "start_show_cascade" => b(self.start_show_cascade),
             _ if place_index(key).is_some() => b(self.start_places[place_index(key).unwrap_or(0)]),
             "start_show_all_apps" => b(self.start_show_all_apps),

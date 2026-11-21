@@ -132,7 +132,7 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
             lpfnWndProc: Some(proc),
             hInstance: instance,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hIcon: crate::shell::app_icon(32).unwrap_or_default(),
+            hIcon: crate::appicons::hicon("Cascade.Snip", 32).unwrap_or_default(),
             lpszClassName: w!("CascadeSnipEditor"),
             ..Default::default()
         };
@@ -160,6 +160,8 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
         ) else {
             return;
         };
+        // Its own taskbar button and icon, not Cascade's.
+        crate::appwin::identity(hwnd, "Cascade.Snip");
         let image = Rc::new(Image { w, h, pixels });
         let bitmap = bitmap_of(&image);
         let status = match &saved {

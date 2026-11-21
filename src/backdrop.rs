@@ -57,6 +57,9 @@ fn set_composition() -> Option<SetWindowCompositionAttribute> {
 
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
+/// A see-through window in the gradient's colour: with no colour, nothing
+/// at all (clear glass, whose tint the panel paints).
+const ACCENT_ENABLE_TRANSPARENTGRADIENT: u32 = 2;
 const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
@@ -157,6 +160,7 @@ impl Backdrop {
                 Glass::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
                 Glass::Blur => ACCENT_ENABLE_BLURBEHIND,
                 Glass::Solid => ACCENT_DISABLED,
+                Glass::Clear => ACCENT_ENABLE_TRANSPARENTGRADIENT,
             },
             flags: 0,
             // ABGR, as the API wants it.

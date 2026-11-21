@@ -83,6 +83,45 @@ pub const INSTALLING: usize = 3;
 pub const INSTALLED: usize = 4;
 pub const FAILED: usize = 5;
 pub const NO_ACCESS: usize = 6;
+/// A check asked for found nothing newer (lParam: the build running).
+pub const CHECKED: usize = 8;
+
+/// The newest build found that's newer than this one (0: none found).
+static AVAILABLE_BUILD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// What the last check said, for Settings.
+static STATUS: Mutex<String> = Mutex::new(String::new());
+
+/// The newer build found, if one was.
+pub fn available() -> u32 {
+    AVAILABLE_BUILD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_available(build: u32) {
+    AVAILABLE_BUILD.store(build, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the last check found (empty before any).
+pub fn status() -> String {
+    STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn set_status(s: impl Into<String>) {
+    *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = s.into();
+}
+
+/// Looks for a newer build now (Settings' Check for updates): posts
+/// AVAILABLE, CHECKED, NO_ACCESS or FAILED.
+pub fn spawn_check() {
+    std::thread::spawn(move || {
+        let (channel, token) = setup();
+        match latest(&channel, &token) {
+            Ok(r) if wanted(&r, &channel) => msg::post(msg::UPDATE, AVAILABLE, r.build as isize),
+            Ok(_) => msg::post(msg::UPDATE, CHECKED, current() as isize),
+            Err(true) => msg::post(msg::UPDATE, NO_ACCESS, 0),
+            Err(false) => msg::post(msg::UPDATE, FAILED, 0),
+        };
+    });
+}
 /// With FAILED, in lparam: the step that failed (0: reading the release).
 pub const FAIL_DOWNLOAD: isize = 1;
 pub const FAIL_REPLACE: isize = 2;

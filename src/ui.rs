@@ -791,6 +791,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.on_hotkey(wp.0 as i32));
             return LRESULT(0);
         }
+        msg::SNIP => {
+            with_app(|a| crate::snip::start(a.instance, false));
+            return LRESULT(0);
+        }
         msg::DESKTOP => {
             with_app(|a| a.on_desktop_focus());
             return LRESULT(0);
@@ -1081,6 +1085,8 @@ fn setting_value(cfg: &Config, key: &str) -> String {
         // Not a setting: whether there's a battery (see `settings::shown`).
         "battery" => battery().is_some().to_string(),
         "update_branch" => update::channel_label(&cfg.update_branch),
+        // Not a setting: whether a newer build was found (Settings shows Update now then).
+        "update_available" => (update::available() > 0).to_string(),
         "ducker_targets" if cfg.ducker_targets.trim().is_empty() => "Every other app".into(),
         _ => cfg.get(key),
     }
@@ -1462,7 +1468,7 @@ impl App {
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
         crate::minanim::configure(self.cfg.min_animation);
-        crate::wobble::configure(self.cfg.wobbly);
+        crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
@@ -1597,7 +1603,6 @@ impl App {
                 (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
                 // A window dragged to another screen (its taskbar shows it).
                 (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
-                (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
                 (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
             ];
             for (lo, hi) in ranges {
@@ -1605,6 +1610,22 @@ impl App {
                 if !h.is_invalid() {
                     self.hooks.push(h);
                 }
+            }
+            // Minimising, Cascade's own windows too (Settings, Files, the apps):
+            // they go into their buttons like any other.
+            let h = unsafe {
+                SetWinEventHook(
+                    EVENT_SYSTEM_MINIMIZESTART,
+                    EVENT_SYSTEM_MINIMIZEEND,
+                    None,
+                    Some(win_event),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                )
+            };
+            if !h.is_invalid() {
+                self.hooks.push(h);
             }
         } else if !hooks_wanted {
             for h in self.hooks.drain(..) {
@@ -2949,7 +2970,12 @@ impl App {
                     );
                 }
             }
+            update::CHECKED => {
+                update::set_status(format!("You're up to date: build {build} is the newest."));
+            }
             update::AVAILABLE => {
+                update::set_available(build);
+                update::set_status(format!("Build {build} is ready to install."));
                 if self.update_available != Some(build) {
                     self.update_available = Some(build);
                     self.notify(
@@ -2961,6 +2987,7 @@ impl App {
             }
             update::UP_TO_DATE => {
                 self.updating = false;
+                update::set_status(format!("You're up to date: build {build} is the newest."));
                 self.notify(format!("Cascade is up to date (build {build})"), GREEN, true);
             }
             update::INSTALLING => self.notify(format!("Downloading build {build}\u{2026}"), theme::accent(), false),
@@ -2973,6 +3000,7 @@ impl App {
             }
             update::NO_ACCESS => {
                 self.updating = false;
+                update::set_status("Couldn't reach GitHub (a private repo needs a GitHub token).");
                 self.notify(
                     "Can't reach the GitHub repo. If it is private, add a github_token in the config file.".into(),
                     Color(1.0, 0.45, 0.4, 1.0),
@@ -2986,12 +3014,17 @@ impl App {
                     update::FAIL_REPLACE => "couldn't replace cascade.exe",
                     _ => "couldn't read the release",
                 };
+                update::set_status(format!("Couldn't update: {why}."));
                 self.notify(
                     format!("Update failed: {why} (cascade.log says more) \u{2014} try again later"),
                     Color(1.0, 0.45, 0.4, 1.0),
                     true,
                 );
             }
+        }
+        // Settings shows what the check found.
+        if let Some(st) = &self.settings {
+            st.invalidate();
         }
     }
 
@@ -3482,12 +3515,9 @@ impl App {
             // Into (or out of) its button, where Windows won't show it going.
             if !crate::minanim::windows_animates() {
                 let button = std::iter::once(&self.dock).chain(self.screens.iter()).find_map(|d| d.min_rect(hwnd));
-                let place = if into {
-                    crate::minanim::normal_rect(hwnd)
-                } else {
-                    let mut r = RECT::default();
-                    unsafe { GetWindowRect(hwnd, &mut r).ok() }.map(|_| r)
-                };
+                // Where it sits when it's out: as the restore begins it's
+                // still parked off screen, so not where it is now.
+                let place = crate::minanim::normal_rect(hwnd);
                 if let (Some(button), Some(place)) = (button, place) {
                     crate::minanim::play(hwnd, place, button, into);
                 }
@@ -3821,7 +3851,7 @@ impl App {
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
         crate::minanim::configure(self.cfg.min_animation);
-        crate::wobble::configure(self.cfg.wobbly);
+        crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
@@ -4118,6 +4148,42 @@ impl App {
                 }
             }
             Change::Action("update_now") => self.on_menu(MenuCmd::Update),
+            // Any colour for the accent: Windows' colour picker, on a thread of
+            // its own (it's modal), then the config is read again.
+            Change::Action("accent_custom") => {
+                let owner = self.settings.as_ref().map_or(0, |s| s.hwnd.0 as isize);
+                let start = theme::parse_accent(&self.cfg.accent).unwrap_or(0x0078D4);
+                std::thread::spawn(move || {
+                    if let Some(c) = crate::rgb::app::pick_colour(HWND(owner as *mut _), start) {
+                        Config::set("accent", &format!("#{c:06X}"));
+                        msg::post(msg::RELOAD, 0, 0);
+                    }
+                });
+            }
+            // A picture for Start's account button (or back to Windows' own).
+            Change::Action("profile_picture_choose") => {
+                std::thread::spawn(|| {
+                    let _ = unsafe {
+                        windows::Win32::System::Com::CoInitializeEx(
+                            None,
+                            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                        )
+                    };
+                    let images = [("Pictures", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp")];
+                    if let Some(p) = shell::choose_file("Choose a profile picture", &images) {
+                        Config::set("profile_picture", &p.to_string_lossy());
+                        msg::post(msg::RELOAD, 0, 0);
+                    }
+                });
+            }
+            Change::Action("profile_picture_clear") => {
+                Config::set("profile_picture", "");
+                self.reload_config();
+            }
+            Change::Action("update_check_now") => {
+                update::set_status("Checking\u{2026}");
+                update::spawn_check();
+            }
             Change::Action("lighting_open") => {
                 if let Some(st) = &mut self.settings {
                     st.show_section(crate::settings::LIGHTING);
@@ -4149,6 +4215,10 @@ impl App {
             WM_TIMER if wp.0 == crate::settings::ANIM_TIMER => {
                 s.tick();
                 return Some(LRESULT(0));
+            }
+            WM_MOVE => {
+                s.moved();
+                return None;
             }
             WM_SIZE => {
                 s.on_size();

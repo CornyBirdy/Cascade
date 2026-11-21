@@ -56,7 +56,9 @@ struct Model {
     /// The tablet's size (mm) and its coordinates' range.
     size: (f32, f32),
     max: (f32, f32),
-    /// The raw pressure with the pen up (the reading falls as it's pressed).
+    /// About the raw pressure with the pen up (the reading falls as it's
+    /// pressed). Only a first guess: each pen rests a little differently, so
+    /// the driver learns the real one from the pen hovering (see `Calib`).
     pressure_rest: f32,
 }
 
@@ -131,6 +133,10 @@ pub struct Setup {
     pub keep_shape: bool,
     /// How firm the pressure is: 1 as it comes, above 1 needs more press.
     pub firmness: f32,
+    /// How hard the pen presses before it draws, and how hard is a full
+    /// press (0 to 1, of the pen's whole travel).
+    pub tip: f32,
+    pub full: f32,
     pub lower: Button,
     pub upper: Button,
 }
@@ -166,6 +172,8 @@ pub fn configure(cfg: &crate::config::Config) {
         left_handed: cfg.tablet_left,
         keep_shape: cfg.tablet_keep_shape,
         firmness: cfg.tablet_firmness.clamp(0.3, 3.0),
+        tip: cfg.tablet_tip.clamp(0.0, 0.3),
+        full: cfg.tablet_full.clamp(0.4, 1.0),
         lower: Button::parse(&cfg.tablet_lower),
         upper: Button::parse(&cfg.tablet_upper),
     };
@@ -302,10 +310,96 @@ struct Pen {
     /// 0..1 across and down the tablet.
     x: f32,
     y: f32,
-    /// 0..1.
-    pressure: f32,
+    /// The raw pressure reading (see `Calib`).
+    raw: f32,
     lower: bool,
     upper: bool,
+}
+
+/// The smallest travel a pen's pressure has, in raw readings: the full
+/// travel is learned as the pen is pressed harder than this.
+const SPAN_MIN: f32 = 500.0;
+
+/// Turns raw pressure readings into 0..1. The pen at rest doesn't read the
+/// same on every pen (nor exactly what OpenTabletDriver has), and taking the
+/// wrong rest is a pen that's always pressed. So the rest is learned: the
+/// pen comes into reach hovering, so its first readings are the rest, and a
+/// reading past the rest (it rested a little pressed) becomes the rest.
+#[derive(Clone, Copy, Debug)]
+struct Calib {
+    rest: f32,
+    span: f32,
+    /// Readings taken since the pen came into reach (the first few set the rest).
+    seen: u32,
+}
+
+impl Calib {
+    fn new(m: &Model) -> Calib {
+        Calib { rest: m.pressure_rest, span: SPAN_MIN, seen: 0 }
+    }
+
+    /// The pen went out of reach: the next readings start again.
+    fn away(&mut self) {
+        self.seen = 0;
+    }
+
+    /// How hard the pen presses, 0..1, from a raw reading.
+    fn level(&mut self, raw: f32) -> f32 {
+        if self.seen < 4 {
+            // Hovering as it comes into reach: the rest, but never deeper
+            // than a pen that was already resting higher.
+            self.rest = if self.seen == 0 { raw } else { self.rest.max(raw) };
+            self.seen += 1;
+            return 0.0;
+        }
+        self.seen += 1;
+        if raw > self.rest {
+            self.rest = raw;
+        }
+        let depth = self.rest - raw;
+        if depth > self.span {
+            self.span = depth;
+        }
+        (depth / self.span).clamp(0.0, 1.0)
+    }
+}
+
+/// What the pen is doing now, for Settings (its test pad and pressure graph).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Live {
+    /// In reach of the tablet.
+    pub near: bool,
+    /// Where it points (screen pixels).
+    pub x: i32,
+    pub y: i32,
+    /// How hard it presses, 0..1, before and after the pressure curve.
+    pub level: f32,
+    pub pressure: f32,
+    pub touching: bool,
+    /// Counts readings, so a change can be told.
+    pub seq: u64,
+}
+
+static LIVE: Mutex<Live> =
+    Mutex::new(Live { near: false, x: 0, y: 0, level: 0.0, pressure: 0.0, touching: false, seq: 0 });
+
+/// The pen as it is now.
+pub fn live() -> Live {
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn set_live(f: impl FnOnce(&mut Live)) {
+    let mut l = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut l);
+    l.seq = l.seq.wrapping_add(1);
+}
+
+/// The pressure curve: how hard the pen presses (`level`, 0..1) to the
+/// pressure apps get. Nothing up to the tip's threshold, everything from a
+/// full press, bent by the firmness in between.
+pub fn curve(level: f32, tip: f32, full: f32, firmness: f32) -> f32 {
+    let full = full.max(tip + 0.05);
+    ((level - tip) / (full - tip)).clamp(0.0, 1.0).powf(firmness)
 }
 
 /// A report from the pen interface, if it's a pen report.
@@ -317,13 +411,13 @@ fn parse(m: &Model, r: &[u8]) -> Option<Pen> {
             }
             let x = ((r[1] as u16) << 8 | r[2] as u16) as f32;
             let y = (((r[3] as u16) << 8 | r[4] as u16) as i16).max(0) as f32;
+            // A pen button down lifts the reading by 50 (as OpenTabletDriver takes it).
             let pressed = r[9] & 6 != 0;
             let raw = ((r[5] as u16) << 8 | r[6] as u16) as f32 - if pressed { 50.0 } else { 0.0 };
-            let pressure = ((m.pressure_rest - raw) / m.pressure_rest).clamp(0.0, 1.0);
             Some(Pen {
                 x: (x / m.max.0).clamp(0.0, 1.0),
                 y: (y / m.max.1).clamp(0.0, 1.0),
-                pressure,
+                raw,
                 lower: r[9] & 4 != 0,
                 upper: r[9] & 6 == 6,
             })
@@ -380,6 +474,7 @@ struct Out {
     upper: bool,
     pen: Option<HSYNTHETICPOINTERDEVICE>,
     frame: u32,
+    calib: Option<Calib>,
 }
 
 fn mouse(flags: MOUSE_EVENT_FLAGS, at: Option<POINT>) {
@@ -416,18 +511,38 @@ fn button(b: Button, down: bool, at: POINT) {
 impl Out {
     /// The pen moved (`Some`), or went out of reach (`None`).
     fn send(&mut self, m: &Model, s: &Setup, pen: Option<Pen>) {
+        let calib = self.calib.get_or_insert_with(|| Calib::new(m));
         let Some(pen) = pen else {
+            calib.away();
             if self.near {
                 if self.down {
                     self.contact(s, None, false, 0.0, false);
                 }
                 self.leave(s);
+                set_live(|l| {
+                    l.near = false;
+                    l.touching = false;
+                    l.level = 0.0;
+                    l.pressure = 0.0;
+                });
             }
             return;
         };
+        let level = calib.level(pen.raw);
         let at = place(m, s, &pen);
-        let pressure = pen.pressure.powf(s.firmness);
-        let touching = pressure > 0.02;
+        // Down past the tip's threshold, and up again only once well under
+        // it, so a pen held at the threshold doesn't flicker on and off.
+        let touching = if self.down { level > s.tip * 0.6 } else { level > s.tip };
+        // Touching always gives some pressure: the lightest stroke still draws.
+        let pressure = if touching { curve(level, s.tip, s.full, s.firmness).max(1.0 / 1024.0) } else { 0.0 };
+        set_live(|l| {
+            l.near = true;
+            l.x = at.x;
+            l.y = at.y;
+            l.level = level;
+            l.pressure = pressure;
+            l.touching = touching;
+        });
         let eraser = (pen.lower && s.lower == Button::Eraser) || (pen.upper && s.upper == Button::Eraser);
         // The buttons that stand for mouse buttons.
         for (now, was, b) in [(pen.lower, self.lower, s.lower), (pen.upper, self.upper, s.upper)] {
@@ -645,6 +760,8 @@ fn default_setup() -> Setup {
         left_handed: false,
         keep_shape: true,
         firmness: 1.0,
+        tip: 0.04,
+        full: 0.9,
         lower: Button::Right,
         upper: Button::Middle,
     }
@@ -666,15 +783,44 @@ mod tests {
         r[6] = rest as u8;
         let p = parse(m, &r).unwrap();
         assert!((p.x - 2048.0 / 4095.0).abs() < 1e-4 && (p.y - 1024.0 / 4095.0).abs() < 1e-4);
-        assert!(p.pressure < 0.01 && !p.lower && !p.upper);
-        // Pressed hard, with the lower button.
-        r[5] = 0;
-        r[6] = 100;
+        assert!((p.raw - m.pressure_rest).abs() < 0.5 && !p.lower && !p.upper);
+        // With the lower button: the reading's 50 higher, taken off again.
         r[9] = 4;
         let p = parse(m, &r).unwrap();
-        assert!(p.pressure > 0.9 && p.lower && !p.upper);
+        assert!((p.raw - (m.pressure_rest - 50.0)).abs() < 0.5 && p.lower && !p.upper);
         // Not a pen report.
         r[11] = 0x33;
         assert!(parse(m, &r).is_none());
+    }
+
+    #[test]
+    fn learns_where_the_pen_rests() {
+        let m = &MODELS[0];
+        let mut c = Calib::new(m);
+        // This pen hovers well under the usual rest: not pressed.
+        for raw in [1500.0, 1502.0, 1499.0, 1501.0] {
+            assert_eq!(c.level(raw), 0.0);
+        }
+        assert!(c.level(1500.0) < 0.01);
+        // Pressed: deeper is harder, and the travel grows past the least.
+        assert!((c.level(1250.0) - 0.5).abs() < 0.02);
+        assert!(c.level(700.0) > 0.99);
+        assert!((c.level(1100.0) - 0.5).abs() < 0.02);
+        // Out of reach and back, resting a little higher now.
+        c.away();
+        for raw in [1520.0, 1521.0, 1520.0, 1519.0] {
+            c.level(raw);
+        }
+        assert!(c.level(1520.0) < 0.01);
+    }
+
+    #[test]
+    fn the_pressure_curve() {
+        assert_eq!(curve(0.02, 0.04, 0.9, 1.0), 0.0);
+        assert_eq!(curve(0.95, 0.04, 0.9, 1.0), 1.0);
+        let mid = curve(0.47, 0.04, 0.9, 1.0);
+        assert!((mid - 0.5).abs() < 0.01);
+        // Firmer: the same press gives less.
+        assert!(curve(0.47, 0.04, 0.9, 2.0) < mid);
     }
 }

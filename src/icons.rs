@@ -51,7 +51,10 @@ pub fn spawn() -> Sender<String> {
             // One of Cascade's own apps: its name and Windows' icon for it.
             if let Some(aumid) = id.strip_prefix("cascade-app:") {
                 let name = crate::appwin::own_app(aumid).map(|a| a.0.to_string()).unwrap_or_default();
-                let pixels = match (&wic, crate::appwin::own_app_icon(aumid, true)) {
+                // Drawn at the size wanted, so it fits its slot exactly.
+                let drawn = crate::appicons::pixels(aumid, ICON_SIZE);
+                let pixels = match (&wic, drawn.is_none().then(|| crate::appwin::own_app_icon(aumid, true)).flatten()) {
+                    _ if drawn.is_some() => drawn.unwrap_or_default(),
                     (Some(wic), Some(icon)) => {
                         let r = wic.CreateBitmapFromHICON(icon).and_then(|b| to_pixels(wic, &b)).unwrap_or_default();
                         let _ = DestroyIcon(icon);

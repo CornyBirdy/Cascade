@@ -256,7 +256,7 @@ fn ease_out(t: f32) -> f32 {
 }
 
 /// Windows' colour picker, starting at `c` (0xRRGGBB).
-fn pick_colour(owner: HWND, c: u32) -> Option<u32> {
+pub(crate) fn pick_colour(owner: HWND, c: u32) -> Option<u32> {
     use windows::Win32::UI::Controls::Dialogs::*;
     static CUSTOM: Mutex<[u32; 16]> = Mutex::new([0x00FFFFFF; 16]);
     let mut custom = CUSTOM.lock().unwrap_or_else(|e| e.into_inner());
