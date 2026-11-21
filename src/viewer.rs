@@ -612,6 +612,7 @@ pub fn run(path: Option<String>) {
     let Some(path) = path.map(PathBuf::from) else { return };
     let Ok(gfx) = Gfx::new() else { return };
     let Some(hwnd) = appwin::create(w!("CascadePhotos"), "Photos", 1100, 760, Some(proc)) else { return };
+    appwin::identity(hwnd, "Cascade.Photos");
     let files = siblings(&path);
     let at = files.iter().position(|p| *p == path).unwrap_or(0);
     STATE.with(|s| {

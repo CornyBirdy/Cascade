@@ -48,6 +48,23 @@ pub fn spawn() -> Sender<String> {
         // cache keeps showing the old picture after an update swaps the file.
         let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_lowercase());
         while let Ok(id) = rx.recv() {
+            // One of Cascade's own apps: its name and Windows' icon for it.
+            if let Some(aumid) = id.strip_prefix("cascade-app:") {
+                let name = crate::appwin::own_app(aumid).map(|a| a.0.to_string()).unwrap_or_default();
+                let pixels = match (&wic, crate::appwin::own_app_icon(aumid, true)) {
+                    (Some(wic), Some(icon)) => {
+                        let r = wic.CreateBitmapFromHICON(icon).and_then(|b| to_pixels(wic, &b)).unwrap_or_default();
+                        let _ = DestroyIcon(icon);
+                        r
+                    }
+                    _ => Vec::new(),
+                };
+                let ptr = Box::into_raw(Box::new(IconResult { id, name, pixels }));
+                if !msg::post(msg::ICON, 0, ptr as isize) {
+                    drop(Box::from_raw(ptr));
+                }
+                continue;
+            }
             let item: Option<IShellItem> = SHCreateItemFromParsingName(&HSTRING::from(id.as_str()), None).ok();
             let is_own = own.as_deref() == Some(id.to_lowercase().as_str());
             let pixels = match (&item, &wic) {

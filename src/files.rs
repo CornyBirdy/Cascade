@@ -162,6 +162,11 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 
 /// Loads finished on worker threads: (generation, items).
 static LOADS: Mutex<Vec<(u32, Vec<Item>)>> = Mutex::new(Vec::new());
+/// Folder sizes worked out: (listing, folder, size).
+static SIZES: Mutex<Vec<(u32, String, u64)>> = Mutex::new(Vec::new());
+/// The listing whose folders are being sized (an older sizing stops).
+static SIZING: AtomicU32 = AtomicU32::new(0);
+const SIZED: u32 = WM_APP + 105;
 static NEXT_GEN: AtomicU32 = AtomicU32::new(1);
 /// The folder being watched for changes (its generation; a newer one stops the old watcher).
 static WATCH_GEN: AtomicU32 = AtomicU32::new(0);
@@ -442,8 +447,100 @@ impl State {
             tab.items = items;
             tab.loading = false;
         }
+        self.size_folders();
         self.resort();
         appwin::redraw(self.hwnd);
+    }
+
+    /// Works out how big each folder in the current one is, as TreeSize
+    /// does: at once from the instant-search index when it's running (it
+    /// keeps every folder's total), else by adding up each folder's files
+    /// in the background, one folder at a time, biggest news first.
+    fn size_folders(&mut self) {
+        let t = self.t();
+        let Some(dir) = t.loc.dir() else { return };
+        let generation = t.generation;
+        let folders: Vec<String> =
+            t.items.iter().filter(|i| i.folder && i.space.is_none()).map(|i| i.path.clone()).collect();
+        if folders.is_empty() {
+            return;
+        }
+        SIZING.store(generation, Ordering::Release);
+        let hwnd = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let post = |path: String, size: u64| {
+                if let Ok(mut s) = SIZES.lock() {
+                    s.push((generation, path, size));
+                }
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), SIZED, WPARAM(0), LPARAM(0));
+                }
+            };
+            if let Some((_, kids)) = crate::fileindex::children(&dir) {
+                let base = dir.trim_end_matches('\\').to_string();
+                for (name, is_dir, size) in kids {
+                    if is_dir {
+                        post(format!("{base}\\{name}"), size);
+                    }
+                }
+                return;
+            }
+            for f in folders {
+                let mut total = 0u64;
+                let mut stack = vec![std::path::PathBuf::from(&f)];
+                while let Some(d) = stack.pop() {
+                    if SIZING.load(Ordering::Acquire) != generation {
+                        return;
+                    }
+                    let Ok(list) = std::fs::read_dir(&d) else { continue };
+                    for e in list.flatten() {
+                        let Ok(m) = e.metadata() else { continue };
+                        // Links and junctions point elsewhere: not counted twice.
+                        if m.file_type().is_symlink() {
+                            continue;
+                        }
+                        if m.is_dir() {
+                            stack.push(e.path());
+                        } else {
+                            total += m.len();
+                        }
+                    }
+                }
+                post(f, total);
+            }
+        });
+    }
+
+    fn sized(&mut self) {
+        let done: Vec<(u32, String, u64)> = SIZES.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+        for (generation, path, size) in done {
+            let Some(tab) = self.tabs.iter_mut().find(|t| t.generation == generation) else { continue };
+            if let Some(item) = tab.items.iter_mut().find(|i| i.folder && i.path.eq_ignore_ascii_case(&path)) {
+                item.size = Some(size);
+            }
+        }
+        if self.sort.0 == 3 {
+            self.resort();
+        }
+        appwin::redraw(self.hwnd);
+    }
+
+    /// The icon of sidebar entry `i` (Windows' own, in colour).
+    fn side_icon(&mut self, i: usize) -> Option<ID2D1Bitmap> {
+        let target = match &self.side[i].2 {
+            Loc::Home => "::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}".to_string(),
+            Loc::Path(p) => p.clone(),
+            Loc::Shell(name, _) => name.clone(),
+            Loc::Search(..) => return None,
+        };
+        let key = format!("side:{target}");
+        if let Some(b) = self.icons.get(&key) {
+            return b.clone();
+        }
+        if self.asked.insert(key.clone()) {
+            let _ = self.icon_tx.send((key, target, false));
+        }
+        None
     }
 
     fn resort(&mut self) {
@@ -994,13 +1091,23 @@ impl State {
                 (pos, self.icon_for(i, big))
             })
             .collect();
+        let side: Vec<Option<ID2D1Bitmap>> = (0..self.side.len()).map(|i| self.side_icon(i)).collect();
         let hwnd = self.hwnd;
         let Some(mut gfx) = self.gfx.take() else { return };
-        appwin::paint(hwnd, &mut gfx, |p, f, w, h| self.draw(p, f, w, h, &icons));
+        appwin::paint(hwnd, &mut gfx, |p, f, w, h| self.draw(p, f, w, h, &icons, &side));
         self.gfx = Some(gfx);
     }
 
-    fn draw(&self, p: &Painter, f: &crate::gfx::Fonts, w: f32, h: f32, icons: &[(usize, Option<ID2D1Bitmap>)]) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &self,
+        p: &Painter,
+        f: &crate::gfx::Fonts,
+        w: f32,
+        h: f32,
+        icons: &[(usize, Option<ID2D1Bitmap>)],
+        side: &[Option<ID2D1Bitmap>],
+    ) {
         let accent = theme::accent();
         let hov = self.hovered;
         let ic = f.icons.as_ref();
@@ -1103,8 +1210,18 @@ impl State {
             if on {
                 p.rrect(6.0, y + 8.0, 3.0, 14.0, 1.5, accent);
             }
-            glyph_at(*g as u32, 16.0, y + 7.0, 16.0, Color::white(0.8));
+            match side.get(i).cloned().flatten() {
+                Some(b) => p.image(&b, 15.0, y + 6.0, 18.0, 18.0, 1.0),
+                None => glyph_at(*g as u32, 16.0, y + 7.0, 16.0, Color::white(0.8)),
+            }
             p.text(name, &f.body, 42.0, y, SIDE_W - 52.0, 30.0, Align::Left, Color::white(0.9));
+            // A line between your folders, the drives and the rest, as Explorer has.
+            let next = self.side.get(i + 1).map(|s| &s.2);
+            let group_ends = matches!((loc, next), (Loc::Path(_), Some(Loc::Shell(..))))
+                || (i == 6 && matches!(next, Some(Loc::Shell(..)) | Some(Loc::Path(_))));
+            if group_ends {
+                p.line(16.0, y + 31.0, SIDE_W - 16.0, y + 31.0, Color::white(0.07), 1.0);
+            }
         }
         // Content.
         let (x0, cy0, cw, chh) = self.content();
@@ -1144,6 +1261,7 @@ impl State {
         p.unclip();
         let top = self.rows_top();
         p.clip(x0, top, cw, chh - (top - cy0));
+        let biggest = t.items.iter().filter(|i| i.folder).filter_map(|i| i.size).max().unwrap_or(0);
         for (pos, bmp) in icons {
             let i = t.order[*pos];
             let item = &t.items[i];
@@ -1171,8 +1289,22 @@ impl State {
                     };
                     for (k, text) in [&item.date, &item.kind, &size].iter().enumerate() {
                         let cwid = COLS[k + 1].1;
+                        if k == 2 {
+                            // TreeSize's bars: a folder's share of the biggest here; a drive's fill.
+                            let (bx, bw) = (cx + 8.0, cwid - 14.0);
+                            if let Some((free, total)) = item.space {
+                                let used = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
+                                let c = if used > 0.9 { Color(0.9, 0.3, 0.28, 1.0) } else { accent };
+                                p.rrect(bx, iy + ih - 7.0, bw, 3.0, 1.5, Color::white(0.1));
+                                p.rrect(bx, iy + ih - 7.0, bw * used, 3.0, 1.5, c);
+                            } else if let (true, Some(sz)) = (item.folder, item.size) {
+                                let share = sz as f32 / biggest.max(1) as f32;
+                                p.rrect(bx, iy + 5.0, (bw * share).max(2.0), ih - 10.0, 3.0, accent.alpha(0.22));
+                            }
+                        }
                         let align = if k == 2 && item.space.is_none() { Align::Right } else { Align::Left };
-                        p.text(text, &f.small, cx + 10.0, iy, cwid - 18.0, ih, align, Color::white(0.6));
+                        let ink = if k == 2 && item.folder && item.size.is_some() { 0.8 } else { 0.6 };
+                        p.text(text, &f.small, cx + 10.0, iy, cwid - 18.0, ih, align, Color::white(ink));
                         cx += cwid;
                     }
                 }
@@ -1184,7 +1316,8 @@ impl State {
                     if let Some((free, total)) = item.space {
                         let frac = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
                         p.rrect(ix + 12.0, iy + 80.0, iw - 24.0, 4.0, 2.0, Color::white(0.12));
-                        p.rrect(ix + 12.0, iy + 80.0, (iw - 24.0) * frac, 4.0, 2.0, accent);
+                        let c = if frac > 0.9 { Color(0.9, 0.3, 0.28, 1.0) } else { accent };
+                        p.rrect(ix + 12.0, iy + 80.0, (iw - 24.0) * frac, 4.0, 2.0, c);
                     }
                     p.text_wrap(&item.name, &f.small, ix + 4.0, iy + 86.0, iw - 8.0, 30.0, Color::white(0.95 * alpha));
                 }
@@ -1900,6 +2033,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         ICONS => {
             with(|s| s.icons_arrived());
         }
+        SIZED => {
+            with(|s| s.sized());
+        }
         msg::DESK_MENU_SHOW => {
             crate::deskicons::show_asked(hwnd);
         }
@@ -1996,6 +2132,7 @@ pub fn run(start: Option<String>) {
     let Ok(gfx) = Gfx::new() else { return };
     let Some(hwnd) = appwin::create(w!("CascadeFiles"), "Files", 1200, 760, Some(proc)) else { return };
     appwin::frameless(hwnd);
+    appwin::identity(hwnd, "Cascade.Files");
     // Shell menus and their commands report back to this window (see `deskicons::item_menu`).
     msg::set_target(hwnd);
     let loc = start.as_deref().and_then(Loc::parse).unwrap_or(Loc::Home);

@@ -996,6 +996,11 @@ pub fn signal_running_instance() {
 }
 
 pub fn open(target: &str) {
+    // One of Cascade's own apps, as the taskbar knows it.
+    if let Some((_, flag, _)) = target.strip_prefix("cascade-app:").and_then(crate::appwin::own_app) {
+        crate::appwin::launch(&[flag]);
+        return;
+    }
     if crate::shellmode::active() {
         crate::shellmode::open(target, false);
         return;

@@ -294,3 +294,58 @@ pub fn caption_press(hwnd: HWND, b: u8) {
         let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(cmd as usize), LPARAM(0));
     }
 }
+
+// ------------------------------------------------------- app identities --
+//
+// Each of Cascade's apps is its own app on the taskbar (Windows' and
+// Cascade's), with its own icon, rather than all being "Cascade": each
+// window says which it is (its AppUserModelID), and `shell::open` starts one
+// from that id.
+
+/// Cascade's apps as the taskbar knows them: (AppUserModelID, name, how it's started, its icon).
+pub const OWN_APPS: [(&str, &str, &str, i32); 3] = [
+    ("Cascade.Files", "Files", "--files", 3),         // SIID_FOLDER
+    ("Cascade.Photos", "Photos", "--view", 72),       // SIID_IMAGEFILES
+    ("Cascade.DiskUsage", "Disk Usage", "--disk", 8), // SIID_DRIVEFIXED
+];
+
+/// The taskbar's id for one of Cascade's apps (`cascade-app:<AppUserModelID>`).
+pub fn own_app_id(aumid: &str) -> String {
+    format!("cascade-app:{aumid}")
+}
+
+/// Cascade's app `aumid`: its name, the flag that starts it and its icon.
+pub fn own_app(aumid: &str) -> Option<(&'static str, &'static str, i32)> {
+    OWN_APPS.iter().find(|a| a.0.eq_ignore_ascii_case(aumid)).map(|a| (a.1, a.2, a.3))
+}
+
+/// The icon of Cascade's app `aumid` (`large` or small), from Windows' own set.
+pub fn own_app_icon(aumid: &str, large: bool) -> Option<HICON> {
+    use windows::Win32::UI::Shell::*;
+    let (_, _, stock) = own_app(aumid)?;
+    let mut info = SHSTOCKICONINFO { cbSize: std::mem::size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
+    let size = if large { SHGSI_LARGEICON } else { SHGSI_SMALLICON };
+    unsafe { SHGetStockIconInfo(SHSTOCKICONID(stock), SHGSI_ICON | size, &mut info).ok()? };
+    (!info.hIcon.is_invalid()).then_some(info.hIcon)
+}
+
+/// Marks `hwnd` as Cascade's app `aumid`: its own taskbar button and icon.
+pub fn identity(hwnd: HWND, aumid: &str) {
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    const PKEY_APP_USER_MODEL_ID: windows::Win32::Foundation::PROPERTYKEY = windows::Win32::Foundation::PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+        pid: 5,
+    };
+    unsafe {
+        if let Ok(store) = SHGetPropertyStoreForWindow::<IPropertyStore>(hwnd) {
+            let value = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from(aumid);
+            let _ = store.SetValue(&PKEY_APP_USER_MODEL_ID, &value);
+            let _ = store.Commit();
+        }
+        for (large, which) in [(true, ICON_BIG), (false, ICON_SMALL)] {
+            if let Some(icon) = own_app_icon(aumid, large) {
+                SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+            }
+        }
+    }
+}

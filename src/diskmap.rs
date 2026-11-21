@@ -523,6 +523,7 @@ pub fn run(start: Option<String>) {
     appwin::init();
     let Ok(gfx) = Gfx::new() else { return };
     let Some(hwnd) = appwin::create(w!("CascadeDisk"), "Disk usage", 1180, 760, Some(proc)) else { return };
+    appwin::identity(hwnd, "Cascade.DiskUsage");
     let path = PathBuf::from(start.unwrap_or_else(|| "C:\\".into()));
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {

@@ -579,8 +579,18 @@ pub fn window_app_id(h: HWND) -> Option<String> {
     if path.to_ascii_lowercase().ends_with("\\applicationframehost.exe") {
         app_user_model_id(h).map(|a| format!("shell:AppsFolder\\{a}"))
     } else {
-        Some(path)
+        Some(own_app_of(h, &path).unwrap_or(path))
     }
+}
+
+/// One of Cascade's own apps (Files, Photos...) as its own app, not "Cascade".
+fn own_app_of(h: HWND, path: &str) -> Option<String> {
+    let own = std::env::current_exe().ok()?;
+    if !own.to_string_lossy().eq_ignore_ascii_case(path) {
+        return None;
+    }
+    let aumid = app_user_model_id(h)?;
+    crate::appwin::own_app(&aumid).map(|_| crate::appwin::own_app_id(&aumid))
 }
 
 pub(crate) fn app_user_model_id(h: HWND) -> Option<String> {
@@ -1233,7 +1243,7 @@ impl Dock {
                     None => continue,
                 }
             } else {
-                path
+                own_app_of(h, &path).unwrap_or(path)
             };
             match self.apps.iter_mut().find(|a| a.id.eq_ignore_ascii_case(&id)) {
                 Some(a) => a.windows.push(h),
