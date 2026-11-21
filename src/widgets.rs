@@ -37,7 +37,7 @@ const NOTIF_MAX: usize = 5;
 const CLIP_MAX: usize = 5;
 const CLIP_ROW: f32 = 30.0;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Card {
     Notifications,
     Media,
@@ -86,6 +86,41 @@ pub fn from_phone(aumid: &str) -> bool {
     crate::media::is_phone(aumid)
 }
 
+/// A card's look, set in edit mode: how big it's drawn and its corners
+/// (0 rounded, 1 square, 2 round).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Style {
+    scale: f32,
+    shape: u8,
+}
+
+const SCALES: [f32; 4] = [0.8, 0.9, 1.0, 1.15];
+
+impl Default for Style {
+    fn default() -> Self {
+        Style { scale: 1.0, shape: 0 }
+    }
+}
+
+impl Style {
+    fn radius(self) -> f32 {
+        [10.0, 3.0, 20.0][self.shape as usize % 3]
+    }
+}
+
+/// "media:1.15:1,system:0.9:0" -> each card's look.
+fn parse_styles(list: &str) -> Vec<(Card, Style)> {
+    list.split(',')
+        .filter_map(|part| {
+            let mut p = part.trim().split(':');
+            let card = parse_cards(p.next()?).into_iter().next()?;
+            let scale = p.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(0.7, 1.3);
+            let shape = p.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0) % 3;
+            Some((card, Style { scale, shape }))
+        })
+        .collect()
+}
+
 /// "media,system" -> the cards, in that order (unknown names and repeats ignored).
 fn parse_cards(list: &str) -> Vec<Card> {
     let mut out = Vec::new();
@@ -109,6 +144,12 @@ fn parse_cards(list: &str) -> Vec<Card> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
+    /// Edit mode on and off (the header's pencil, or Done).
+    Edit,
+    /// Edit mode's buttons on a card: smaller, bigger, the next shape.
+    Smaller(Card),
+    Bigger(Card),
+    Shape(Card),
     Prev,
     Play,
     Next,
@@ -131,6 +172,8 @@ enum Target {
 }
 
 pub enum Action {
+    /// A card's size or shape changed in edit mode: the `widgets_style` setting.
+    Style(String),
     Previous,
     PlayPause,
     Next,
@@ -182,8 +225,11 @@ pub struct Widgets {
     known_h: f32,
     /// The clipboard item that was just copied again.
     copied: Option<String>,
-    /// Where each card was drawn last (card, x, y, height), for picking one up.
-    rects: Vec<(Card, f32, f32, f32)>,
+    /// Where each card was drawn last (card, x, y, width, height), for picking one up.
+    rects: Vec<(Card, f32, f32, f32, f32)>,
+    /// Each card's size and shape (see `Style`), and whether they're being edited.
+    styles: Vec<(Card, Style)>,
+    editing: bool,
     drag: Option<Drag>,
     hovered: Option<Target>,
     tracking: bool,
@@ -325,9 +371,9 @@ fn phone_items<'a>(ctx: &'a Ctx) -> impl Iterator<Item = &'a crate::notification
     ctx.notifs.items.iter().filter(|n| from_phone(&n.aumid)).take(PHONE_MAX)
 }
 
-/// Each card's place (card, x, y, height) and the panel's size.
+/// Each card's place (card, x, y, width, height) and the panel's size.
 struct Layout {
-    cards: Vec<(Card, f32, f32, f32)>,
+    cards: Vec<(Card, f32, f32, f32, f32)>,
     w: f32,
     h: f32,
     /// How tall it would be in one column.
@@ -351,6 +397,8 @@ impl Widgets {
             known_h: 0.0,
             copied: None,
             rects: Vec::new(),
+            styles: Vec::new(),
+            editing: false,
             drag: None,
             hovered: None,
             tracking: false,
@@ -383,9 +431,11 @@ impl Widgets {
     /// Opens with its right edge at screen x `right`, just above `bottom`,
     /// at most `max_h` screen pixels tall (two columns if one is too tall).
     /// `notifications` puts the Notifications card first.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         cards: &str,
+        styles: &str,
         notifications: bool,
         columns: u32,
         right: i32,
@@ -394,10 +444,13 @@ impl Widgets {
         k: f32,
     ) {
         self.cards = parse_cards(cards);
+        self.styles = parse_styles(styles);
         self.notif_top.snap(0.0);
         self.clip_top.snap(0.0);
-        self.cards.retain(|&c| c != Card::Notifications);
-        if notifications {
+        // Notifications go wherever they were put (first, if never moved).
+        if !notifications {
+            self.cards.retain(|&c| c != Card::Notifications);
+        } else if !self.cards.contains(&Card::Notifications) {
             self.cards.insert(0, Card::Notifications);
         }
         self.columns = columns.clamp(1, 2) as usize;
@@ -409,6 +462,7 @@ impl Widgets {
         self.copied = None;
         self.drag = None;
         if !self.visible {
+            self.editing = false;
             // Opened afresh: back to today on the calendar.
             self.cal_month = 0;
             self.cal_day = None;
@@ -433,6 +487,29 @@ impl Widgets {
             self.backdrop.hide();
             self.dirty = true;
         }
+    }
+
+    fn style(&self, card: Card) -> Style {
+        self.styles.iter().find(|s| s.0 == card).map(|s| s.1).unwrap_or_default()
+    }
+
+    /// The `widgets_style` setting for the looks as they are.
+    fn styles_text(&self) -> String {
+        self.styles
+            .iter()
+            .filter(|(_, s)| *s != Style::default())
+            .map(|(c, s)| format!("{}:{}:{}", card_name(*c), s.scale, s.shape))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn restyle(&mut self, card: Card, f: impl FnOnce(&mut Style)) -> Option<Action> {
+        let mut st = self.style(card);
+        f(&mut st);
+        self.styles.retain(|s| s.0 != card);
+        self.styles.push((card, st));
+        self.dirty = true;
+        Some(Action::Style(self.styles_text()))
     }
 
     fn hit(&self, x: i32, y: i32) -> Option<Target> {
@@ -468,14 +545,7 @@ impl Widgets {
                 let over = self
                     .rects
                     .iter()
-                    .find(|(c, cx, cy, ch)| {
-                        *c != carried
-                            && *c != Card::Notifications
-                            && lx >= *cx
-                            && lx < cx + CARD_W
-                            && ly >= *cy
-                            && ly < cy + ch
-                    })
+                    .find(|(c, cx, cy, cw, ch)| *c != carried && lx >= *cx && lx < cx + cw && ly >= *cy && ly < cy + ch)
                     .map(|r| r.0);
                 if let (Some(over), Some(from)) = (over, self.cards.iter().position(|&c| c == carried)) {
                     if let Some(to) = self.cards.iter().position(|&c| c == over) {
@@ -497,16 +567,22 @@ impl Widgets {
 
     /// The button went down. True when it picked up a card (it might turn
     /// into a drag), so the mouse should be captured. A card is picked up
-    /// anywhere that isn't a button; the Notifications card stays on top.
+    /// anywhere that isn't a button (anywhere at all in edit mode but its
+    /// own buttons).
     pub fn on_down(&mut self, x: i32, y: i32) -> bool {
         self.drag = None;
-        if !matches!(self.hit(x, y), None | Some(Target::System)) {
+        let free = match self.hit(x, y) {
+            None | Some(Target::System) => true,
+            Some(Target::Edit | Target::Smaller(_) | Target::Bigger(_) | Target::Shape(_)) => false,
+            Some(_) => self.editing,
+        };
+        if !free {
             return false;
         }
         let (lx, ly) = (x as f32 / self.k, y as f32 / self.k);
-        let Some(&(card, cx, cy, _)) = self.rects.iter().find(|(c, cx, cy, ch)| {
-            *c != Card::Notifications && lx >= *cx && lx < cx + CARD_W && ly >= *cy && ly < cy + ch
-        }) else {
+        let Some(&(card, cx, cy, _, _)) =
+            self.rects.iter().find(|(_, cx, cy, cw, ch)| lx >= *cx && lx < cx + cw && ly >= *cy && ly < cy + ch)
+        else {
             return false;
         };
         self.drag = Some(Drag { card, from: (x, y), at: (x, y), grab: (lx - cx, ly - cy), live: false });
@@ -519,14 +595,7 @@ impl Widgets {
     pub fn on_up(&mut self) -> Option<String> {
         let d = self.drag.take()?;
         self.dirty = true;
-        d.live.then(|| {
-            self.cards
-                .iter()
-                .filter(|&&c| c != Card::Notifications)
-                .map(|&c| card_name(c))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
+        d.live.then(|| self.cards.iter().map(|&c| card_name(c)).collect::<Vec<_>>().join(","))
     }
 
     /// Whether a card is being carried.
@@ -547,6 +616,30 @@ impl Widgets {
     }
 
     pub fn on_click(&mut self, x: i32, y: i32) -> Option<Action> {
+        // Edit mode: its own buttons; the cards' own are asleep.
+        match self.hit(x, y)? {
+            Target::Edit => {
+                self.editing = !self.editing;
+                self.hovered = None;
+                self.dirty = true;
+                return None;
+            }
+            Target::Smaller(c) => {
+                return self.restyle(c, |s| {
+                    let i = SCALES.iter().position(|&v| v >= s.scale - 0.01).unwrap_or(2);
+                    s.scale = SCALES[i.saturating_sub(1)];
+                })
+            }
+            Target::Bigger(c) => {
+                return self.restyle(c, |s| {
+                    let i = SCALES.iter().position(|&v| v >= s.scale - 0.01).unwrap_or(2);
+                    s.scale = SCALES[(i + 1).min(SCALES.len() - 1)];
+                })
+            }
+            Target::Shape(c) => return self.restyle(c, |s| s.shape = (s.shape + 1) % 3),
+            _ if self.editing => return None,
+            _ => {}
+        }
         // The calendar card works by itself.
         match self.hit(x, y)? {
             Target::CalMonth(d) => {
@@ -588,7 +681,13 @@ impl Widgets {
             Target::ClipItem(i) => Action::CopyClip(i),
             Target::ClipClear => Action::ClearClips,
             Target::System => Action::TaskManager,
-            Target::CalMonth(_) | Target::CalToday | Target::CalDay(_) => return None,
+            Target::CalMonth(_)
+            | Target::CalToday
+            | Target::CalDay(_)
+            | Target::Edit
+            | Target::Smaller(_)
+            | Target::Bigger(_)
+            | Target::Shape(_) => return None,
         })
     }
 
@@ -620,7 +719,7 @@ impl Widgets {
         let Some(card) = self
             .rects
             .iter()
-            .find(|(_, cx, cy, ch)| lx >= *cx && lx < cx + CARD_W && ly >= *cy && ly < cy + ch)
+            .find(|(_, cx, cy, cw, ch)| lx >= *cx && lx < cx + cw && ly >= *cy && ly < cy + ch)
             .map(|r| r.0)
         else {
             return;
@@ -682,16 +781,22 @@ impl Widgets {
 
     fn layout_in(&self, ctx: &Ctx, cols: usize) -> Layout {
         let mut col_y = vec![HEADER; cols];
-        let mut out = Vec::new();
+        let mut col_w = vec![0.0f32; cols];
+        let mut placed = Vec::new();
         for &card in &self.cards {
-            // The shorter column takes the next card.
+            // The shorter column takes the next card, drawn at its own size.
             let c = (0..cols).min_by(|&a, &b| col_y[a].total_cmp(&col_y[b])).unwrap_or(0);
             let rows = if card == Card::Calendar { self.cal_rows(ctx) } else { 0 };
-            let h = card_height(card, ctx, rows);
-            out.push((card, PAD + c as f32 * (CARD_W + GAP), col_y[c], h));
+            let s = self.style(card).scale;
+            let (cw, h) = (CARD_W * s, card_height(card, ctx, rows) * s);
+            placed.push((card, c, col_y[c], cw, h));
             col_y[c] += h + GAP;
+            col_w[c] = col_w[c].max(cw);
         }
-        let w = PAD * 2.0 + cols as f32 * CARD_W + (cols - 1) as f32 * GAP;
+        let col_x: Vec<f32> =
+            (0..cols).map(|c| PAD + col_w[..c].iter().map(|w| w.max(CARD_W * 0.5) + GAP).sum::<f32>()).collect();
+        let out = placed.into_iter().map(|(card, c, y, cw, h)| (card, col_x[c], y, cw, h)).collect();
+        let w = PAD * 2.0 + col_w.iter().map(|w| w.max(CARD_W * 0.5)).sum::<f32>() + (cols - 1) as f32 * GAP;
         let tallest = col_y.iter().copied().fold(HEADER, f32::max);
         let h = if self.cards.is_empty() { HEADER + 50.0 } else { tallest - GAP + PAD };
         Layout { cards: out, w, h, one_h: h }
@@ -714,7 +819,7 @@ impl Widgets {
         let k = self.k;
         let Layout { cards, w, h, one_h } = self.layout(ctx);
         if self.open && !self.settling() {
-            self.last_wide = self.columns == 1 && w > PAD * 2.0 + CARD_W + 1.0;
+            self.last_wide = self.columns == 1 && cards.iter().map(|c| c.1).fold(0.0, f32::max) > PAD + 1.0;
             self.known_h = one_h;
         }
         let (pw, ph) = ((w * k).ceil() as i32, (h * k).ceil() as i32);
@@ -735,8 +840,25 @@ impl Widgets {
             let f = &gfx.fonts;
             theme::panel(&p, 0.0, 0.0, w, h, self.radius, glass, self.opacity, 0.97, 1.0);
 
-            // Header with the customise button.
-            p.text("Widgets", &f.title, PAD + 4.0, 0.0, 200.0, HEADER, Align::Left, Color::white(0.95));
+            // Header: the title, edit mode's pencil (Done while editing) and the customise button.
+            let title = if self.editing { "Edit widgets" } else { "Widgets" };
+            p.text(title, &f.title, PAD + 4.0, 0.0, 200.0, HEADER, Align::Left, Color::white(0.95));
+            let (ex, ey) = (w - PAD - 16.0 - 38.0, HEADER / 2.0);
+            if self.editing {
+                let (bx, bw) = (ex - 34.0, 60.0);
+                let lit = self.hovered == Some(Target::Edit);
+                p.rrect(bx, ey - 13.0, bw, 26.0, 13.0, theme::accent().alpha(if lit { 1.0 } else { 0.85 }));
+                p.text("Done", &f.body, bx, ey - 13.0, bw, 26.0, Align::Center, Color::white(1.0));
+                self.hits.push((Target::Edit, bx, ey - 13.0, bw, 26.0));
+            } else {
+                if self.hovered == Some(Target::Edit) {
+                    p.circle(ex, ey, 15.0, Color::white(0.10));
+                }
+                if let (Some(font), Some(ch)) = (&f.icons, char::from_u32(0xE70F)) {
+                    p.text(&ch.to_string(), font, ex - 8.0, ey - 8.0, 16.0, 16.0, Align::Center, Color::white(0.8));
+                }
+                self.hits.push((Target::Edit, ex - 15.0, ey - 15.0, 30.0, 30.0));
+            }
             let (gx, gy) = (w - PAD - 16.0, HEADER / 2.0);
             if self.hovered == Some(Target::Gear) {
                 p.circle(gx, gy, 15.0, Color::white(0.10));
@@ -753,25 +875,30 @@ impl Widgets {
                 let hint = "No cards. Add some in Settings > Widgets.";
                 p.text(hint, &f.small, PAD + 4.0, HEADER, w - 2.0 * PAD, 40.0, Align::Left, Color::white(0.5));
             }
-            self.rects = cards.iter().map(|&(c, x, y, h)| (c, x, y, h)).collect();
+            self.rects = cards.clone();
             let carried = self.drag.as_ref().filter(|d| d.live).map(|d| (d.card, d.at, d.grab));
             let mut lifted = None;
-            for (card, cx, cy, ch) in cards {
+            for (card, cx, cy, cw, ch) in cards {
+                let r = self.style(card).radius();
                 if let Some((c, at, grab)) = carried {
                     if c == card {
                         // Its place stays marked while it's carried.
-                        p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.18), 1.0);
-                        lifted = Some((card, at.0 as f32 / k - grab.0, at.1 as f32 / k - grab.1, ch));
+                        p.stroke_rrect(cx + 0.5, cy + 0.5, cw - 1.0, ch - 1.0, r, Color::white(0.18), 1.0);
+                        lifted = Some((card, at.0 as f32 / k - grab.0, at.1 as f32 / k - grab.1, cw, ch));
                         continue;
                     }
                 }
-                self.draw_card(&p, f, ctx, card, cx, cy, ch, 1.0);
+                self.draw_scaled(&p, f, ctx, card, cx, cy, ch, 1.0);
+                if self.editing {
+                    self.edit_tools(&p, f, card, cx, cy, cw, ch);
+                }
             }
             // The card being carried follows the pointer, over the others.
-            if let Some((card, cx, cy, ch)) = lifted {
+            if let Some((card, cx, cy, cw, ch)) = lifted {
                 let keep = self.hits.len();
-                p.rrect(cx + 1.0, cy + 4.0, CARD_W, ch, 10.0, Color(0.0, 0.0, 0.0, 0.25));
-                self.draw_card(&p, f, ctx, card, cx, cy, ch, 0.97);
+                let r = self.style(card).radius();
+                p.rrect(cx + 1.0, cy + 4.0, cw, ch, r, Color(0.0, 0.0, 0.0, 0.25));
+                self.draw_scaled(&p, f, ctx, card, cx, cy, ch, 0.97);
                 // Nothing in it can be clicked while it's carried.
                 self.hits.truncate(keep);
             }
@@ -786,22 +913,79 @@ impl Widgets {
         shown
     }
 
+    /// `draw_card` at the card's own size (its height `ch` is as drawn): its
+    /// buttons' places scaled to match.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scaled(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, card: Card, cx: f32, cy: f32, ch: f32, solid: f32) {
+        let s = self.style(card).scale;
+        if (s - 1.0).abs() < 1e-3 {
+            self.draw_card(p, f, ctx, card, cx, cy, ch, solid);
+            return;
+        }
+        let first = self.hits.len();
+        p.scaled(s, cx, cy, || self.draw_card(p, f, ctx, card, cx, cy, ch / s, solid));
+        for h in &mut self.hits[first..] {
+            h.1 = cx + (h.1 - cx) * s;
+            h.2 = cy + (h.2 - cy) * s;
+            h.3 *= s;
+            h.4 *= s;
+        }
+    }
+
+    /// Edit mode's outline and buttons on a card: smaller, bigger, the next shape.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_tools(&mut self, p: &Painter, f: &Fonts, card: Card, cx: f32, cy: f32, cw: f32, ch: f32) {
+        let st = self.style(card);
+        let accent = theme::accent();
+        p.stroke_rrect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, st.radius(), accent.alpha(0.7), 2.0);
+        let size = 26.0;
+        let (bx, by) = (cx + cw - 3.0 * (size + 4.0) - 6.0, cy + 6.0);
+        p.rrect(
+            bx - 4.0,
+            by - 3.0,
+            3.0 * (size + 4.0) + 4.0,
+            size + 6.0,
+            (size + 6.0) / 2.0,
+            Color(0.08, 0.08, 0.09, 0.9),
+        );
+        let shapes = [0xE71A_u32, 0xE739, 0xEA3A];
+        let buttons = [
+            (Target::Smaller(card), 0xE738_u32, st.scale > SCALES[0] + 0.01),
+            (Target::Bigger(card), 0xE710, st.scale < SCALES[SCALES.len() - 1] - 0.01),
+            (Target::Shape(card), shapes[st.shape as usize % 3], true),
+        ];
+        for (i, (t, g, ok)) in buttons.iter().enumerate() {
+            let x = bx + i as f32 * (size + 4.0);
+            if self.hovered == Some(*t) && *ok {
+                p.circle(x + size / 2.0, by + size / 2.0, size / 2.0, Color::white(0.14));
+            }
+            if let (Some(font), Some(c)) = (&f.icons, char::from_u32(*g)) {
+                let ink = Color::white(if *ok { 0.9 } else { 0.3 });
+                p.text(&c.to_string(), font, x, by, size, size, Align::Center, ink);
+            }
+            if *ok {
+                self.hits.insert(0, (*t, x, by, size, size));
+            }
+        }
+    }
+
     /// Draws `card` with its top-left corner at (`cx`, `cy`); `solid` is how
     /// opaque its backing is (1 for a card in place).
     #[allow(clippy::too_many_arguments)]
     fn draw_card(&mut self, p: &Painter, f: &Fonts, ctx: &Ctx, card: Card, cx: f32, cy: f32, ch: f32, solid: f32) {
+        let r = self.style(card).radius();
         if solid < 1.0 {
-            p.rrect(cx, cy, CARD_W, ch, 10.0, Color(0.17, 0.18, 0.21, solid));
+            p.rrect(cx, cy, CARD_W, ch, r, Color(0.17, 0.18, 0.21, solid));
         }
-        p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.05));
-        p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, 10.0, Color::white(0.07), 1.0);
+        p.rrect(cx, cy, CARD_W, ch, r, Color::white(0.05));
+        p.stroke_rrect(cx + 0.5, cy + 0.5, CARD_W - 1.0, ch - 1.0, r, Color::white(0.07), 1.0);
         match card {
             Card::Notifications => self.notifications_card(p, f, ctx, cx, cy),
             Card::Media => self.media_card(p, f, ctx, cx, cy),
             Card::System => {
                 // The whole card opens Task Manager.
                 if self.hovered == Some(Target::System) {
-                    p.rrect(cx, cy, CARD_W, ch, 10.0, Color::white(0.04));
+                    p.rrect(cx, cy, CARD_W, ch, r, Color::white(0.04));
                 }
                 system_card(p, f, ctx, cx, cy);
                 self.hits.push((Target::System, cx, cy, CARD_W, ch));

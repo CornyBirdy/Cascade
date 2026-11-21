@@ -196,6 +196,8 @@ taskbar_right = music,cpu,ram,desktops,widgets
 # The panel's cards, in order (remove one to hide it): notifications, media, system, weather, calendar,
 # phone (your Android phone's notifications through Phone Link, and a way into it).
 widgets_panel = media,system,weather,calendar
+# Each card's size and corners, set in the panel's edit mode (card:scale:shape).
+widgets_style =
 # Windows' notifications as a card at the top of the panel (also opened by the clock).
 widgets_notifications = true
 # 1 or 2 columns of cards.
@@ -408,6 +410,7 @@ pub struct Config {
     pub taskbar_left: String,
     pub taskbar_right: String,
     pub widgets_panel: String,
+    pub widgets_style: String,
     pub widgets_columns: u32,
     pub gpu_cards: String,
     pub gpu_temp: bool,
@@ -562,6 +565,7 @@ impl Default for Config {
             taskbar_left: "weather".into(),
             taskbar_right: "music,cpu,ram,desktops,widgets".into(),
             widgets_panel: "media,system,weather,calendar".into(),
+            widgets_style: String::new(),
             widgets_columns: 1,
             gpu_cards: "all".into(),
             gpu_temp: true,
@@ -852,6 +856,7 @@ impl Config {
                 "taskbar_left" => c.taskbar_left = v.trim_matches('"').to_string(),
                 "taskbar_right" => c.taskbar_right = v.trim_matches('"').to_string(),
                 "widgets_panel" => c.widgets_panel = v.trim_matches('"').to_string(),
+                "widgets_style" => c.widgets_style = v.trim_matches('"').to_string(),
                 "widgets_columns" => set_u(&mut c.widgets_columns, 1.0, 2.0),
                 "gpu_cards" if v == "all" || matches!(v.parse::<u32>(), Ok(1..=8)) => c.gpu_cards = v.into(),
                 "gpu_temp" => set_b(&mut c.gpu_temp),
@@ -1020,6 +1025,7 @@ impl Config {
             "taskbar_right" => self.taskbar_right.clone(),
             k if k.starts_with("place_") => self.place_of(&k["place_".len()..]).to_string(),
             "widgets_panel" => self.widgets_panel.clone(),
+            "widgets_style" => self.widgets_style.clone(),
             "widgets_columns" => self.widgets_columns.to_string(),
             "gpu_cards" => self.gpu_cards.clone(),
             "gpu_temp" => b(self.gpu_temp),

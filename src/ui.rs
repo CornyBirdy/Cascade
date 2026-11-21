@@ -4856,7 +4856,7 @@ impl App {
         let max_h = bottom - d.monitor().top - (8.0 * k) as i32;
         let notifications = self.cfg.widgets_notifications;
         let (panel, columns) = (&self.cfg.widgets_panel, self.cfg.widgets_columns);
-        self.widgets.show(panel, notifications, columns, right, bottom, max_h, k);
+        self.widgets.show(panel, &self.cfg.widgets_style, notifications, columns, right, bottom, max_h, k);
         // The Clipboard card: read the history once the panel is in front
         // (Windows only hands it to the app in front).
         if self.widgets.shows_clipboard() {
@@ -4923,6 +4923,9 @@ impl App {
                     return Some(LRESULT(0));
                 }
                 match self.widgets.on_click(x, y) {
+                    Some(widgets::Action::Style(style)) => {
+                        self.apply_change(Change::Many(vec![("widgets_style", style)]));
+                    }
                     Some(widgets::Action::Previous) => {
                         let _ = self.media_tx.send(MediaCmd::Previous);
                     }
