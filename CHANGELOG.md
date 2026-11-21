@@ -7,7 +7,7 @@ Settings > Updates > What's new opens the list.
 ## 2026-11-21
 
 **Improved**
-- **Lighting, made over**: a side bar with the pages (Lighting, Layout, Devices, Settings) and your profiles, a back arrow on every page you went to (Esc and the mouse's back button work too), devices as cards that open their own page, settings in rows like Windows' own. Every button, toggle, slider, swatch and row lights up under the pointer and when pressed; toggles slide, selections glide, pages slide in, and the live preview glows like the real LEDs.
+- **Lighting is part of Cascade's settings**: Settings > Personalisation > Lighting (Lighting in Start opens it there too), no separate window. It keeps its first look (profiles and devices down the side, Lighting / Layout / Devices / Settings along the top), and now every button, toggle, slider, swatch and row lights up under the pointer and when pressed; toggles slide, selections glide, tabs slide in, and the live preview glows like the real LEDs. A narrow settings window widens to fit it.
 - **OpenRGB sets itself up**: the first time Lighting opens it gets OpenRGB (with a progress bar), unpacks it, starts it and connects, and devices appear as OpenRGB finds them. It stays connected, reconnects if OpenRGB restarts, and says plainly what's wrong if it can't, with Try again and Use my own OpenRGB.
 - **Administrator rights in one step**: turning them on installs the PawnIO driver (if it isn't there), sets OpenRGB to start with the rights and restarts it, all under one Windows permission prompt.
 

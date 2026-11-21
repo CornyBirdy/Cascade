@@ -151,7 +151,7 @@ It's experimental: `cascade.log` (Settings → About → Data folder) records wh
 
 ## Lighting
 
-RGB for every brand in one app (**Lighting** in Start, or Settings > Bluetooth & devices), so iCUE, Synapse, G Hub, Armoury Crate, RGB Fusion and the rest can go.
+RGB for every brand, right in Cascade's settings (**Settings > Personalisation > Lighting**, or **Lighting** in Start), so iCUE, Synapse, G Hub, Armoury Crate, RGB Fusion and the rest can go.
 
 - **Profiles** down the side: make, rename, duplicate and delete them; link programs to one and it comes on while they're in front.
 - **Lighting**: a profile is layers of effects, the top one over the rest: static colours, gradients, rainbows and waves, visor, rain, marquee, twinkle, strobe, heartbeat, fire, plasma, temperature (CPU or graphics card), audio visualiser and pulse, screen ambience, and keys that light as you type. Each layer covers all devices or the ones you pick, with its own colours, speed, size, direction, opacity and blend. A live preview shows every device lit.
@@ -161,7 +161,7 @@ RGB for every brand in one app (**Lighting** in Start, or Settings > Bluetooth &
 
 It drives the hardware through [OpenRGB](https://openrgb.org) (free and open source), which supports Corsair, ASUS Aura, Gigabyte RGB Fusion, Razer, Logitech, HyperX, MSI, NZXT, SteelSeries and hundreds of other devices. The first time Lighting opens it fetches OpenRGB into Cascade's data folder by itself (or use your own copy), starts it out of sight and stays connected; Cascade's lighting engine (`cascade.exe --rgb-engine`, at normal priority) feeds it. Keyboards, mice, headsets and USB controllers work as they are; **RAM, motherboard and graphics card lighting** need *Administrator rights* (Lighting > Settings), which installs the [PawnIO](https://pawnio.eu) driver and sets OpenRGB to start with the rights, under one Windows prompt. Close the vendors' own apps (Lighting lists the ones running) and stop them starting with Windows: they hold their devices and fight for them.
 
-Every page you open has a back arrow (Esc and the mouse's back button work too), and everything in the window lights under the pointer and moves smoothly.
+Everything on the page lights under the pointer and moves smoothly; the settings window widens to fit it when it's narrow.
 
 ## Settings
 

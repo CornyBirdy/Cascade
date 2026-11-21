@@ -150,6 +150,9 @@ fn nav_total() -> f32 {
 /// The page that lists what the search box found: one past the real sections,
 /// so it has no sidebar entry. Its rows are the matching rows of the others.
 const SEARCH: usize = SECTIONS.len();
+/// Lighting (RGB), a page under Personalisation: its content is the Lighting
+/// pane (see `rgb::app`), a child window placed over the page.
+pub const LIGHTING: usize = SECTIONS.len() + 1;
 /// The search box's id (for its change notifications) and place in the sidebar.
 pub const SEARCH_ID: usize = 900;
 const SEARCH_BOX: (f32, f32, f32, f32) = (14.0, 18.0, SIDEBAR - 28.0, 32.0);
@@ -1274,13 +1277,6 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_net_reset", "Network reset", "Sets every adapter back to Windows' defaults (needs a restart).", Button("Reset now")),
         ],
         page::DEVICES => vec![
-            heading("h_rgb", "Lighting"),
-            row(
-                "lighting_open",
-                "RGB lighting",
-                "Profiles, effects and layout for Corsair, ASUS Aura, RGB Fusion, Razer, Logitech, HyperX and more, without their apps.",
-                Button("Open Lighting"),
-            ),
             heading("h_bt", "Bluetooth"),
             row("win_bt", "Bluetooth", "", Toggle),
             row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
@@ -1301,6 +1297,13 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_kb_cues", "Underline access keys", "Shows the underlined letter for Alt shortcuts in menus.", Toggle),
         ],
         page::LOOK => vec![
+            heading("h_rgb", "Lighting"),
+            row(
+                "lighting_open",
+                "RGB lighting",
+                "Profiles, effects and layout for Corsair, ASUS Aura, RGB Fusion, Razer, Logitech, HyperX and more, without their apps.",
+                Button("Open"),
+            ),
             heading("h_mode", "Light and dark"),
             row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
             row("win_dark_windows", "Dark mode for Windows", "Windows' own menus and dialogs.", Toggle),
@@ -1757,6 +1760,9 @@ pub struct Settings {
     knobs: RefCell<HashMap<&'static str, (f32, f32)>>,
     last_tick: Instant,
     animating: std::cell::Cell<bool>,
+    /// The Lighting pane (made the first time its page opens), and where it was put.
+    lighting: std::cell::Cell<Option<HWND>>,
+    lighting_at: std::cell::Cell<(i32, i32, i32, i32)>,
 }
 
 /// The rows shown (see `shown`), their heights (descriptions wrap onto
@@ -1779,7 +1785,7 @@ impl Settings {
     /// Opens the window (class `CascadeSettings`, registered by the app).
     /// Shows page `section` (see `SECTIONS`).
     pub fn show_section(&mut self, section: usize) {
-        if section < SECTIONS.len() {
+        if section < SECTIONS.len() || section == LIGHTING {
             self.go_to(section);
         }
     }
@@ -1793,6 +1799,9 @@ impl Settings {
         self.scroll = 0.0;
         self.scroll_to = 0.0;
         self.hovered = None;
+        if section == LIGHTING {
+            self.room_for_lighting();
+        }
         // The sidebar scrolls to show the page.
         if section < SECTIONS.len() {
             let y = nav_y(section) - self.nav_scroll;
@@ -1851,7 +1860,11 @@ impl Settings {
         let max = self.max_scroll();
         self.scroll_to = self.scroll_to.clamp(0.0, max);
         follow(&mut self.scroll, self.scroll_to, 16.0);
-        let mark = if self.section < SECTIONS.len() { nav_y(self.section) } else { self.nav_mark };
+        let mark = match self.section {
+            s if s < SECTIONS.len() => nav_y(s),
+            LIGHTING => nav_y(page::LOOK),
+            _ => self.nav_mark,
+        };
         follow(&mut self.nav_mark, mark, 18.0);
         let hovered = self.hovered;
         if let Some(h) = hovered {
@@ -1936,6 +1949,8 @@ impl Settings {
                 knobs: RefCell::default(),
                 last_tick: Instant::now(),
                 animating: std::cell::Cell::new(false),
+                lighting: std::cell::Cell::new(None),
+                lighting_at: std::cell::Cell::new((0, 0, 0, 0)),
             };
             s.apply_dpi(None);
             s.search_edit = CreateWindowExW(
@@ -2071,7 +2086,77 @@ impl Settings {
 
     /// The page's title.
     fn title(&self) -> &'static str {
+        if self.section == LIGHTING {
+            return "Lighting";
+        }
         SECTIONS.get(self.section).copied().unwrap_or("Search results")
+    }
+
+    /// Lighting wants a wide window: a narrow one is widened (on its screen).
+    fn room_for_lighting(&mut self) {
+        const WANT: f32 = 1320.0;
+        if self.cw >= WANT {
+            return;
+        }
+        unsafe {
+            let mut r = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut r);
+            let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let _ = GetMonitorInfoW(mon, &mut mi);
+            let work = mi.rcWork;
+            let extra = ((WANT - self.cw) * self.k) as i32;
+            let width = (r.right - r.left + extra).min(work.right - work.left);
+            let x = (r.left - extra / 2).clamp(work.left, (work.right - width).max(work.left));
+            let _ = SetWindowPos(self.hwnd, None, x, r.top, width, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    /// Shows, places or hides the Lighting pane for the page that's open.
+    fn place_lighting(&self) {
+        let open = self.section == LIGHTING;
+        let pane = match self.lighting.get() {
+            Some(h) if unsafe { IsWindow(Some(h)).as_bool() } => Some(h),
+            _ if open => {
+                let h = crate::rgb::app::embed(self.hwnd);
+                self.lighting.set(h);
+                h
+            }
+            _ => None,
+        };
+        let Some(pane) = pane else { return };
+        unsafe {
+            let style = GetWindowLongW(self.hwnd, GWL_STYLE) as u32;
+            let clip = WS_CLIPCHILDREN.0;
+            if open {
+                // The settings window doesn't paint over the pane.
+                if style & clip == 0 {
+                    SetWindowLongW(self.hwnd, GWL_STYLE, (style | clip) as i32);
+                }
+                let k = self.k;
+                let at = (
+                    ((SIDEBAR + 16.0) * k) as i32,
+                    (86.0 * k) as i32,
+                    ((self.cw - SIDEBAR - 32.0) * k) as i32,
+                    ((self.ch - 86.0 - 16.0) * k) as i32,
+                );
+                if at != self.lighting_at.get() || !IsWindowVisible(pane).as_bool() {
+                    self.lighting_at.set(at);
+                    let _ = SetWindowPos(
+                        pane,
+                        None,
+                        at.0,
+                        at.1,
+                        at.2,
+                        at.3,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+            } else if IsWindowVisible(pane).as_bool() {
+                let _ = ShowWindow(pane, SW_HIDE);
+                SetWindowLongW(self.hwnd, GWL_STYLE, (style & !clip) as i32);
+            }
+        }
     }
 
     /// Redraws, and runs the animations until they settle.
@@ -2727,6 +2812,7 @@ impl Settings {
         if self.refit(get, build) {
             self.place_edits();
         }
+        self.place_lighting();
         let (cwin, chin) = (self.cw, self.ch);
         let r = (|| {
             gfx.begin_dc(hdc, pw, ph, self.k, BG)?;
@@ -2759,7 +2845,7 @@ impl Settings {
                     if y + NAV_H < NAV_TOP || y > chin {
                         continue;
                     }
-                    let active = i == self.section;
+                    let active = i == self.section || (self.section == LIGHTING && i == page::LOOK);
                     let lit = self.glow(Hit::Nav(i));
                     let a = if active { 0.075 } else { 0.05 * lit };
                     if a > 0.0 {
@@ -2782,7 +2868,7 @@ impl Settings {
                     p.text(name, &f.body, 56.0, y, SIDEBAR - 68.0, NAV_H, Align::Left, c);
                 }
                 // The marker beside the open page, gliding to it.
-                if self.section < SECTIONS.len() {
+                if self.section < SECTIONS.len() || self.section == LIGHTING {
                     let my = self.nav_mark - ns + NAV_H / 2.0;
                     p.rrect(12.0, my - 8.0, 3.0, 16.0, 1.5, theme::accent());
                 }
