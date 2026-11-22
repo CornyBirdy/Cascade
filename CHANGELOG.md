@@ -29,7 +29,7 @@ Settings > Updates > What's new opens the list.
 
 **Fixed**
 - **Files: the Name column couldn't be widened** (its edge was the one that didn't drag), and nothing showed a column's edge could be dragged: every edge drags now, with the resize pointer over it.
-- **Disk Usage's tree**: lines from each open folder to what's in it, as TreeSize and Explorer draw them, and Windows' own folder and document icons.
+- **Disk Usage's tree works like a tool**: it reads folders on several threads at once, level by level, so every folder's size climbs together (it read one folder at a time, the rest showing nothing); folders still being worked out spin; a toolbar (Rescan, Stop, Expand one to three levels, Show in Files); click a column's title to order by it; clear blue bars whatever the accent; each size on a bar beside its name, as TreeSize has it; bold top folders, every other row shaded; lines from each open folder to what's in it, and Windows' own folder and document icons.
 - **Cascade's app icons are the things themselves**: a folder, a picture, a calculator, a camera, a page, a clock, a play button, a microphone, a palette, a bulb, scissors, a gear, in flat colours, with no plate behind each and no gradients.
 - **No animation when a window came back** from the taskbar: Windows doesn't animate a restore for its shell, so Cascade always does now, the window waiting until its picture has grown out of the button.
 - **Wobbly windows didn't work on some apps** (browsers, Electron and WinUI apps, which draw on the GPU) **and had a black border** (Windows' invisible resize frame, printed black): the window's hidden another way that works for every app, and its picture is cut to what's seen of it, with round corners.

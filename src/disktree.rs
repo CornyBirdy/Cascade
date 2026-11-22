@@ -30,6 +30,19 @@ pub struct Node {
     pub children: Vec<usize>,
     /// Its contents have been read (the index fills a folder in when it's opened).
     pub read: bool,
+    /// Folders in it (itself included) not read yet: 0 once it's all worked out.
+    pub pending: u32,
+}
+
+/// How the tree's folders are ordered.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Sort {
+    #[default]
+    Size,
+    Name,
+    Files,
+    Folders,
+    Modified,
 }
 
 /// The tree being built, shared with the thread walking it.
@@ -64,11 +77,38 @@ impl Tree {
         p
     }
 
-    /// Folder `id`'s folders, biggest first.
-    pub fn sorted_children(&self, id: usize) -> Vec<usize> {
+    /// Folder `id`'s folders, biggest first (or by `sort`).
+    pub fn sorted(&self, id: usize, sort: Sort) -> Vec<usize> {
         let mut kids = self.nodes[id].children.clone();
-        kids.sort_by_key(|&k| std::cmp::Reverse(self.nodes[k].size));
+        let n = &self.nodes;
+        match sort {
+            Sort::Size => kids.sort_by_key(|&k| std::cmp::Reverse(n[k].size)),
+            Sort::Name => kids.sort_by_key(|&k| n[k].name.to_lowercase()),
+            Sort::Files => kids.sort_by_key(|&k| std::cmp::Reverse(n[k].files)),
+            Sort::Folders => kids.sort_by_key(|&k| std::cmp::Reverse(n[k].folders)),
+            Sort::Modified => kids.sort_by_key(|&k| std::cmp::Reverse(n[k].modified)),
+        }
         kids
+    }
+
+    /// Changes `pending` by `by` for `id` and every folder above it.
+    fn pend(&mut self, id: usize, by: i32) {
+        let mut at = Some(id);
+        while let Some(i) = at {
+            let n = &mut self.nodes[i];
+            n.pending = (n.pending as i32 + by).max(0) as u32;
+            at = n.parent;
+        }
+    }
+
+    /// Stops the walk (Stop): what's been found stays.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the walk was stopped before it finished.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// Adds `size` bytes and `files` files under `id` (and so to each folder above it).
@@ -115,14 +155,14 @@ impl Drop for Tree {
 /// Starts a tree of `root`: from the index if it has it, else walked on a
 /// thread of its own (the tree fills in as it goes; `wake` is called now
 /// and then, and when it's done, to show it).
-pub fn start(root: &Path, wake: impl Fn() + Send + 'static) -> Shared {
+pub fn start(root: &Path, wake: impl Fn() + Send + Sync + 'static) -> Shared {
     let stop = Arc::new(AtomicBool::new(false));
     let name = root.to_string_lossy().into_owned();
     let indexed = crate::fileindex::children(&name).is_some();
     let total = if indexed { crate::fileindex::children(&name).map_or(0, |f| f.0) } else { 0 };
     let tree = Arc::new(Mutex::new(Tree {
         root: root.to_path_buf(),
-        nodes: vec![Node { name, size: total, ..Default::default() }],
+        nodes: vec![Node { name, size: total, pending: if indexed { 0 } else { 1 }, ..Default::default() }],
         indexed,
         done: indexed,
         stop: stop.clone(),
@@ -140,20 +180,63 @@ pub fn start(root: &Path, wake: impl Fn() + Send + 'static) -> Shared {
     tree
 }
 
-/// Walks the tree from its root, depth first, adding each folder as it's
-/// found and each folder's files as it's read.
-fn walk(tree: &Shared, stop: &AtomicBool, wake: &dyn Fn()) {
-    use std::os::windows::fs::MetadataExt;
-    let mut stack = vec![0usize];
-    let mut last_wake = std::time::Instant::now();
-    while let Some(id) = stack.pop() {
-        if stop.load(Ordering::Relaxed) {
-            return;
+/// Walks the tree from its root on several threads at once, level by level:
+/// every folder near the top is read early, so all their sizes climb
+/// together (rather than one folder at a time, with the rest at nothing).
+/// Each folder appears as it's found and its files count as it's read.
+fn walk(tree: &Shared, stop: &AtomicBool, wake: &(dyn Fn() + Sync)) {
+    use std::collections::VecDeque;
+    use std::sync::Condvar;
+    let queue: Mutex<(VecDeque<usize>, usize)> = Mutex::new((VecDeque::from([0usize]), 0));
+    let more = Condvar::new();
+    let last_wake = Mutex::new(std::time::Instant::now());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                // The next folder to read, or the end once none is left and none is being read.
+                let id = {
+                    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                    loop {
+                        if stop.load(Ordering::Relaxed) {
+                            more.notify_all();
+                            return;
+                        }
+                        if let Some(id) = q.0.pop_front() {
+                            q.1 += 1;
+                            break id;
+                        }
+                        if q.1 == 0 {
+                            more.notify_all();
+                            return;
+                        }
+                        q = more.wait(q).unwrap_or_else(|e| e.into_inner());
+                    }
+                };
+                let found = read_folder(tree, id);
+                {
+                    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                    q.0.extend(found);
+                    q.1 -= 1;
+                }
+                more.notify_all();
+                let mut lw = last_wake.lock().unwrap_or_else(|e| e.into_inner());
+                if lw.elapsed() > std::time::Duration::from_millis(150) {
+                    *lw = std::time::Instant::now();
+                    wake();
+                }
+            });
         }
-        let path = tree.lock().unwrap_or_else(|e| e.into_inner()).path_of(id);
-        let Ok(entries) = std::fs::read_dir(&path) else { continue };
-        let (mut size, mut files, mut newest) = (0u64, 0u64, 0u64);
-        let mut dirs: Vec<(String, u64)> = Vec::new();
+    });
+}
+
+/// Reads folder `id`: its files counted, its folders added (returned, to be read).
+fn read_folder(tree: &Shared, id: usize) -> Vec<usize> {
+    use std::os::windows::fs::MetadataExt;
+    let path = tree.lock().unwrap_or_else(|e| e.into_inner()).path_of(id);
+    let (mut size, mut files, mut newest) = (0u64, 0u64, 0u64);
+    let mut dirs: Vec<(String, u64)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&path) {
         for e in entries.flatten() {
             let Ok(m) = e.metadata() else { continue };
             // Reparse points (junctions, links, OneDrive placeholders) aren't followed.
@@ -169,25 +252,23 @@ fn walk(tree: &Shared, stop: &AtomicBool, wake: &dyn Fn()) {
                 newest = newest.max(modified);
             }
         }
-        {
-            let mut t = tree.lock().unwrap_or_else(|e| e.into_inner());
-            t.nodes[id].read = true;
-            t.nodes[id].own_size += size;
-            t.nodes[id].own_files += files;
-            let n = dirs.len() as u64;
-            t.add(id, size, files, n, newest);
-            for (name, modified) in dirs {
-                let child = t.nodes.len();
-                t.nodes.push(Node { name, parent: Some(id), modified, ..Default::default() });
-                t.nodes[id].children.push(child);
-                stack.push(child);
-            }
-        }
-        if last_wake.elapsed() > std::time::Duration::from_millis(200) {
-            last_wake = std::time::Instant::now();
-            wake();
-        }
     }
+    let mut t = tree.lock().unwrap_or_else(|e| e.into_inner());
+    t.nodes[id].read = true;
+    t.nodes[id].own_size += size;
+    t.nodes[id].own_files += files;
+    let n = dirs.len() as u64;
+    t.add(id, size, files, n, newest);
+    let mut found = Vec::with_capacity(dirs.len());
+    for (name, modified) in dirs {
+        let child = t.nodes.len();
+        t.nodes.push(Node { name, parent: Some(id), modified, ..Default::default() });
+        t.nodes[id].children.push(child);
+        t.pend(child, 1);
+        found.push(child);
+    }
+    t.pend(id, -1);
+    found
 }
 
 /// A row of the tree as shown.
@@ -200,29 +281,37 @@ pub enum Row {
 
 /// The rows to show: the root, and inside every open folder its folders,
 /// biggest first, then its files together. (row, depth)
-pub fn rows(t: &Tree, open: &std::collections::HashSet<usize>) -> Vec<(Row, usize)> {
+pub fn rows(t: &Tree, open: &std::collections::HashSet<usize>, sort: Sort) -> Vec<(Row, usize)> {
     let mut out = Vec::new();
-    fn add(t: &Tree, id: usize, depth: usize, open: &std::collections::HashSet<usize>, out: &mut Vec<(Row, usize)>) {
+    fn add(
+        t: &Tree,
+        id: usize,
+        depth: usize,
+        open: &std::collections::HashSet<usize>,
+        sort: Sort,
+        out: &mut Vec<(Row, usize)>,
+    ) {
         out.push((Row::Folder(id), depth));
         if !open.contains(&id) {
             return;
         }
-        // Loose files go in among the folders by size, as TreeSize lists them.
+        // Loose files go in among the folders by size, as TreeSize lists them
+        // (last, sorted any other way).
         let files = t.nodes[id].own_size;
         let mut placed = t.nodes[id].own_files == 0;
-        for k in t.sorted_children(id) {
-            if !placed && files >= t.nodes[k].size {
+        for k in t.sorted(id, sort) {
+            if !placed && sort == Sort::Size && files >= t.nodes[k].size {
                 out.push((Row::Files(id), depth + 1));
                 placed = true;
             }
-            add(t, k, depth + 1, open, out);
+            add(t, k, depth + 1, open, sort, out);
         }
         if !placed {
             out.push((Row::Files(id), depth + 1));
         }
     }
     if !t.nodes.is_empty() {
-        add(t, 0, 0, open, &mut out);
+        add(t, 0, 0, open, sort, &mut out);
     }
     out
 }
@@ -341,7 +430,8 @@ mod tests {
         assert_eq!((t.nodes[0].size, t.nodes[0].files, t.nodes[0].modified), (1400, 3, 7));
         assert_eq!(t.nodes[1].size, 500);
         assert_eq!(t.path_of(3), PathBuf::from("C:\\Users\\you"));
-        assert_eq!(t.sorted_children(0), vec![2, 1]);
+        assert_eq!(t.sorted(0, Sort::Size), vec![2, 1]);
+        assert_eq!(t.sorted(0, Sort::Name), vec![1, 2]);
     }
 
     #[test]
@@ -366,9 +456,9 @@ mod tests {
         t.nodes[0].own_size = 600;
         t.add(0, 600, 1, 0, 0);
         let mut open = std::collections::HashSet::new();
-        assert_eq!(rows(&t, &open).len(), 1);
+        assert_eq!(rows(&t, &open, Sort::Size).len(), 1);
         open.insert(0);
-        let r: Vec<Row> = rows(&t, &open).into_iter().map(|r| r.0).collect();
+        let r: Vec<Row> = rows(&t, &open, Sort::Size).into_iter().map(|r| r.0).collect();
         // Windows (900), the loose files (600), Users (500).
         assert_eq!(r, vec![Row::Folder(0), Row::Folder(2), Row::Files(0), Row::Folder(1)]);
     }

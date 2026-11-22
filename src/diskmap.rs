@@ -35,6 +35,17 @@ const TREE_MORE: u32 = WM_APP + 2;
 /// The tree's rows and header.
 const TREE_ROW: f32 = 26.0;
 const TREE_HEAD: f32 = 30.0;
+/// The tree's toolbar (Rescan, Stop, Expand, Show in Files), above it.
+const TOOL_H: f32 = 44.0;
+/// The tree's toolbar buttons: (glyph, label, width).
+const TOOLS: [(u32, &str, f32); 4] =
+    [(0xE72C, "Rescan", 96.0), (0xE71A, "Stop", 80.0), (0xE70D, "Expand", 100.0), (0xE8B7, "Show in Files", 132.0)];
+/// The tree's bars: a clear blue, whatever the accent (a tool's colour, as TreeSize's).
+const BAR: Color = Color(0.29, 0.47, 0.98, 1.0);
+/// Where toolbar button `i` starts.
+fn tool_x(i: usize) -> f32 {
+    12.0 + TOOLS.iter().take(i).map(|t| t.2 + 6.0).sum::<f32>()
+}
 /// The tree's columns after Name: (title, width).
 const TREE_COLS: [(&str, f32); 5] =
     [("Size", 96.0), ("Files", 86.0), ("Folders", 80.0), ("% of parent", 130.0), ("Modified", 100.0)];
@@ -74,6 +85,10 @@ struct State {
     tree_sel: Option<crate::disktree::Row>,
     tree_hot: Option<usize>,
     tree_rows: Vec<(crate::disktree::Row, usize)>,
+    /// How the tree's folders are ordered (a click on a column's title).
+    tree_sort: crate::disktree::Sort,
+    /// The toolbar button under the pointer.
+    tool_hot: Option<usize>,
     /// Windows' folder and document icons for the tree (BGRA, `TREE_ICON` square).
     stock: Option<(Vec<u8>, Vec<u8>)>,
 }
@@ -222,12 +237,112 @@ impl State {
 
     /// The tree's row at `y`, if there's one there.
     fn tree_row_at(&self, y: f32) -> Option<usize> {
-        let top = TOP + TREE_HEAD;
+        let top = TOP + TOOL_H + TREE_HEAD;
         if y < top {
             return None;
         }
         let i = ((y - top + self.tree_scroll) / TREE_ROW).floor() as usize;
         (i < self.tree_rows.len()).then_some(i)
+    }
+
+    /// The toolbar button at (x, y), if there is one.
+    fn tool_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !(TOP + 4.0..TOP + TOOL_H - 6.0).contains(&y) {
+            return None;
+        }
+        (0..TOOLS.len()).find(|&i| x >= tool_x(i) && x < tool_x(i) + TOOLS[i].2)
+    }
+
+    /// A toolbar button: rescan, stop, open levels of the tree, or show the folder in Files.
+    fn tool(&mut self, i: usize) {
+        match i {
+            0 => {
+                self.tree = None;
+                self.start_tree();
+            }
+            1 => {
+                if let Some(t) = &self.tree {
+                    t.lock().unwrap_or_else(|e| e.into_inner()).stop();
+                }
+            }
+            2 => {
+                use crate::menu::{item, show, Entry, Place};
+                let entries = vec![
+                    item(1, "One level"),
+                    item(2, "Two levels"),
+                    item(3, "Three levels"),
+                    Entry::Separator,
+                    item(9, "Close all"),
+                ];
+                let levels = match show(self.hwnd, entries, Place::Cursor) {
+                    9 => 0,
+                    n @ 1..=3 => n,
+                    _ => return,
+                };
+                self.expand(levels);
+            }
+            3 => {
+                let p = self.selected_path().unwrap_or_else(|| self.path.clone());
+                appwin::launch(&["--files", &p.to_string_lossy()]);
+            }
+            _ => {}
+        }
+        appwin::redraw(self.hwnd);
+    }
+
+    /// Opens every folder down to `levels` below the top (0: just the top).
+    fn expand(&mut self, levels: usize) {
+        let Some(tree) = self.tree.clone() else { return };
+        let mut t = tree.lock().unwrap_or_else(|e| e.into_inner());
+        self.open.clear();
+        let mut level = vec![0usize];
+        for _ in 0..=levels {
+            let mut next = Vec::new();
+            for id in level {
+                t.read_from_index(id);
+                self.open.insert(id);
+                next.extend(t.nodes[id].children.iter().copied());
+            }
+            level = next;
+            if self.open.len() > 4000 {
+                break;
+            }
+        }
+        if levels == 0 {
+            self.open.clear();
+            self.open.insert(0);
+        }
+    }
+
+    /// The folder picked in the tree, if there is one.
+    fn selected_path(&self) -> Option<PathBuf> {
+        use crate::disktree::Row;
+        let id = match self.tree_sel? {
+            Row::Folder(id) | Row::Files(id) => id,
+        };
+        Some(self.tree.as_ref()?.lock().unwrap_or_else(|e| e.into_inner()).path_of(id))
+    }
+
+    /// A click on the tree's column titles: ordered by that column.
+    fn tree_header(&mut self, x: f32, y: f32, w: f32) -> bool {
+        use crate::disktree::Sort;
+        let top = TOP + TOOL_H;
+        if !(top..top + TREE_HEAD).contains(&y) {
+            return false;
+        }
+        let fixed: f32 = TREE_COLS.iter().map(|c| c.1).sum();
+        let name_w = (w - 24.0 - fixed - 16.0).max(200.0);
+        let mut cx = 12.0 + 8.0 + name_w;
+        let mut sort = Sort::Name;
+        for (k, (_, cw)) in TREE_COLS.iter().enumerate() {
+            if x >= cx {
+                sort = [Sort::Size, Sort::Files, Sort::Folders, Sort::Size, Sort::Modified][k];
+            }
+            cx += cw;
+        }
+        self.tree_sort = sort;
+        appwin::redraw(self.hwnd);
+        true
     }
 
     /// A click in the tree: on a folder's arrow (or `toggle`) opens or closes it.
@@ -441,19 +556,36 @@ fn paint_tree(
     sel: Option<crate::disktree::Row>,
     hot: Option<usize>,
     icons: Option<&(ID2D1Bitmap, ID2D1Bitmap)>,
+    sort: crate::disktree::Sort,
 ) {
-    use crate::disktree::Row;
+    use crate::disktree::{Row, Sort};
     let (x, y, w, h) = area;
-    let accent = theme::accent();
+    let spin =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f32()) * 6.0;
     let last_child = crate::disktree::last_children(rows);
     p.rrect(x, y, w, h, 8.0, PANEL);
     // The header.
     let fixed: f32 = TREE_COLS.iter().map(|c| c.1).sum();
     let name_w = (w - fixed - 16.0).max(200.0);
-    p.text("Name", &f.label, x + 14.0, y, name_w, TREE_HEAD, Align::Left, Color::white(0.6));
+    // The column titles, the one it's ordered by marked (click one to order by it).
+    p.rrect(x, y, w, TREE_HEAD, 8.0, Color::white(0.035));
+    let marked = |s: Sort| if s == sort { " \u{25BE}" } else { "" };
+    p.text(
+        &format!("Name{}", marked(Sort::Name)),
+        &f.label,
+        x + 14.0,
+        y,
+        name_w,
+        TREE_HEAD,
+        Align::Left,
+        Color::white(0.7),
+    );
     let mut cx = x + 8.0 + name_w;
-    for (title, cw) in TREE_COLS {
-        p.text(title, &f.label, cx, y, cw - 12.0, TREE_HEAD, Align::Right, Color::white(0.6));
+    for (k, (title, cw)) in TREE_COLS.iter().enumerate() {
+        let s = [Sort::Size, Sort::Files, Sort::Folders, Sort::Size, Sort::Modified][k];
+        let title = if k == 3 { title.to_string() } else { format!("{title}{}", marked(s)) };
+        p.line(cx, y + 8.0, cx, y + TREE_HEAD - 8.0, Color::white(0.08), 1.0);
+        p.text(&title, &f.label, cx, y, cw - 12.0, TREE_HEAD, Align::Right, Color::white(0.7));
         cx += cw;
     }
     p.rrect(x + 8.0, y + TREE_HEAD - 1.0, w - 16.0, 1.0, 0.0, LINE);
@@ -500,9 +632,12 @@ fn paint_tree(
             }
         };
         if sel == Some(row) {
-            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, accent.alpha(0.28));
+            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, BAR.alpha(0.30));
         } else if hot == Some(i) {
-            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, Color::white(0.05));
+            p.rrect(x + 6.0, ry + 1.0, w - 12.0, TREE_ROW - 2.0, 4.0, Color::white(0.06));
+        } else if i % 2 == 1 {
+            // Every other row a shade lighter, to follow a row across.
+            p.rrect(x + 6.0, ry, w - 12.0, TREE_ROW, 0.0, Color::white(0.018));
         }
         let ix = x + 12.0 + depth as f32 * 18.0;
         // The arrow: open or closed, for a folder with anything in it.
@@ -534,14 +669,26 @@ fn paint_tree(
                 p.rrect(gx + 2.0, gy - 1.0, 11.0, 14.0, 2.0, Color::white(0.75));
             }
         }
-        // The share of the root, as TreeSize does: a bar behind the name.
-        let root = t.nodes[0].size.max(1);
-        let tx = gx + 24.0;
-        let bar_w = (x + 8.0 + name_w - tx - 8.0).max(0.0);
-        let share_root = size as f32 / root as f32;
-        p.rrect(tx - 4.0, ry + 4.0, bar_w * share_root, TREE_ROW - 8.0, 3.0, Color::white(0.06));
+        // Still being worked out (something in it not read yet): a spinning arc on its icon.
+        if let Row::Folder(id) = row {
+            if t.nodes[id].pending > 0 && !t.done {
+                let (sx, sy) = (gx + 14.0, ry + 18.0);
+                p.circle(sx, sy, 5.0, Color(0.12, 0.12, 0.13, 1.0));
+                p.arc(sx, sy, 3.5, spin + depth as f32, spin + depth as f32 + 4.2, BAR, 1.6);
+            }
+        }
+        // Its size on a bar for its share of the folder above, as TreeSize
+        // shows it beside the name, then the name.
+        let share = if matches!(row, Row::Folder(0)) { 1.0 } else { size as f32 / parent_size.max(1) as f32 };
+        let (sbx, sbw) = (gx + 24.0, 70.0);
+        p.rrect(sbx, ry + 4.0, sbw, TREE_ROW - 8.0, 3.0, Color::white(0.05));
+        p.rrect(sbx, ry + 4.0, (sbw * share.clamp(0.0, 1.0)).max(2.0), TREE_ROW - 8.0, 3.0, Color::white(0.16));
+        p.text(&size_text(size), &f.small, sbx, ry, sbw - 6.0, TREE_ROW, Align::Right, Color::white(0.92));
+        let tx = sbx + sbw + 8.0;
+        let name_room = (x + 8.0 + name_w - tx - 8.0).max(0.0);
         let bold = depth <= 1 && matches!(row, Row::Folder(_));
-        p.text(&name, &f.body, tx, ry, bar_w, TREE_ROW, Align::Left, Color::white(if bold { 0.96 } else { 0.85 }));
+        let font = if bold { &f.title } else { &f.body };
+        p.text(&name, font, tx, ry, name_room, TREE_ROW, Align::Left, Color::white(if bold { 0.97 } else { 0.86 }));
         // The numbers.
         let mut cx = x + 8.0 + name_w;
         let cell = |cx: f32, cw: f32, text: &str| {
@@ -558,11 +705,11 @@ fn paint_tree(
             &if counts && matches!(row, Row::Folder(_)) { folders.to_string() } else { String::new() },
         );
         cx += TREE_COLS[2].1;
-        // % of the folder above, as a bar with the number on it.
-        let share = if matches!(row, Row::Folder(0)) { 1.0 } else { size as f32 / parent_size.max(1) as f32 };
+        // % of the folder above, as a blue bar with the number on it.
         let (bx, bw) = (cx + 8.0, TREE_COLS[3].1 - 16.0);
         p.rrect(bx, ry + 5.0, bw, TREE_ROW - 10.0, 3.0, Color::white(0.06));
-        p.rrect(bx, ry + 5.0, bw * share.clamp(0.0, 1.0), TREE_ROW - 10.0, 3.0, accent.alpha(0.55));
+        p.rrect(bx, ry + 5.0, bw * share.clamp(0.0, 1.0), TREE_ROW - 10.0, 3.0, BAR.alpha(0.85));
+        p.stroke_rrect(bx + 0.5, ry + 5.5, bw - 1.0, TREE_ROW - 11.0, 3.0, Color::white(0.10), 1.0);
         p.text(&format!("{:.1} %", share * 100.0), &f.small, bx, ry, bw, TREE_ROW, Align::Center, Color::white(0.92));
         cx += TREE_COLS[3].1;
         cell(cx, TREE_COLS[4].1, &crate::disktree::date(modified));
@@ -584,6 +731,7 @@ fn paint(s: &mut State) {
     let tree = s.tree.clone();
     let open = s.open.clone();
     let (tree_scroll, tree_sel, tree_hot) = (s.tree_scroll, s.tree_sel, s.tree_hot);
+    let (tree_sort, tool_hot) = (s.tree_sort, s.tool_hot);
     let mut tree_rows = Vec::new();
     let stock = s.stock.clone();
     let drives = s.drives.clone();
@@ -639,8 +787,35 @@ fn paint(s: &mut State) {
         if tree_view {
             let Some(tree) = &tree else { return };
             let t = tree.lock().unwrap_or_else(|e| e.into_inner());
-            tree_rows = crate::disktree::rows(&t, &open);
-            let max = (tree_rows.len() as f32 * TREE_ROW - (mh - TREE_HEAD)).max(0.0);
+            tree_rows = crate::disktree::rows(&t, &open, tree_sort);
+            // The toolbar.
+            for (i, (glyph, label, bw)) in TOOLS.iter().enumerate() {
+                let bx = tool_x(i);
+                let enabled = i != 1 || !t.done;
+                let lit = tool_hot == Some(i) && enabled;
+                p.rrect(bx, TOP + 4.0, *bw, TOOL_H - 12.0, 6.0, Color::white(if lit { 0.10 } else { 0.05 }));
+                let ink = Color::white(if enabled { 0.92 } else { 0.35 });
+                let gc = match i {
+                    0 => Color(0.36, 0.78, 0.45, if enabled { 1.0 } else { 0.4 }),
+                    1 => Color(0.95, 0.36, 0.33, if enabled { 1.0 } else { 0.35 }),
+                    _ => BAR,
+                };
+                if let Some(ic) = &f.icons {
+                    p.text(
+                        &char::from_u32(*glyph).unwrap_or(' ').to_string(),
+                        ic,
+                        bx + 8.0,
+                        TOP + 4.0,
+                        20.0,
+                        TOOL_H - 12.0,
+                        Align::Center,
+                        gc,
+                    );
+                }
+                p.text(label, &f.body, bx + 32.0, TOP + 4.0, bw - 36.0, TOOL_H - 12.0, Align::Left, ink);
+            }
+            let (ty, th) = (TOP + TOOL_H, mh - TOOL_H);
+            let max = (tree_rows.len() as f32 * TREE_ROW - (th - TREE_HEAD)).max(0.0);
             let scroll = tree_scroll.min(max);
             let icons = stock.as_ref().and_then(|(folder, file)| {
                 Some((p.bitmap(TREE_ICON, TREE_ICON, folder)?, p.bitmap(TREE_ICON, TREE_ICON, file)?))
@@ -648,7 +823,7 @@ fn paint(s: &mut State) {
             paint_tree(
                 p,
                 f,
-                (12.0, TOP, w - 24.0, mh),
+                (12.0, ty, w - 24.0, th),
                 &t,
                 &tree_rows,
                 &open,
@@ -656,10 +831,28 @@ fn paint(s: &mut State) {
                 tree_sel,
                 tree_hot,
                 icons.as_ref(),
+                tree_sort,
             );
             let root = &t.nodes[0];
+            // Working it out: a bar running along the bottom.
+            if !t.done {
+                let run = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f32())
+                    * 0.6)
+                    % 1.0;
+                p.rrect(12.0, h - STATUS - 2.0, w - 24.0, 2.0, 1.0, Color::white(0.06));
+                p.rrect(12.0 + (w - 24.0) * run * 0.8, h - STATUS - 2.0, (w - 24.0) * 0.2, 2.0, 1.0, BAR);
+            }
             let status = if t.indexed {
                 format!("{} \u{b7} from the file index, so it's all here already", size_text(root.size))
+            } else if t.done && t.stopped() {
+                format!(
+                    "Stopped \u{b7} {} so far \u{b7} {} files \u{b7} {} folders",
+                    size_text(root.size),
+                    root.files,
+                    root.folders
+                )
             } else if t.done {
                 format!("{} \u{b7} {} files \u{b7} {} folders", size_text(root.size), root.files, root.folders)
             } else {
@@ -794,7 +987,7 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             with(|s| {
                 if s.tree_view {
                     let (_, h) = appwin::client(hwnd);
-                    let view = h - TOP - STATUS - 6.0 - TREE_HEAD;
+                    let view = h - TOP - STATUS - 6.0 - TOOL_H - TREE_HEAD;
                     let max = (s.tree_rows.len() as f32 * TREE_ROW - view).max(0.0);
                     s.tree_scroll = (s.tree_scroll - delta / 120.0 * TREE_ROW * 3.0).clamp(0.0, max);
                     appwin::redraw(hwnd);
@@ -810,8 +1003,10 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             with(|s| {
                 if s.tree_view {
                     let hot = s.tree_row_at(y);
-                    if hot != s.tree_hot {
+                    let tool = s.tool_at(x, y);
+                    if hot != s.tree_hot || tool != s.tool_hot {
                         s.tree_hot = hot;
+                        s.tool_hot = tool;
                         appwin::redraw(hwnd);
                     }
                     return;
@@ -847,6 +1042,13 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     return;
                 }
                 if s.tree_view {
+                    if let Some(i) = s.tool_at(x, y) {
+                        s.tool(i);
+                        return;
+                    }
+                    if s.tree_header(x, y, w) {
+                        return;
+                    }
                     s.tree_click(x, y, false);
                     return;
                 }
@@ -917,6 +1119,8 @@ pub fn run(start: Option<String>) {
             tree_sel: None,
             tree_hot: None,
             tree_rows: Vec::new(),
+            tree_sort: crate::disktree::Sort::Size,
+            tool_hot: None,
             stock: crate::disktree::stock_icons(TREE_ICON),
         })
     });
