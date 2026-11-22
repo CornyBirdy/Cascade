@@ -7,6 +7,8 @@ Settings > Updates > What's new opens the list.
 ## 2026-11-22
 
 **New**
+- **The tablet's own buttons** (Settings > Bluetooth & devices > Tablet buttons): each of the 12 set to a shortcut (ctrl+z, space, shift held...), a right or middle click, or the eraser while it's held; Settings shows which one you're pressing. The pen's buttons can press a shortcut too.
+- **Press and hold to right-click** can be turned off for the pen (Windows' gesture: holding the pen still right-clicks).
 - **Pressure graph and test pad for the pen tablet** (Settings > Bluetooth & devices > Pen tablet): drag the curve's points for where the pen starts drawing, how soft or firm it feels and how hard a full press is, with a dot showing your pen live; draw on the pad to try it. The tablet's settings only show while the built-in driver is on.
 - **Disk Usage as a tree**, as TreeSize shows it (the map's still there, Tree / Map at the top): open folders to see what's in them, biggest first, each with its size, files, folders, a bar for its share of the folder above, and when it last changed; loose files together as "[n Files]". Without the file index the tree fills in as it's worked out: folders appear as they're found and their sizes climb.
 - **Snap layouts**: drag a window to the top of the screen and Windows 11's layouts drop down (halves, thirds, two thirds and one, a wide middle, a half and two quarters, quarters); let go over a part to put it there.
@@ -25,6 +27,10 @@ Settings > Updates > What's new opens the list.
 - **Start's search learns**: what you open for a search comes first next time ("vs", then Visual Studio Code). Something that's both a setting and a command (Device Manager) is listed once, and settings, commands and files show their own icons.
 
 **Fixed**
+- **No animation when a window came back** from the taskbar: Windows doesn't animate a restore for its shell, so Cascade always does now, the window waiting until its picture has grown out of the button.
+- **Wobbly windows didn't work on some apps** (browsers, Electron and WinUI apps, which draw on the GPU) **and had a black border** (Windows' invisible resize frame, printed black): the window's hidden another way that works for every app, and its picture is cut to what's seen of it, with round corners.
+- **Lighting looked pasted into Settings**: it sits on the same backdrop now, with Settings' cards.
+- **Gradients in Settings**: the backdrop is Windows' grey with only a hint of the wallpaper, and the theme samples are plain.
 - **The pen was always pressed**: the driver took the pen's resting pressure from OpenTabletDriver's figure, and pens rest differently. It learns each pen's rest as it comes into reach, and has a threshold before it draws (with a little give, so it doesn't flicker).
 - **Wobbly windows tore**: each piece of the window was bent as a slanted rectangle, which can't meet its neighbours; they're bent as triangles that share their edges.
 - **No minimise animation for Cascade's own windows** (Settings, Files...), and none when restoring: the restore flew to where the window was parked off screen.
