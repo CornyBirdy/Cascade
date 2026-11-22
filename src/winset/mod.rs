@@ -338,7 +338,7 @@ pub fn get(key: &str) -> String {
         "win_join_ssid" => net::join_ssid(),
         "win_join_pw" => String::new(),
         "win_dark_apps" | "win_dark_windows" | "win_transparency" | "win_accent_bars" => b(look::flag(key)),
-        "win_accent" => look::accent_label(),
+        "win_accent" => look::accent_hex(),
         "win_wallpaper_fit" => look::fit_label(),
         "win_power_mode" | "win_power_plan" | "win_screen_ac" | "win_sleep_ac" | "win_screen_dc" | "win_sleep_dc" => {
             power::label(key)
@@ -398,6 +398,11 @@ pub fn set(key: &str, v: &str) {
     }
     let on = v == "true";
     match key {
+        "win_accent" => {
+            if let Some(rgb) = crate::theme::parse_accent(v) {
+                look::set_accent(rgb);
+            }
+        }
         "win_hdr" => display::set_hdr(on),
         "win_night" => night::update(|s| s.on = on),
         "win_night_strength" => {
@@ -456,7 +461,6 @@ pub fn action(key: &str, owner: HWND) {
         "win_proxy" => {
             crate::shell::launch("rundll32.exe", "inetcpl.cpl,LaunchConnectionDialog", false);
         }
-        "win_accent" => look::pick_accent(owner),
         "win_wallpaper" => {
             crate::wallpaper::choose_and_set(|| {
                 crate::shellmode::reload_wallpaper();

@@ -387,9 +387,10 @@ enum Ctl {
     Pick,
     /// The themes, as a grid of samples to click.
     Gallery,
-    /// The accent colour: the Windows accent, then Windows' own palette, as
-    /// dots to click (`theme::PALETTE`).
-    Accents,
+    /// An accent colour as dots to click: Cascade's (true: Windows' own),
+    /// the first dot following the other one, then Windows' palette
+    /// (`theme::PALETTE`), then + for any colour.
+    Accents(bool),
     /// Tiles to drag between lanes (which widgets show, where and in what order).
     Board(Board),
     /// The screens as they sit on the desk, to drag into place and click to choose.
@@ -424,7 +425,7 @@ fn row_h(r: &Row) -> f32 {
     match r.ctl {
         Ctl::Heading => HEAD_H,
         Ctl::Gallery => BOARD_HEAD + gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP + 16.0,
-        Ctl::Accents => BOARD_HEAD + accent_rows() as f32 * (DOT + DOT_GAP) - DOT_GAP + 16.0,
+        Ctl::Accents(_) => BOARD_HEAD + accent_rows() as f32 * (DOT + DOT_GAP) - DOT_GAP + 16.0,
         Ctl::Board(b) => BOARD_HEAD + b.lanes().len() as f32 * (LANE_H + LANE_GAP) - LANE_GAP + 16.0,
         Ctl::Arrange => BOARD_HEAD + ARRANGE_H + 16.0,
         Ctl::PenCurve => BOARD_HEAD + CURVE_H + 16.0,
@@ -522,6 +523,23 @@ fn accent_value(k: usize) -> Option<String> {
 /// The colour picked with the picker, if `accent` is one not in the palette.
 fn custom_accent(value: &str) -> Option<u32> {
     theme::parse_accent(value).filter(|c| !theme::PALETTE.iter().any(|(p, _)| p == c))
+}
+
+/// Cascade's accent colour now (0xRRGGBB).
+fn cascade_accent_rgb() -> Option<u32> {
+    let c = theme::accent();
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    Some((ch(c.0) << 16) | (ch(c.1) << 8) | ch(c.2))
+}
+
+/// Which dot Windows' accent `value` (#RRGGBB) is: the first when it's
+/// Cascade's, a palette colour's, or the last (+) for any other.
+fn win_accent_index(value: &str) -> Option<usize> {
+    let c = theme::parse_accent(value)?;
+    if Some(c) == cascade_accent_rgb() {
+        return Some(0);
+    }
+    Some(theme::PALETTE.iter().position(|(p, _)| *p == c).map_or(CUSTOM_DOT, |i| i + 1))
 }
 
 /// Which dot `accent` is.
@@ -1461,14 +1479,14 @@ fn rows(section: usize) -> Vec<Row> {
 
             row("theme", "Theme", "", Gallery),
             heading("h_colour", "Colour"),
-            row("accent", "Cascade's accent colour", "", Accents),
+            row("accent", "Cascade's accent colour", "", Accents(false)),
             row(
                 "accent_glass",
                 "Accent colour on the glass",
                 "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
                 Toggle,
             ),
-            row("win_accent", "Windows' accent colour", "Windows' colour for highlights, buttons and links in its own windows.", Pick),
+            row("win_accent", "Windows' accent colour", "", Accents(true)),
             row("win_accent_bars", "Accent colour on title bars", "And on window borders.", Toggle),
             heading("h_mode", "Light and dark"),
             row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
@@ -2694,7 +2712,7 @@ impl Settings {
             Ctl::Board(_)
             | Ctl::Gallery
             | Ctl::Arrange
-            | Ctl::Accents
+            | Ctl::Accents(_)
             | Ctl::PenCurve
             | Ctl::PenPad
             | Ctl::Note
@@ -2713,7 +2731,18 @@ impl Settings {
             matches!(r.ctl, Ctl::Gallery).then(|| theme::THEMES.iter().find(|t| t.key == get(r.key))).flatten();
         let desc = if let Some(t) = picked {
             t.about.to_string()
-        } else if matches!(r.ctl, Ctl::Accents) {
+        } else if matches!(r.ctl, Ctl::Accents(true)) {
+            let v = get(r.key);
+            let name = match theme::parse_accent(&v) {
+                Some(c) if Some(c) == cascade_accent_rgb() => "the same as Cascade's".to_string(),
+                Some(c) => theme::PALETTE
+                    .iter()
+                    .find(|(p, _)| *p == c)
+                    .map_or_else(|| format!("#{c:06X}"), |(_, n)| n.to_string()),
+                None => "Windows' default".to_string(),
+            };
+            format!("Highlights, buttons and links in Windows' own windows: {name}.")
+        } else if matches!(r.ctl, Ctl::Accents(false)) {
             // What's picked.
             match theme::parse_accent(&get(r.key)) {
                 None => "Your Windows accent colour, followed when you change it.".to_string(),
@@ -2818,7 +2847,7 @@ impl Settings {
                     Ctl::Board(_)
                         | Ctl::Gallery
                         | Ctl::Arrange
-                        | Ctl::Accents
+                        | Ctl::Accents(_)
                         | Ctl::PenCurve
                         | Ctl::PenPad
                         | Ctl::Heading
@@ -2891,7 +2920,7 @@ impl Settings {
                 gallery_rows() as f32 * (SWATCH_H + SWATCH_GAP) - SWATCH_GAP,
             ),
             // The dots, under the title.
-            Ctl::Accents => (
+            Ctl::Accents(_) => (
                 self.x0() + 18.0,
                 y + BOARD_HEAD,
                 self.content_w() - 36.0,
@@ -3036,7 +3065,7 @@ impl Settings {
                 }
                 continue;
             }
-            if let Ctl::Accents = r.ctl {
+            if let Ctl::Accents(_) = r.ctl {
                 let area = self.ctl_rect(i, &r.ctl);
                 for k in 0..=CUSTOM_DOT {
                     let (dx, dy) = dot_at(area, k);
@@ -3170,6 +3199,14 @@ impl Settings {
                 }
                 self.invalidate();
                 None
+            }
+            Hit::Accent(i, k) if matches!(self.rows().get(i).map(|r| &r.ctl), Some(Ctl::Accents(true))) => {
+                self.invalidate();
+                match k {
+                    CUSTOM_DOT => Some(Change::Action("win_accent_custom")),
+                    0 => Some(Change::Set("win_accent", format!("#{:06X}", cascade_accent_rgb()?))),
+                    k => Some(Change::Set("win_accent", accent_value(k)?)),
+                }
             }
             Hit::Accent(_, CUSTOM_DOT) => {
                 self.invalidate();
@@ -3509,7 +3546,7 @@ impl Settings {
                         let dw = text_w - (dx - x0 - 18.0);
                         if matches!(
                             r.ctl,
-                            Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents | Ctl::PenCurve | Ctl::PenPad
+                            Ctl::Board(_) | Ctl::Gallery | Ctl::Arrange | Ctl::Accents(_) | Ctl::PenCurve | Ctl::PenPad
                         ) {
                             p.text(&desc, &f.small, dx, y + 34.0, dw, 18.0, Align::Left, tone);
                         } else {
@@ -3657,13 +3694,19 @@ impl Settings {
                                 );
                             }
                         }
-                        Ctl::Accents => {
-                            let picked = accent_index(&get(r.key));
+                        Ctl::Accents(windows) => {
+                            let picked =
+                                if windows { win_accent_index(&get(r.key)) } else { accent_index(&get(r.key)) };
                             let area = (cx, cy, cwid, ch);
-                            let custom = custom_accent(&get(r.key));
+                            let custom = if windows {
+                                theme::parse_accent(&get(r.key)).filter(|_| picked == Some(CUSTOM_DOT))
+                            } else {
+                                custom_accent(&get(r.key))
+                            };
                             for k in 0..=CUSTOM_DOT {
                                 let (dx, dy) = dot_at(area, k);
                                 let colour = match k {
+                                    0 if windows => theme::accent(),
                                     0 => theme::windows_accent(),
                                     CUSTOM_DOT => match custom {
                                         Some(c) => {
@@ -3694,6 +3737,9 @@ impl Settings {
                                     let ink = Color::white(0.9);
                                     p.line(dx - 6.0, dy, dx + 6.0, dy, ink, 1.6);
                                     p.line(dx, dy - 6.0, dx, dy + 6.0, ink, 1.6);
+                                } else if k == 0 && windows {
+                                    // Cascade's accent: a notch on it.
+                                    p.rrect(dx - 6.0, dy - 2.5, 12.0, 5.0, 2.5, Color::white(0.9));
                                 } else if k == 0 {
                                     // The Windows accent: Windows' four panes on it.
                                     let ink = Color::white(0.9);

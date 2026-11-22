@@ -4181,6 +4181,16 @@ impl App {
                 Config::set("profile_picture", "");
                 self.reload_config();
             }
+            // Any colour for Windows' accent, from the colour picker.
+            Change::Action("win_accent_custom") => {
+                let owner = self.settings.as_ref().map_or(0, |s| s.hwnd.0 as isize);
+                let start = theme::parse_accent(&setting_value(&self.cfg, "win_accent")).unwrap_or(0x0078D4);
+                std::thread::spawn(move || {
+                    if let Some(c) = crate::rgb::app::pick_colour(HWND(owner as *mut _), start) {
+                        crate::winset::set("win_accent", &format!("#{c:06X}"));
+                    }
+                });
+            }
             Change::Action("update_check_now") => {
                 update::set_status("Checking\u{2026}");
                 update::spawn_check();
