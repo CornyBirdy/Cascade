@@ -169,6 +169,8 @@ pub mod msg {
     pub const DESK_MENU_SHOW: u32 = WM_APP + 48;
     /// Start a snip (from `--snip`: Snip's taskbar button or Start).
     pub const SNIP: u32 = WM_APP + 49;
+    /// Win+arrow (wParam: the key, plus 0x100 with Shift), for the window in front.
+    pub const WIN_ARROW: u32 = WM_APP + 50;
 
     static TARGET: AtomicIsize = AtomicIsize::new(0);
 

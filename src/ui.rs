@@ -791,6 +791,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(|a| a.on_hotkey(wp.0 as i32));
             return LRESULT(0);
         }
+        msg::WIN_ARROW => {
+            let (vk, shift) = ((wp.0 & 0xFF) as u16, wp.0 & 0x100 != 0);
+            shellmode::win_arrow(vk, shift);
+            return LRESULT(0);
+        }
         msg::SNIP => {
             with_app(|a| crate::snip::start(a.instance, false));
             return LRESULT(0);

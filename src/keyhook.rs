@@ -66,6 +66,15 @@ const MAX_CHECKS: u32 = 4;
 /// Sent to the admin helper's window to check the keys afterwards.
 pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
 
+/// Win+arrows held down now (bit n: Left + n), their releases swallowed too.
+static ARROWS_HELD: AtomicU32 = AtomicU32::new(0);
+
+/// Whether Cascade is the shell (Explorer has no taskbar up): Windows moves
+/// windows with Win+arrows itself otherwise.
+fn shell_is_ours() -> bool {
+    !crate::shellmode::explorer_is_shell()
+}
+
 /// Tells the main Cascade window something happened.
 fn notify(m: u32, wparam: usize) {
     if IN_HELPER.load(Ordering::Relaxed) {
@@ -400,6 +409,30 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             return LRESULT(1);
                         }
                     }
+                }
+            }
+
+            // Win+arrows (and with Shift), for windows, while Cascade is the
+            // shell: taken here, so they work even when Windows won't hand
+            // them over as shortcuts.
+            let arrow = matches!(vk, v if v == VK_LEFT.0 || v == VK_RIGHT.0 || v == VK_UP.0 || v == VK_DOWN.0);
+            if arrow {
+                let bit = 1u32 << (vk - VK_LEFT.0);
+                let win_held = WIN_DOWN.load(Ordering::Relaxed) || down_now(VK_LWIN) || down_now(VK_RWIN);
+                if down && win_held && !down_now(VK_MENU) && !down_now(VK_CONTROL) && handled_here() && shell_is_ours()
+                {
+                    COMBO.store(true, Ordering::Relaxed);
+                    let held = ARROWS_HELD.fetch_or(bit, Ordering::Relaxed) & bit != 0;
+                    if !held {
+                        mask_tap();
+                    }
+                    // Held down, it repeats: each repeat moves it on, as Windows does.
+                    let shift = if down_now(VK_SHIFT) { 0x100 } else { 0 };
+                    notify(msg::WIN_ARROW, vk as usize | shift);
+                    return LRESULT(1);
+                }
+                if up && ARROWS_HELD.fetch_and(!bit, Ordering::Relaxed) & bit != 0 {
+                    return LRESULT(1);
                 }
             }
 

@@ -146,7 +146,7 @@ static OLD_ARRANGE: AtomicI32 = AtomicI32::new(-1);
 /// Whether Explorer is the shell: it has made its taskbar. Told by the
 /// program behind the window, since Cascade's own hidden tray window (this
 /// copy's, or another's) has the same class.
-fn explorer_is_shell() -> bool {
+pub(crate) fn explorer_is_shell() -> bool {
     explorer_shell().is_some()
 }
 
@@ -2119,9 +2119,103 @@ fn front_window(style: WINDOW_STYLE) -> Option<HWND> {
     }
 }
 
-/// Win+arrow: the window in front to the left or right half of its screen,
-/// maximised, or back down.
+/// Win+arrow from Cascade's keyboard hook (`vk`, with Shift or not).
+pub fn win_arrow(vk: u16, shift: bool) {
+    const LEFT: u16 = 0x25;
+    const UP: u16 = 0x26;
+    const RIGHT: u16 = 0x27;
+    match (vk, shift) {
+        (LEFT, true) => move_screen(false),
+        (RIGHT, true) => move_screen(true),
+        (UP, true) => stretch(),
+        (_, true) => snap(Snap::Down),
+        (LEFT, false) => snap(Snap::Left),
+        (RIGHT, false) => snap(Snap::Right),
+        (UP, false) => snap(Snap::Up),
+        _ => snap(Snap::Down),
+    }
+}
+
+/// Win+Shift+Up: the window in front as tall as its screen, keeping its width and place across.
+fn stretch() {
+    let Some(h) = front_window(WS_THICKFRAME) else { return };
+    let Some(screen) = screen_of(h) else { return };
+    if unsafe { IsZoomed(h).as_bool() } {
+        return;
+    }
+    let v = visible_rect(h);
+    remember(h, RECT { top: screen.work.top, bottom: screen.work.bottom, ..v });
+    place(h, RECT { top: screen.work.top, bottom: screen.work.bottom, ..v });
+}
+
+/// A quarter of `work`.
+fn quarter(work: RECT, left: bool, top: bool) -> RECT {
+    let h = half(work, left);
+    let mid = work.top + (work.bottom - work.top) / 2;
+    if top {
+        RECT { bottom: mid, ..h }
+    } else {
+        RECT { top: mid, ..h }
+    }
+}
+
+/// Notes where `h` was before its first snap (kept while it moves between
+/// snapped places), and where it's going now.
+fn remember(h: HWND, target: RECT) {
+    let key = h.0 as isize;
+    let mut list = snapped();
+    let resnap = list.iter().any(|e| e.0 == key && near(visible_rect(h), e.2));
+    if !resnap {
+        list.retain(|e| e.0 != key);
+        if list.len() >= 64 {
+            list.remove(0);
+        }
+        list.push((key, window_rect(h), target));
+    }
+    if let Some(e) = list.iter_mut().find(|e| e.0 == key) {
+        e.2 = target;
+    }
+}
+
+/// Win+arrow: the window in front moves a step, as Windows 11 does: left and
+/// right halves (on to the next screen past the edge), up from a half to its
+/// top quarter and then maximised, down from a half to its bottom quarter
+/// and then back where it was (or minimised).
 fn snap(dir: Snap) {
+    // Halves and quarters first: a window in one moves on from there.
+    if let Some(h) = front_window(WS_THICKFRAME) {
+        if let (Some(screen), false) = (screen_of(h), unsafe { IsZoomed(h).as_bool() }) {
+            let (w, v) = (screen.work, visible_rect(h));
+            let at = |r: RECT| near(v, r);
+            let next = match dir {
+                Snap::Up if at(half(w, true)) => Some(quarter(w, true, true)),
+                Snap::Up if at(half(w, false)) => Some(quarter(w, false, true)),
+                Snap::Up if at(quarter(w, true, false)) => Some(half(w, true)),
+                Snap::Up if at(quarter(w, false, false)) => Some(half(w, false)),
+                Snap::Down if at(half(w, true)) => Some(quarter(w, true, false)),
+                Snap::Down if at(half(w, false)) => Some(quarter(w, false, false)),
+                Snap::Down if at(quarter(w, true, true)) => Some(half(w, true)),
+                Snap::Down if at(quarter(w, false, true)) => Some(half(w, false)),
+                Snap::Left if at(quarter(w, false, true)) => Some(quarter(w, true, true)),
+                Snap::Left if at(quarter(w, false, false)) => Some(quarter(w, true, false)),
+                Snap::Right if at(quarter(w, true, true)) => Some(quarter(w, false, true)),
+                Snap::Right if at(quarter(w, true, false)) => Some(quarter(w, false, false)),
+                Snap::Left if at(quarter(w, true, true)) || at(quarter(w, true, false)) => Some(half(w, true)),
+                Snap::Right if at(quarter(w, false, true)) || at(quarter(w, false, false)) => Some(half(w, false)),
+                _ => None,
+            };
+            if let Some(target) = next {
+                remember(h, target);
+                place(h, target);
+                return;
+            }
+        }
+    }
+    snap_basic(dir);
+}
+
+/// Win+arrow from anywhere else: halves, maximised, or back down.
+fn snap_basic(dir: Snap) {
     let want = match dir {
         Snap::Left | Snap::Right => WS_THICKFRAME,
         Snap::Up => WS_MAXIMIZEBOX,
