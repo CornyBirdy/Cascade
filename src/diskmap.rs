@@ -19,6 +19,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
+
 use crate::appwin::{self, size_text, LINE, PANEL};
 use crate::gfx::{Align, Color, Gfx};
 use crate::theme;
@@ -72,7 +74,12 @@ struct State {
     tree_sel: Option<crate::disktree::Row>,
     tree_hot: Option<usize>,
     tree_rows: Vec<(crate::disktree::Row, usize)>,
+    /// Windows' folder and document icons for the tree (BGRA, `TREE_ICON` square).
+    stock: Option<(Vec<u8>, Vec<u8>)>,
 }
+
+/// The tree's icons' size in pixels (drawn at 18, so sharp to 200%).
+const TREE_ICON: u32 = 36;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -433,10 +440,12 @@ fn paint_tree(
     scroll: f32,
     sel: Option<crate::disktree::Row>,
     hot: Option<usize>,
+    icons: Option<&(ID2D1Bitmap, ID2D1Bitmap)>,
 ) {
     use crate::disktree::Row;
     let (x, y, w, h) = area;
     let accent = theme::accent();
+    let last_child = crate::disktree::last_children(rows);
     p.rrect(x, y, w, h, 8.0, PANEL);
     // The header.
     let fixed: f32 = TREE_COLS.iter().map(|c| c.1).sum();
@@ -453,6 +462,27 @@ fn paint_tree(
     p.clip(x, top, w, h - TREE_HEAD);
     let first = (scroll / TREE_ROW).floor().max(0.0) as usize;
     let count = ((h - TREE_HEAD) / TREE_ROW).ceil() as usize + 1;
+    // The tree's lines: from each open folder down to its last child, with a
+    // short line across to each child, as TreeSize and Explorer draw them.
+    let line = Color::white(0.16);
+    let row_y = |i: usize| top + i as f32 * TREE_ROW - scroll;
+    for (i, last) in last_child.iter().enumerate() {
+        let Some(last) = *last else { continue };
+        let (y0, y1) = (row_y(i) + TREE_ROW - 5.0, row_y(last) + TREE_ROW / 2.0);
+        if y1 < top || y0 > y + h {
+            continue;
+        }
+        let lx = x + 12.0 + rows[i].1 as f32 * 18.0 + 8.5;
+        p.line(lx, y0, lx, y1, line, 1.0);
+        for (j, &(_, depth)) in rows.iter().enumerate().take(last + 1).skip(i + 1) {
+            if depth == rows[i].1 + 1 {
+                let cy = row_y(j) + TREE_ROW / 2.0;
+                if cy >= top - TREE_ROW && cy <= y + h + TREE_ROW {
+                    p.line(lx, cy, lx + 9.0, cy, line, 1.0);
+                }
+            }
+        }
+    }
     for (i, &(row, depth)) in rows.iter().enumerate().skip(first).take(count) {
         let ry = top + i as f32 * TREE_ROW - scroll;
         let (node, parent_size) = match row {
@@ -491,14 +521,16 @@ fn paint_tree(
                 }
             }
         }
-        // A folder, or a page for the loose files.
+        // Windows' own folder icon, or its document icon for the loose files.
         let (gx, gy) = (ix + 22.0, ry + 7.0);
-        match row {
-            Row::Folder(_) => {
+        match (row, icons) {
+            (Row::Folder(_), Some((folder, _))) => p.image(folder, gx - 1.0, ry + 4.0, 18.0, 18.0, 1.0),
+            (Row::Files(_), Some((_, file))) => p.image(file, gx - 1.0, ry + 4.0, 18.0, 18.0, 1.0),
+            (Row::Folder(_), None) => {
                 p.rrect(gx, gy, 7.0, 3.0, 1.0, Color(0.96, 0.75, 0.25, 1.0));
                 p.rrect(gx, gy + 2.0, 16.0, 11.0, 2.0, Color(0.98, 0.80, 0.32, 1.0));
             }
-            Row::Files(_) => {
+            (Row::Files(_), None) => {
                 p.rrect(gx + 2.0, gy - 1.0, 11.0, 14.0, 2.0, Color::white(0.75));
             }
         }
@@ -553,6 +585,7 @@ fn paint(s: &mut State) {
     let open = s.open.clone();
     let (tree_scroll, tree_sel, tree_hot) = (s.tree_scroll, s.tree_sel, s.tree_hot);
     let mut tree_rows = Vec::new();
+    let stock = s.stock.clone();
     let drives = s.drives.clone();
     let path_text = s.path.to_string_lossy().into_owned();
     let listing = s.listing.clone();
@@ -609,7 +642,21 @@ fn paint(s: &mut State) {
             tree_rows = crate::disktree::rows(&t, &open);
             let max = (tree_rows.len() as f32 * TREE_ROW - (mh - TREE_HEAD)).max(0.0);
             let scroll = tree_scroll.min(max);
-            paint_tree(p, f, (12.0, TOP, w - 24.0, mh), &t, &tree_rows, &open, scroll, tree_sel, tree_hot);
+            let icons = stock.as_ref().and_then(|(folder, file)| {
+                Some((p.bitmap(TREE_ICON, TREE_ICON, folder)?, p.bitmap(TREE_ICON, TREE_ICON, file)?))
+            });
+            paint_tree(
+                p,
+                f,
+                (12.0, TOP, w - 24.0, mh),
+                &t,
+                &tree_rows,
+                &open,
+                scroll,
+                tree_sel,
+                tree_hot,
+                icons.as_ref(),
+            );
             let root = &t.nodes[0];
             let status = if t.indexed {
                 format!("{} \u{b7} from the file index, so it's all here already", size_text(root.size))
@@ -870,6 +917,7 @@ pub fn run(start: Option<String>) {
             tree_sel: None,
             tree_hot: None,
             tree_rows: Vec::new(),
+            stock: crate::disktree::stock_icons(TREE_ICON),
         })
     });
     with(|s| s.go(path));

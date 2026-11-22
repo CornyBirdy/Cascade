@@ -234,6 +234,8 @@ struct State {
     /// and a column edge being dragged: (column, where the drag began, its width then).
     col_w: [f32; 3],
     col_drag: Option<(usize, f32, f32)>,
+    /// The Name column's width once its edge has been dragged (else it takes what's left).
+    name_fixed: Option<f32>,
     /// The address box is being typed in (else the path shows as parts to click).
     editing_addr: bool,
     /// Group by: 0 none, 1 type, 2 date modified, 3 size.
@@ -1151,12 +1153,9 @@ impl State {
             let mut cx = x0 + 8.0;
             for i in 0..COLS.len() {
                 let cwid = self.col_width(i, cw);
-                // The edge after a column (but the Name column's, which takes what's left).
-                if i > 0 && (x - (cx + cwid)).abs() < 5.0 {
+                // The edge after a column: drag it to make the column wider or narrower.
+                if (x - (cx + cwid)).abs() < 5.0 {
                     return Some(Hit::HeaderEdge(i));
-                }
-                if i > 0 && (x - cx).abs() < 5.0 && i > 1 {
-                    return Some(Hit::HeaderEdge(i - 1));
                 }
                 if x < cx + cwid {
                     return Some(Hit::Header(i));
@@ -1177,8 +1176,9 @@ impl State {
         Some(Hit::Empty)
     }
 
+    /// The Name column's width: as dragged, or what the other columns leave.
     fn name_w(&self, cw: f32) -> f32 {
-        (cw - 24.0 - self.col_w.iter().sum::<f32>()).max(160.0)
+        self.name_fixed.unwrap_or_else(|| (cw - 24.0 - self.col_w.iter().sum::<f32>()).max(160.0))
     }
 
     fn tab_w(&self, w: f32) -> f32 {
@@ -1435,8 +1435,8 @@ impl State {
             let mut cx = x0 + 8.0;
             for (i, (name, _)) in COLS.iter().enumerate() {
                 let width = self.col_width(i, cw);
-                // The line between columns, brighter where it can be dragged.
-                if i > 0 {
+                // The line after each column, brighter where it can be dragged.
+                {
                     let lit =
                         matches!(hov, Some(Hit::HeaderEdge(e)) if e == i) || self.col_drag.is_some_and(|d| d.0 == i);
                     p.line(
@@ -1698,7 +1698,8 @@ impl State {
                 self.resort();
             }
             Some(Hit::HeaderEdge(i)) => {
-                self.col_drag = Some((i, x, self.col_w[i - 1]));
+                let (_, _, cw, _) = self.content();
+                self.col_drag = Some((i, x, self.col_width(i, cw)));
                 unsafe {
                     SetCapture(self.hwnd);
                 }
@@ -1763,7 +1764,11 @@ impl State {
 
     fn on_move(&mut self, x: f32, y: f32) {
         if let Some((i, from, width)) = self.col_drag {
-            self.col_w[i - 1] = (width + x - from).clamp(60.0, 600.0);
+            if i == 0 {
+                self.name_fixed = Some((width + x - from).clamp(120.0, 1400.0));
+            } else {
+                self.col_w[i - 1] = (width + x - from).clamp(60.0, 600.0);
+            }
             appwin::redraw(self.hwnd);
             return;
         }
@@ -2346,6 +2351,20 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             let (ctrl, shift) = shift_ctrl(wp);
             with(|s| s.on_down(x, y, ctrl, shift));
         }
+        // Over a column's edge (or dragging one): the resize pointer, as Explorer shows.
+        WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT => {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(hwnd, &mut pt);
+            let k = appwin::scale(hwnd);
+            let edge = with(|s| {
+                s.col_drag.is_some() || matches!(s.hit(pt.x as f32 / k, pt.y as f32 / k), Some(Hit::HeaderEdge(_)))
+            });
+            if edge == Some(true) {
+                SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                return LRESULT(1);
+            }
+        }
         WM_MOUSEMOVE => {
             let (x, y) = appwin::mouse(hwnd, lp);
             with(|s| s.on_move(x, y));
@@ -2502,6 +2521,7 @@ pub fn run(start: Option<String>) {
                 typed: (String::new(), Instant::now()),
                 col_w: [COLS[1].1, COLS[2].1, COLS[3].1],
                 col_drag: None,
+                name_fixed: None,
                 editing_addr: false,
                 group: 0,
                 measure: crate::gfx::Measure::new().ok(),

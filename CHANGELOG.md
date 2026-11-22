@@ -28,6 +28,9 @@ Settings > Updates > What's new opens the list.
 - **Start's search learns**: what you open for a search comes first next time ("vs", then Visual Studio Code). Something that's both a setting and a command (Device Manager) is listed once, and settings, commands and files show their own icons.
 
 **Fixed**
+- **Files: the Name column couldn't be widened** (its edge was the one that didn't drag), and nothing showed a column's edge could be dragged: every edge drags now, with the resize pointer over it.
+- **Disk Usage's tree**: lines from each open folder to what's in it, as TreeSize and Explorer draw them, and Windows' own folder and document icons.
+- **Cascade's app icons** have more to them: a fine grain over the tile, a lit top edge and shaded bottom, a soft shadow under the picture.
 - **No animation when a window came back** from the taskbar: Windows doesn't animate a restore for its shell, so Cascade always does now, the window waiting until its picture has grown out of the button.
 - **Wobbly windows didn't work on some apps** (browsers, Electron and WinUI apps, which draw on the GPU) **and had a black border** (Windows' invisible resize frame, printed black): the window's hidden another way that works for every app, and its picture is cut to what's seen of it, with round corners.
 - **Lighting looked pasted into Settings**: it sits on the same backdrop now, with Settings' cards.

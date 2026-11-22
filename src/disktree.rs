@@ -227,6 +227,84 @@ pub fn rows(t: &Tree, open: &std::collections::HashSet<usize>) -> Vec<(Row, usiz
     out
 }
 
+/// For each row, the row of its last child shown (for the tree's lines),
+/// worked out in one pass.
+pub fn last_children(rows: &[(Row, usize)]) -> Vec<Option<usize>> {
+    let mut last = vec![None; rows.len()];
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    for (j, &(_, depth)) in rows.iter().enumerate() {
+        while open.last().is_some_and(|&(_, d)| d >= depth) {
+            open.pop();
+        }
+        if let Some(&(parent, d)) = open.last() {
+            if d + 1 == depth {
+                last[parent] = Some(j);
+            }
+        }
+        open.push((j, depth));
+    }
+    last
+}
+
+/// Windows' own folder and document icons (premultiplied BGRA, `size`
+/// square), for the tree's rows.
+pub fn stock_icons(size: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::*;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let get = |id: SHSTOCKICONID| -> Option<Vec<u8>> {
+            let mut info =
+                SHSTOCKICONINFO { cbSize: std::mem::size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
+            SHGetStockIconInfo(id, SHGSI_ICON | SHGSI_LARGEICON, &mut info).ok()?;
+            let bmp = wic.CreateBitmapFromHICON(info.hIcon).ok();
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(info.hIcon);
+            let px = crate::icons::to_pixels(&wic, &bmp?).ok()?;
+            let n = crate::icons::ICON_SIZE as usize;
+            if px.len() != n * n * 4 {
+                return None;
+            }
+            // `to_pixels` gives the icons' own size (ICON_SIZE): shrunk to `size` here.
+            Some(shrink(&px, crate::icons::ICON_SIZE, size))
+        };
+        Some((get(SIID_FOLDER)?, get(SIID_DOCNOASSOC)?))
+    }
+}
+
+/// A square BGRA picture `from` pixels across, made `to` across (box filter).
+fn shrink(px: &[u8], from: u32, to: u32) -> Vec<u8> {
+    let (from, to) = (from as usize, to.max(1) as usize);
+    if px.len() < from * from * 4 || to >= from {
+        return px.to_vec();
+    }
+    let mut out = vec![0u8; to * to * 4];
+    for y in 0..to {
+        for x in 0..to {
+            let (x0, x1) = (x * from / to, ((x + 1) * from / to).max(x * from / to + 1));
+            let (y0, y1) = (y * from / to, ((y + 1) * from / to).max(y * from / to + 1));
+            let mut acc = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let i = (sy * from + sx) * 4;
+                    for c in 0..4 {
+                        acc[c] += px[i + c] as u32;
+                    }
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as u32;
+            let o = (y * to + x) * 4;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / n) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// A FILETIME as a date ("21/11/2026").
 pub fn date(ft: u64) -> String {
     if ft == 0 {
@@ -264,6 +342,19 @@ mod tests {
         assert_eq!(t.nodes[1].size, 500);
         assert_eq!(t.path_of(3), PathBuf::from("C:\\Users\\you"));
         assert_eq!(t.sorted_children(0), vec![2, 1]);
+    }
+
+    #[test]
+    fn lines_go_to_the_last_child() {
+        // Root, two children (the first with one of its own), then the second.
+        let rows = vec![
+            (Row::Folder(0), 0),
+            (Row::Folder(1), 1),
+            (Row::Folder(3), 2),
+            (Row::Folder(2), 1),
+            (Row::Files(0), 1),
+        ];
+        assert_eq!(last_children(&rows), vec![Some(4), Some(2), None, None, None]);
     }
 
     #[test]

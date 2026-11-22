@@ -136,6 +136,51 @@ impl Canvas {
         }
     }
 
+    /// A fine grain over what's inside `shape`, as a print or a matte
+    /// surface has: each pixel a touch lighter or darker, always the same.
+    fn grain(&mut self, shape: &Shape, amount: f32) {
+        let n = self.size as f32;
+        for y in 0..self.size {
+            for x in 0..self.size {
+                let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
+                if distance(shape, u, v) > 0.0 {
+                    continue;
+                }
+                // A hash of the pixel's place, -1..1, the same every time.
+                let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
+                h ^= h >> 15;
+                h = h.wrapping_mul(0x2C1B_3C6D);
+                h ^= h >> 12;
+                let r = (h & 0xFFFF) as f32 / 32767.5 - 1.0;
+                let d = &mut self.px[y * self.size + x];
+                for c in d.iter_mut().take(3) {
+                    *c = (*c + r * amount).clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+
+    /// The tile's rim: lit along the top, shaded along the bottom, a pixel or so in.
+    fn bevel(&mut self, shape: &Shape, light: f32, shade: f32) {
+        let n = self.size as f32;
+        for y in 0..self.size {
+            for x in 0..self.size {
+                let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
+                let d = -distance(shape, u, v) * n;
+                if !(0.0..1.8).contains(&d) {
+                    continue;
+                }
+                let k = 1.0 - d / 1.8;
+                let p = &mut self.px[y * self.size + x];
+                let (target, amount) =
+                    if v < 0.5 { (1.0, light * (1.0 - v * 2.0)) } else { (0.0, shade * (v * 2.0 - 1.0)) };
+                for c in p.iter_mut().take(3) {
+                    *c += (target - *c) * amount * k;
+                }
+            }
+        }
+    }
+
     /// BGRA bytes, premultiplied or straight.
     fn bytes(&self, premultiplied: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.px.len() * 4);
@@ -302,12 +347,33 @@ fn draw(id: &str, size: u32) -> Option<Canvas> {
     let m = 0.06;
     let tile = Shape::Box(m, m, 1.0 - 2.0 * m, 1.0 - 2.0 * m, 0.22);
     c.fill(&tile, hex(top), Some(hex(bottom)));
-    // A soft light along the top.
-    c.fill(&Shape::Box(m, m, 1.0 - 2.0 * m, 0.45, 0.22), fade(WHITE, 0.10), Some(fade(WHITE, 0.0)));
+    // A soft light along the top, a grain over the tile, and its rim.
+    c.fill(&Shape::Box(m, m, 1.0 - 2.0 * m, 0.45, 0.22), fade(WHITE, 0.12), Some(fade(WHITE, 0.0)));
+    c.grain(&tile, 0.035);
+    c.bevel(&tile, 0.45, 0.35);
+    // The picture: a soft shadow under it first (a few offset copies, fading
+    // out), then itself, a little shaded towards the bottom.
+    for (k, a) in [(0.012, 0.16), (0.022, 0.10), (0.032, 0.06)] {
+        for (s, _) in &picture {
+            c.fill(&shifted(s, 0.0, k), C(0.0, 0.0, 0.0, a), None);
+        }
+    }
     for (s, col) in &picture {
-        c.fill(s, *col, None);
+        let low = C(col.0 * 0.86, col.1 * 0.86, col.2 * 0.88, col.3);
+        c.fill(s, *col, Some(low));
     }
     Some(c)
+}
+
+/// `s` moved by (dx, dy).
+fn shifted(s: &Shape, dx: f32, dy: f32) -> Shape {
+    match *s {
+        Shape::Box(x, y, w, h, r) => Shape::Box(x + dx, y + dy, w, h, r),
+        Shape::Circle(x, y, r) => Shape::Circle(x + dx, y + dy, r),
+        Shape::Ring(x, y, r, w, a0, a1) => Shape::Ring(x + dx, y + dy, r, w, a0, a1),
+        Shape::Line(x0, y0, x1, y1, w) => Shape::Line(x0 + dx, y0 + dy, x1 + dx, y1 + dy, w),
+        Shape::Tri(p) => Shape::Tri(p.map(|(x, y)| (x + dx, y + dy))),
+    }
 }
 
 /// Whether `id` (an AppUserModelID such as "Cascade.Files") has an icon here.
