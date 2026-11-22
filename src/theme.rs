@@ -129,22 +129,24 @@ pub const THEMES: [Theme; 2] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Apple's liquid glass: clear, not frosted, what's behind it seen sharp and bent round its edge like a lens, with a fine lit rim.",
+        about: "Apple's liquid glass: clear, not frosted, what's behind it seen sharp and bent round its edge like a lens, with a bright lit rim.",
         glass: Glass::Clear,
-        // A dark tint, so white text reads on any wallpaper (the Tint
-        // slider sets how dark), and no white haze: the glass is clear.
+        // Barely tinted, as Apple's is: just enough that white text reads
+        // over a bright wallpaper (the Tint slider sets how much).
         tint: (0.02, 0.02, 0.03),
-        tint_scale: 0.62,
+        tint_scale: 0.30,
         solid: (0.19, 0.19, 0.2),
-        film: (white(0.035), white(0.012)),
-        // A fine rim catching the light, no outline round it to speak of.
-        rim: Rim::Shine { lit: 0.42, back: 0.22, hairline: 0.035 },
-        // A little light gathered in the curved edge (where the bar meets
-        // the screen's edge there's nothing for the bending to show), its
-        // colours split, and a faint sheen.
-        light: Light { lens: (7.0, 0.05), dispersion: 0.07, sheen: 0.14, depth: 0.0 },
-        // 22 px of curved rim, bent up to 35 px, colours split as they bend.
-        refract: Some(crate::lens::Lens { band: 22.0, bend: 1.6, split: 0.12 }),
+        film: (white(0.02), white(0.008)),
+        // The rim: a thin bright line lit at the top left and again at the
+        // bottom right, as the light catches a curved edge, and only a
+        // whisper of an outline where it isn't lit.
+        rim: Rim::Shine { lit: 0.85, back: 0.5, hairline: 0.04 },
+        // A little light gathered in the curved edge, its colours split, a
+        // soft highlight from the top left, and the glass's thickness as a
+        // faint shade along the bottom inside.
+        light: Light { lens: (7.0, 0.05), dispersion: 0.07, sheen: 0.22, depth: 0.10 },
+        // 24 px of curved rim, bent up to 43 px, colours split as they bend.
+        refract: Some(crate::lens::Lens { band: 24.0, bend: 1.8, split: 0.12 }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
