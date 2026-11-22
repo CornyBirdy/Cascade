@@ -205,7 +205,37 @@ fn mica_picture(screen: RECT) -> Option<Mica> {
     for _ in 0..3 {
         blur(&mut px, w as usize, h as usize, 3);
     }
+    // Mostly grey, as Mica is: only a hint of the wallpaper's colour.
+    for p in px.as_chunks_mut::<4>().0 {
+        let l = (p[0] as u32 * 29 + p[1] as u32 * 150 + p[2] as u32 * 77) / 256;
+        for c in p.iter_mut().take(3) {
+            *c = ((l * 3 + *c as u32) / 4) as u8;
+        }
+    }
     Some((screen, w as u32, h as u32, px))
+}
+
+/// Mica's tint over the wallpaper: Windows' dark grey, the picture only just there.
+const MICA_TINT: Color = Color(0.118, 0.118, 0.125, 0.93);
+
+/// The settings window's backdrop, for a window inside it (the Lighting
+/// pane), so it sits on the same Mica: `w`×`h` layout units at scale `k`.
+pub(crate) fn paint_backdrop(p: &Painter, hwnd: HWND, k: f32, w: f32, h: f32) {
+    let Some((screen, bw, bh, px)) = MICA_DONE.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+    let Some(bmp) = p.bitmap(bw, bh, &px) else { return };
+    let mut origin = POINT::default();
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut origin);
+    }
+    p.image(
+        &bmp,
+        (screen.left - origin.x) as f32 / k,
+        (screen.top - origin.y) as f32 / k,
+        (screen.right - screen.left) as f32 / k,
+        (screen.bottom - screen.top) as f32 / k,
+        1.0,
+    );
+    p.rrect(0.0, 0.0, w, h, 0.0, MICA_TINT);
 }
 
 /// A box blur of `radius` over BGRA pixels, across then down.
@@ -1371,14 +1401,41 @@ fn rows(section: usize) -> Vec<Row> {
                 "tablet_lower",
                 "Lower pen button",
                 "",
-                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("none", "Nothing")]),
+                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("keys", "Shortcut"), ("none", "Nothing")]),
             ),
+            row("tablet_lower_keys", "Its shortcut", "Keys it presses, held while the button is: ctrl+z, shift, f5\u{2026}", Text { secret: false }),
             row(
                 "tablet_upper",
                 "Upper pen button",
                 "",
-                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("none", "Nothing")]),
+                Choice(&[("right", "Right-click"), ("middle", "Middle-click"), ("eraser", "Eraser"), ("keys", "Shortcut"), ("none", "Nothing")]),
             ),
+            row("tablet_upper_keys", "Its shortcut", "Keys it presses, held while the button is: ctrl+z, shift, f5\u{2026}", Text { secret: false }),
+            row(
+                "tablet_hold_click",
+                "Press and hold to right-click",
+                "Windows' pen gesture: holding the pen still on the tablet right-clicks. Off, holding it just keeps drawing.",
+                Toggle,
+            ),
+            heading("h_tablet_keys", "Tablet buttons"),
+            row(
+                "tablet_keys_note",
+                "The buttons on the tablet",
+                "Each a shortcut (ctrl+z, space, shift, f5\u{2026}, held while the button is), or right, middle, eraser or none. Press one to see which it is.",
+                Note,
+            ),
+            row("tablet_key1", "Button 1", "", Text { secret: false }),
+            row("tablet_key2", "Button 2", "", Text { secret: false }),
+            row("tablet_key3", "Button 3", "", Text { secret: false }),
+            row("tablet_key4", "Button 4", "", Text { secret: false }),
+            row("tablet_key5", "Button 5", "", Text { secret: false }),
+            row("tablet_key6", "Button 6", "", Text { secret: false }),
+            row("tablet_key7", "Button 7", "", Text { secret: false }),
+            row("tablet_key8", "Button 8", "", Text { secret: false }),
+            row("tablet_key9", "Button 9", "", Text { secret: false }),
+            row("tablet_key10", "Button 10", "", Text { secret: false }),
+            row("tablet_key11", "Button 11", "", Text { secret: false }),
+            row("tablet_key12", "Button 12", "", Text { secret: false }),
             heading("h_bt", "Bluetooth"),
             row("win_bt", "Bluetooth", "", Toggle),
             row("win_bt_add", "Add a device", "Pair a Bluetooth device (Windows' Add a device wizard).", Button("Add device")),
@@ -1776,6 +1833,8 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         }
         // Screens.
         // The pen tablet's settings only with the driver on.
+        (page::DEVICES, "tablet_lower_keys") => on("tablet") && get("tablet_lower") == "keys",
+        (page::DEVICES, "tablet_upper_keys") => on("tablet") && get("tablet_upper") == "keys",
         (page::DEVICES, k) if k.starts_with("tablet_") => on("tablet"),
         (page::DISPLAY, "mouse_align" | "screen_inches") => on("mouse_match"),
         // Weather.
@@ -2452,14 +2511,15 @@ impl Settings {
             1.0,
         );
         // Mica's tint: the picture's colour only just showing through.
-        p.rrect(0.0, 0.0, cw, ch, 0.0, Color(0.118, 0.118, 0.125, 0.86));
+        p.rrect(0.0, 0.0, cw, ch, 0.0, MICA_TINT);
     }
 
     /// The window moved: the backdrop stays where the wallpaper is.
     pub fn moved(&self) {
         if self.mica.borrow().is_some() {
             unsafe {
-                let _ = InvalidateRect(Some(self.hwnd), None, false);
+                // The Lighting pane too: it sits on the same backdrop.
+                let _ = RedrawWindow(Some(self.hwnd), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
             }
         }
     }
@@ -2672,6 +2732,12 @@ impl Settings {
             text
         } else if let Some((text, warn)) = live_desc(r.key, get) {
             return (text.to_string(), if warn { WARN } else { Color::white(0.55) }, None);
+        } else if let Some(i) = crate::config::tablet_key_index(r.key) {
+            let held = crate::tablet::live().buttons & (1 << i) != 0;
+            if held {
+                return ("Pressed now".to_string(), theme::accent(), None);
+            }
+            String::new()
         } else if r.key == "profile_picture_clear" {
             get("profile_picture")
         } else if r.key == "update_check_now" && !crate::update::status().is_empty() {

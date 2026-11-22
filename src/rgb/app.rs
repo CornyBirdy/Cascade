@@ -45,7 +45,8 @@ use crate::theme;
 
 /// The pane's background: the settings window's.
 const BG: Color = Color(0.125, 0.125, 0.13, 1.0);
-const PANEL: Color = Color(0.16, 0.16, 0.165, 1.0);
+/// A card, as Settings draws them: a faint layer over the backdrop.
+const PANEL: Color = Color(1.0, 1.0, 1.0, 0.045);
 const SIDE: f32 = 224.0;
 const TOP: f32 = 52.0;
 const ROW: f32 = 34.0;
@@ -1130,6 +1131,10 @@ impl State {
             if pw > 0 && ph > 0 && gfx.begin_dc(dc, pw, ph, k, BG).is_ok() {
                 {
                     let p = gfx.painter();
+                    // Inside Settings: on the same backdrop as the rest of it.
+                    if self.embedded {
+                        crate::settings::paint_backdrop(&p, hwnd, k, pw as f32 / k, ph as f32 / k);
+                    }
                     let mut ui = Ui { p: &p, f: &gfx.fonts, s: self, hits: &mut hits };
                     self.draw(&mut ui, pw as f32 / k, ph as f32 / k);
                 }
@@ -1174,7 +1179,9 @@ impl State {
         let p = ui.p;
         let accent = theme::accent();
         // The side: profiles, then devices.
-        p.rrect(0.0, 0.0, SIDE, h, 10.0, Color(0.105, 0.105, 0.11, 1.0));
+        // Profiles and devices: a card down the side, as Settings' cards are.
+        p.rrect(0.0, 0.0, SIDE, h, 8.0, PANEL);
+        p.stroke_rrect(0.5, 0.5, SIDE - 1.0, h - 1.0, 8.0, Color(0.0, 0.0, 0.0, 0.22), 1.0);
         p.text("Profiles", &ui.f.label, 16.0, 14.0, 150.0, 20.0, Align::Left, Color::white(0.55));
         ui.icon_button(SIDE - 40.0, 10.0, 28.0, G_ADD, Act::NewProfile);
         let act = self.anim.to(key("profile", K_POS), self.l.active as f32, 16.0);
@@ -1285,7 +1292,7 @@ impl State {
             Tab::Devices => self.draw_devices(ui, cx, cy, cw),
             Tab::Settings => self.draw_settings(ui, cx, cy, cw),
         }
-        if t < 1.0 {
+        if t < 1.0 && !self.embedded {
             p.rrect(x0 - 2.0, TOP, w - x0 + 2.0, h - TOP, 0.0, BG.alpha(1.0 - t));
         }
     }

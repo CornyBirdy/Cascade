@@ -96,6 +96,34 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
     let w = window.0 as isize;
     std::thread::spawn(move || unsafe {
         let window = HWND(w as *mut _);
+        // Coming out: wait for the window to be restored, then keep it off the
+        // screen while its picture grows out of the button (a DWM thumbnail
+        // still shows a window off the screen), and put it back at the end:
+        // it's there the moment the picture lands, not before.
+        let mut place = place;
+        let mut hidden_at: Option<RECT> = None;
+        if !into {
+            for _ in 0..25 {
+                if !IsIconic(window).as_bool() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            let mut r = RECT::default();
+            if !IsIconic(window).as_bool() && GetWindowRect(window, &mut r).is_ok() && r.left > -10000 {
+                place = r;
+                let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+                if SetWindowPos(window, None, -32000, -32000, 0, 0, flags).is_ok() {
+                    hidden_at = Some(r);
+                }
+            }
+        }
+        let put_back = || {
+            if let Some(r) = hidden_at {
+                let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+                let _ = SetWindowPos(window, None, r.left, r.top, 0, 0, flags);
+            }
+        };
         let Ok(module) = GetModuleHandleW(None) else { return };
         let instance: HINSTANCE = module.into();
         let wc = WNDCLASSEXW {
@@ -110,7 +138,7 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
         let mut area = RECT::default();
         let _ = UnionRect(&mut area, &place, &button);
         let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-        let Ok(over) = CreateWindowExW(
+        let made = CreateWindowExW(
             ex,
             w!("CascadeMinAnim"),
             w!(""),
@@ -123,12 +151,15 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
             None,
             Some(instance),
             None,
-        ) else {
+        );
+        let Ok(over) = made else {
+            put_back();
             return;
         };
         // Its own black is see-through: only the window's picture shows.
         let _ = SetLayeredWindowAttributes(over, COLORREF(0), 0, LWA_COLORKEY);
         let Ok(thumb) = DwmRegisterThumbnail(over, window) else {
+            put_back();
             let _ = DestroyWindow(over);
             return;
         };
@@ -154,7 +185,8 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
                 right: (cx + w / 2.0) as i32 - area.left,
                 bottom: (cy + h / 2.0) as i32 - area.top,
             };
-            let opacity = if into { 255.0 * (1.0 - 0.75 * t) } else { 220.0 * (1.0 - t * t) };
+            // In: fading as it goes. Out: solid, the window itself under it at the end.
+            let opacity = if into { 255.0 * (1.0 - 0.75 * t) } else { 140.0 + 115.0 * t.min(0.6) / 0.6 };
             let props = DWM_THUMBNAIL_PROPERTIES {
                 dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE | DWM_TNP_SOURCECLIENTAREAONLY,
                 rcDestination: rect,
@@ -173,6 +205,12 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
             while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
                 DispatchMessageW(&m);
             }
+        }
+        // The window back in its place, drawn, before its picture goes.
+        put_back();
+        if hidden_at.is_some() {
+            let _ = DwmFlush();
+            let _ = DwmFlush();
         }
         let _ = DwmUnregisterThumbnail(thumb);
         let _ = DestroyWindow(over);

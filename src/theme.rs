@@ -588,16 +588,11 @@ fn sheen(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
 /// A small sample of theme `t` for the settings page: the panel over a
 /// colourful wallpaper, so frosted and light glass look different.
 pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
-    // The "wallpaper", seen through the glass.
-    if let Some(b) = p.linear(
-        x,
-        y,
-        x + w,
-        y + h,
-        &[(0.0, Color(1.0, 0.42, 0.24, 1.0)), (0.5, Color(0.98, 0.31, 0.64, 1.0)), (1.0, Color(0.20, 0.45, 1.0, 1.0))],
-    ) {
-        p.fill_rrect_with(x, y, w, h, r, &b);
-    }
+    // The "wallpaper", seen through the glass: a plain colour with a few
+    // shapes on it (something for the glass to show), no gradients.
+    p.rrect(x, y, w, h, r, Color(0.16, 0.30, 0.52, 1.0));
+    p.circle(x + w * 0.80, y + h * 0.36, h * 0.30, Color(0.93, 0.46, 0.30, 1.0));
+    p.rrect(x + w * 0.10, y + h * 0.52, w * 0.36, h * 0.30, 4.0, Color(0.32, 0.62, 0.52, 1.0));
     let opacity = 0.55;
     let (cr, cg, cb) = t.tint;
     match t.glass {

@@ -71,6 +71,24 @@ tablet_full = 0.9
 # What the pen's buttons do: right, middle, eraser or none.
 tablet_lower = right
 tablet_upper = middle
+# With a button set to keys: the shortcut it presses (ctrl+z, shift, f5...).
+tablet_lower_keys = ctrl+z
+tablet_upper_keys = ctrl+y
+# Windows' press and hold to right-click with the pen.
+tablet_hold_click = true
+# The tablet's own buttons (express keys), 1 to 12: a shortcut, or right, middle, eraser or none.
+tablet_key1 = ctrl+z
+tablet_key2 = ctrl+y
+tablet_key3 = b
+tablet_key4 = e
+tablet_key5 = [
+tablet_key6 = ]
+tablet_key7 = ctrl+plus
+tablet_key8 = ctrl+minus
+tablet_key9 = space
+tablet_key10 = ctrl+s
+tablet_key11 = shift
+tablet_key12 = alt
 # Shell mode: drag a window to a screen edge or corner to snap it.
 snap_drag = true
 # Auto ducker: while one app is making sound (Discord, with friends talking),
@@ -338,6 +356,18 @@ max_fps = 144
 perf_log = false
 ";
 
+/// What the tablet's 12 buttons do to start with: undo, redo, brush,
+/// eraser, smaller and bigger brush, zoom in and out, pan (held), save,
+/// and Shift and Alt held.
+pub const TABLET_KEYS: [&str; 12] =
+    ["ctrl+z", "ctrl+y", "b", "e", "[", "]", "ctrl+plus", "ctrl+minus", "space", "ctrl+s", "shift", "alt"];
+
+/// Which of the tablet's buttons `key` (`tablet_key1`...`tablet_key12`) is.
+pub fn tablet_key_index(key: &str) -> Option<usize> {
+    let n: usize = key.strip_prefix("tablet_key")?.parse().ok()?;
+    (1..=12).contains(&n).then(|| n - 1)
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
@@ -369,6 +399,11 @@ pub struct Config {
     pub tablet_full: f32,
     pub tablet_lower: String,
     pub tablet_upper: String,
+    pub tablet_lower_keys: String,
+    pub tablet_upper_keys: String,
+    pub tablet_hold_click: bool,
+    /// The tablet's 12 buttons (`tablet_key1` to `tablet_key12`).
+    pub tablet_keys: Vec<String>,
     pub snap_drag: bool,
     pub ducker: bool,
     pub ducker_trigger: String,
@@ -514,6 +549,10 @@ impl Default for Config {
             tablet_full: 0.9,
             tablet_lower: "right".into(),
             tablet_upper: "middle".into(),
+            tablet_lower_keys: "ctrl+z".into(),
+            tablet_upper_keys: "ctrl+y".into(),
+            tablet_hold_click: true,
+            tablet_keys: TABLET_KEYS.iter().map(|k| k.to_string()).collect(),
             snap_drag: true,
             ducker: false,
             ducker_trigger: "Discord".into(),
@@ -802,8 +841,20 @@ impl Config {
                 "tablet_firmness" => set_f(&mut c.tablet_firmness, 0.3, 3.0),
                 "tablet_tip" => set_f(&mut c.tablet_tip, 0.0, 0.3),
                 "tablet_full" => set_f(&mut c.tablet_full, 0.4, 1.0),
-                "tablet_lower" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_lower = v.into(),
-                "tablet_upper" if matches!(v, "right" | "middle" | "eraser" | "none") => c.tablet_upper = v.into(),
+                "tablet_lower" if matches!(v, "right" | "middle" | "eraser" | "none" | "keys") => {
+                    c.tablet_lower = v.into()
+                }
+                "tablet_upper" if matches!(v, "right" | "middle" | "eraser" | "none" | "keys") => {
+                    c.tablet_upper = v.into()
+                }
+                "tablet_lower_keys" => c.tablet_lower_keys = v.trim().to_string(),
+                "tablet_upper_keys" => c.tablet_upper_keys = v.trim().to_string(),
+                "tablet_hold_click" => set_b(&mut c.tablet_hold_click),
+                k if tablet_key_index(k).is_some() => {
+                    if let Some(i) = tablet_key_index(k) {
+                        c.tablet_keys[i] = v.trim().to_string();
+                    }
+                }
                 "snap_drag" => set_b(&mut c.snap_drag),
                 "ducker" => set_b(&mut c.ducker),
                 "ducker_trigger" => c.ducker_trigger = v.trim_matches('"').to_string(),
@@ -987,6 +1038,12 @@ impl Config {
             "tablet_full" => self.tablet_full.to_string(),
             "tablet_lower" => self.tablet_lower.clone(),
             "tablet_upper" => self.tablet_upper.clone(),
+            "tablet_lower_keys" => self.tablet_lower_keys.clone(),
+            "tablet_upper_keys" => self.tablet_upper_keys.clone(),
+            "tablet_hold_click" => b(self.tablet_hold_click),
+            k if tablet_key_index(k).is_some() => {
+                tablet_key_index(k).map(|i| self.tablet_keys[i].clone()).unwrap_or_default()
+            }
             "snap_drag" => b(self.snap_drag),
             "ducker" => b(self.ducker),
             "ducker_trigger" => self.ducker_trigger.clone(),

@@ -100,24 +100,141 @@ const MODELS: [Model; 2] = [
     },
 ];
 
-/// What the pen's buttons do.
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// What a button (the pen's, or the tablet's own) does.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Button {
     Right,
     Middle,
+    /// The pen rubs out while it's held.
     Eraser,
     Nothing,
+    /// Keys held down while it is (virtual-key codes, in order).
+    Keys(Vec<u16>),
 }
 
 impl Button {
-    fn parse(v: &str) -> Button {
+    /// A pen button's setting (`right`, `middle`, `eraser`, `none`, `keys`),
+    /// with the shortcut for `keys`.
+    fn parse(v: &str, keys: &str) -> Button {
         match v {
             "middle" => Button::Middle,
             "eraser" => Button::Eraser,
             "none" => Button::Nothing,
+            "keys" => Button::from_text(keys),
             _ => Button::Right,
         }
     }
+
+    /// A tablet button's setting: right, middle, eraser, none, or a shortcut.
+    pub fn from_text(v: &str) -> Button {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "right" | "right-click" | "right click" => Button::Right,
+            "middle" | "middle-click" | "middle click" => Button::Middle,
+            "eraser" => Button::Eraser,
+            "" | "none" | "nothing" => Button::Nothing,
+            other => match keys(other) {
+                Some(k) if !k.is_empty() => Button::Keys(k),
+                _ => Button::Nothing,
+            },
+        }
+    }
+}
+
+/// A shortcut as virtual-key codes: "ctrl+shift+z", "f5", "space", "[".
+/// None if a part isn't a key it knows.
+pub fn keys(text: &str) -> Option<Vec<u16>> {
+    let mut out = Vec::new();
+    for part in text.split('+').map(|p| p.trim().to_ascii_lowercase()) {
+        if part.is_empty() {
+            // "ctrl++": the + key itself.
+            out.push(0xBB);
+            continue;
+        }
+        let vk: u16 = match part.as_str() {
+            "ctrl" | "control" => 0x11,
+            "shift" => 0x10,
+            "alt" => 0x12,
+            "win" | "windows" => 0x5B,
+            "space" => 0x20,
+            "tab" => 0x09,
+            "enter" | "return" => 0x0D,
+            "esc" | "escape" => 0x1B,
+            "backspace" => 0x08,
+            "delete" | "del" => 0x2E,
+            "insert" | "ins" => 0x2D,
+            "home" => 0x24,
+            "end" => 0x23,
+            "pageup" | "pgup" => 0x21,
+            "pagedown" | "pgdn" => 0x22,
+            "left" => 0x25,
+            "up" => 0x26,
+            "right" => 0x27,
+            "down" => 0x28,
+            "plus" | "=" => 0xBB,
+            "minus" | "-" => 0xBD,
+            "[" => 0xDB,
+            "]" => 0xDD,
+            "," => 0xBC,
+            "." => 0xBE,
+            "/" => 0xBF,
+            ";" => 0xBA,
+            "'" => 0xDE,
+            "`" => 0xC0,
+            "\\" => 0xDC,
+            p if p.len() == 1 && p.as_bytes()[0].is_ascii_alphanumeric() => p.as_bytes()[0].to_ascii_uppercase() as u16,
+            p if p.starts_with('f') && p.len() <= 3 => {
+                let n: u16 = p[1..].parse().ok()?;
+                if !(1..=24).contains(&n) {
+                    return None;
+                }
+                0x70 + n - 1
+            }
+            _ => return None,
+        };
+        out.push(vk);
+    }
+    Some(out)
+}
+
+/// Presses (or lets go of) keys, as one batch.
+fn send_keys(vks: &[u16], down: bool) {
+    let order: Vec<u16> = if down { vks.to_vec() } else { vks.iter().rev().copied().collect() };
+    let inputs: Vec<INPUT> = order
+        .into_iter()
+        .map(|vk| {
+            // The arrows and the keys round them are "extended" keys.
+            let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x5B);
+            let mut flags = if down { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP };
+            if extended {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                },
+            }
+        })
+        .collect();
+    if !inputs.is_empty() {
+        unsafe {
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+}
+
+/// Windows' press and hold to right-click with a pen (its Pen and Touch
+/// setting), on or off.
+fn set_hold_click(on: bool) {
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    let key = "Software\\Microsoft\\Wisp\\Pen\\SysEventParameters";
+    let now = crate::winset::reg_dword(HKEY_CURRENT_USER, key, "HoldMode");
+    let want = if on { 1 } else { 3 };
+    if now == Some(want) || (on && now.is_none()) {
+        return;
+    }
+    crate::winset::set_reg_dword(HKEY_CURRENT_USER, key, "HoldMode", want);
+    crate::config::log(&format!("tablet: press and hold to right-click {}", if on { "on" } else { "off" }));
 }
 
 /// The settings (from the config).
@@ -139,6 +256,8 @@ pub struct Setup {
     pub full: f32,
     pub lower: Button,
     pub upper: Button,
+    /// The tablet's own buttons, 1 to 12.
+    pub keys: Vec<Button>,
 }
 
 static SETUP: Mutex<Option<Setup>> = Mutex::new(None);
@@ -174,9 +293,13 @@ pub fn configure(cfg: &crate::config::Config) {
         firmness: cfg.tablet_firmness.clamp(0.3, 3.0),
         tip: cfg.tablet_tip.clamp(0.0, 0.3),
         full: cfg.tablet_full.clamp(0.4, 1.0),
-        lower: Button::parse(&cfg.tablet_lower),
-        upper: Button::parse(&cfg.tablet_upper),
+        lower: Button::parse(&cfg.tablet_lower, &cfg.tablet_lower_keys),
+        upper: Button::parse(&cfg.tablet_upper, &cfg.tablet_upper_keys),
+        keys: cfg.tablet_keys.iter().map(|k| Button::from_text(k)).collect(),
     };
+    if cfg.tablet {
+        set_hold_click(cfg.tablet_hold_click);
+    }
     let on = s.on;
     *SETUP.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
     if on && !RUNNING.swap(true, Ordering::AcqRel) {
@@ -376,12 +499,14 @@ pub struct Live {
     pub level: f32,
     pub pressure: f32,
     pub touching: bool,
+    /// The tablet's own buttons held now (bit n: button n + 1).
+    pub buttons: u16,
     /// Counts readings, so a change can be told.
     pub seq: u64,
 }
 
 static LIVE: Mutex<Live> =
-    Mutex::new(Live { near: false, x: 0, y: 0, level: 0.0, pressure: 0.0, touching: false, seq: 0 });
+    Mutex::new(Live { near: false, x: 0, y: 0, level: 0.0, pressure: 0.0, touching: false, buttons: 0, seq: 0 });
 
 /// The pen as it is now.
 pub fn live() -> Live {
@@ -400,6 +525,35 @@ fn set_live(f: impl FnOnce(&mut Live)) {
 pub fn curve(level: f32, tip: f32, full: f32, firmness: f32) -> f32 {
     let full = full.max(tip + 0.05);
     ((level - tip) / (full - tip)).clamp(0.0, 1.0).powf(firmness)
+}
+
+/// A report of the tablet's own buttons (as OpenTabletDriver reads the
+/// 10moon's): which are held, bit n for button n + 1. None for other reports.
+fn parse_buttons(m: &Model, r: &[u8]) -> Option<u16> {
+    match m.format {
+        Format::TenMoon => {
+            if r.len() < 13 || r[11] == 0xFF {
+                return None;
+            }
+            let (code, bits) = (r[12], r[11]);
+            let held = |b: u8| code == 0x33 && bits & (1 << b) == 0;
+            let list = [
+                code == 0x31,
+                held(7),
+                held(6),
+                held(5),
+                held(4),
+                held(3),
+                code == 0x23,
+                code == 0x32,
+                code == 0x13,
+                held(0),
+                held(1),
+                held(2),
+            ];
+            Some(list.iter().enumerate().fold(0u16, |acc, (i, &on)| if on { acc | (1 << i) } else { acc }))
+        }
+    }
 }
 
 /// A report from the pen interface, if it's a pen report.
@@ -475,6 +629,33 @@ struct Out {
     pen: Option<HSYNTHETICPOINTERDEVICE>,
     frame: u32,
     calib: Option<Calib>,
+    /// The tablet's buttons held down (bit n: button n + 1), and whether one
+    /// of them is holding the eraser on.
+    aux: u16,
+    aux_eraser: bool,
+}
+
+impl Out {
+    /// The tablet's own buttons, now `down` (bit n: button n + 1).
+    fn buttons(&mut self, s: &Setup, down: u16) {
+        let changed = down ^ self.aux;
+        if changed == 0 {
+            return;
+        }
+        for i in 0..12 {
+            if changed & (1 << i) == 0 {
+                continue;
+            }
+            let pressed = down & (1 << i) != 0;
+            match s.keys.get(i) {
+                Some(Button::Eraser) => self.aux_eraser = pressed,
+                Some(b) => button(b, pressed, None),
+                None => {}
+            }
+        }
+        self.aux = down;
+        set_live(|l| l.buttons = down);
+    }
 }
 
 fn mouse(flags: MOUSE_EVENT_FLAGS, at: Option<POINT>) {
@@ -496,8 +677,12 @@ fn mouse(flags: MOUSE_EVENT_FLAGS, at: Option<POINT>) {
     }
 }
 
-/// Presses or lets go of a button the pen's button stands for (not the eraser).
-fn button(b: Button, down: bool, at: POINT) {
+/// Presses or lets go of what a button stands for (the eraser's handled with the pen).
+fn button(b: &Button, down: bool, at: Option<POINT>) {
+    if let Button::Keys(k) = b {
+        send_keys(k, down);
+        return;
+    }
     let flags = match (b, down) {
         (Button::Right, true) => MOUSEEVENTF_RIGHTDOWN,
         (Button::Right, false) => MOUSEEVENTF_RIGHTUP,
@@ -505,7 +690,7 @@ fn button(b: Button, down: bool, at: POINT) {
         (Button::Middle, false) => MOUSEEVENTF_MIDDLEUP,
         _ => return,
     };
-    mouse(flags, Some(at));
+    mouse(flags, at);
 }
 
 impl Out {
@@ -543,11 +728,12 @@ impl Out {
             l.pressure = pressure;
             l.touching = touching;
         });
-        let eraser = (pen.lower && s.lower == Button::Eraser) || (pen.upper && s.upper == Button::Eraser);
-        // The buttons that stand for mouse buttons.
-        for (now, was, b) in [(pen.lower, self.lower, s.lower), (pen.upper, self.upper, s.upper)] {
+        let eraser =
+            (pen.lower && s.lower == Button::Eraser) || (pen.upper && s.upper == Button::Eraser) || self.aux_eraser;
+        // The buttons that stand for mouse buttons or keys.
+        for (now, was, b) in [(pen.lower, self.lower, &s.lower), (pen.upper, self.upper, &s.upper)] {
             if now != was {
-                button(b, now, at);
+                button(b, now, Some(at));
             }
         }
         self.lower = pen.lower;
@@ -737,6 +923,8 @@ fn read(m: &'static Model, h: HANDLE) {
                 if let Some(pen) = parse(m, &r) {
                     last = Instant::now();
                     out.send(m, &s, Some(pen));
+                } else if let Some(down) = parse_buttons(m, &r) {
+                    out.buttons(&s, down);
                 }
             }
             Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -764,6 +952,7 @@ fn default_setup() -> Setup {
         full: 0.9,
         lower: Button::Right,
         upper: Button::Middle,
+        keys: Vec::new(),
     }
 }
 
@@ -812,6 +1001,27 @@ mod tests {
             c.level(raw);
         }
         assert!(c.level(1520.0) < 0.01);
+    }
+
+    #[test]
+    fn reads_shortcuts_and_buttons() {
+        assert_eq!(keys("ctrl+shift+z"), Some(vec![0x11, 0x10, b'Z' as u16]));
+        assert_eq!(keys("f5"), Some(vec![0x74]));
+        assert_eq!(keys("ctrl+plus"), Some(vec![0x11, 0xBB]));
+        assert_eq!(keys("ctrl+nope"), None);
+        assert_eq!(Button::from_text("Right"), Button::Right);
+        assert_eq!(Button::from_text(""), Button::Nothing);
+        assert_eq!(Button::from_text("space"), Button::Keys(vec![0x20]));
+        // The tablet's buttons: the first, and the tenth (bit 0 clear with 0x33).
+        let m = &MODELS[0];
+        let mut r = [0u8; 64];
+        r[12] = 0x31;
+        r[11] = 0xFE;
+        assert_eq!(parse_buttons(m, &r), Some(1));
+        r[12] = 0x33;
+        assert_eq!(parse_buttons(m, &r), Some(1 << 9));
+        r[11] = 0xFF;
+        assert_eq!(parse_buttons(m, &r), None);
     }
 
     #[test]

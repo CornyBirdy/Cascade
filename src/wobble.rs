@@ -52,15 +52,20 @@ pub fn start(window: HWND) {
         if IsZoomed(window).as_bool() || !IsWindowVisible(window).as_bool() {
             return;
         }
-        let ex = GetWindowLongW(window, GWL_EXSTYLE) as u32;
-        // Already see-through (it draws its own shape), or drawn by DirectComposition: left alone.
-        if ex & (WS_EX_LAYERED.0 | WS_EX_NOREDIRECTIONBITMAP.0) != 0 {
+        // A window that shapes itself already (its own region) is left alone:
+        // hiding it takes its region.
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let shaped = GetWindowRgn(window, probe) != GDI_REGION_TYPE(0);
+        let _ = DeleteObject(probe.into());
+        // One with admin rights can't be touched from here.
+        if shaped || crate::helper::window_above_us(window) {
             return;
         }
     }
     let r = rect_of(window);
     let (w, h) = (r.right - r.left, r.bottom - r.top);
-    if w < 80 || h < 60 || (w as i64 * h as i64) > 3_600_000 {
+    // Up to about a 2560x1600 window: bigger ones cost too much to redraw each frame.
+    if w < 80 || h < 60 || (w as i64 * h as i64) > 5_200_000 {
         return;
     }
     let hv = window.0 as isize;
@@ -116,27 +121,97 @@ fn snapshot(h: HWND, w: i32, ht: i32) -> Option<Vec<u8>> {
         if !ok {
             return None;
         }
-        for a in px.iter_mut().skip(3).step_by(4) {
-            *a = 255;
+        // What's seen of it: Windows' frame bounds (the window rect also holds
+        // an invisible border for resizing, which prints black), with its
+        // corners rounded as Windows 11 rounds them.
+        let mut wr = RECT::default();
+        let _ = GetWindowRect(h, &mut wr);
+        let mut fr = RECT::default();
+        let got = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            h,
+            windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut fr as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        );
+        let (l, t, r, b) = if got.is_ok() {
+            (fr.left - wr.left, fr.top - wr.top, fr.right - wr.left, fr.bottom - wr.top)
+        } else {
+            (0, 0, w, ht)
+        };
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96) as f32 / 96.0;
+        let radius = if win11() { 8.0 * dpi } else { 0.0 };
+        for y in 0..ht {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let a = coverage(x as f32 + 0.5, y as f32 + 0.5, (l, t, r, b), radius);
+                if a <= 0.0 {
+                    px[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
+                } else if a < 1.0 {
+                    for c in 0..3 {
+                        px[i + c] = (px[i + c] as f32 * a) as u8;
+                    }
+                    px[i + 3] = (255.0 * a) as u8;
+                } else {
+                    px[i + 3] = 255;
+                }
+            }
         }
         Some(px)
     }
+}
+
+/// How much of pixel (x, y) is inside the rect (l, t, r, b) with corners of `radius`.
+fn coverage(x: f32, y: f32, (l, t, r, b): (i32, i32, i32, i32), radius: f32) -> f32 {
+    let (l, t, r, b) = (l as f32, t as f32, r as f32, b as f32);
+    if x < l || y < t || x > r || y > b {
+        return 0.0;
+    }
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    // In a corner's square: by the distance from its circle's centre.
+    let cx = if x < l + radius {
+        l + radius
+    } else if x > r - radius {
+        r - radius
+    } else {
+        return 1.0;
+    };
+    let cy = if y < t + radius {
+        t + radius
+    } else if y > b - radius {
+        b - radius
+    } else {
+        return 1.0;
+    };
+    (radius - (x - cx).hypot(y - cy) + 0.5).clamp(0.0, 1.0)
+}
+
+/// Windows 11 (its windows have round corners).
+fn win11() -> bool {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    crate::winset::reg_text(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "CurrentBuild")
+        .and_then(|b| b.parse::<u32>().ok())
+        .is_some_and(|b| b >= 22000)
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     DefWindowProcW(hwnd, m, wp, lp)
 }
 
-/// Makes the real window see-through (or shows it again).
+/// Hides the real window while its picture wobbles (or shows it again): an
+/// empty window region, which hides any window, those drawn on the GPU
+/// (browsers, Electron, WinUI) and see-through ones too, while it still moves.
 fn hide(h: HWND, hidden: bool) {
     unsafe {
-        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
         if hidden {
-            SetWindowLongW(h, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
-            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 0, LWA_ALPHA);
+            let empty = CreateRectRgn(0, 0, 0, 0);
+            // The window owns the region from here.
+            if SetWindowRgn(h, Some(empty), true) == 0 {
+                let _ = DeleteObject(empty.into());
+            }
         } else {
-            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
-            SetWindowLongW(h, GWL_EXSTYLE, (ex & !WS_EX_LAYERED.0) as i32);
+            let _ = SetWindowRgn(h, None, true);
             let _ = RedrawWindow(Some(h), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
         }
     }

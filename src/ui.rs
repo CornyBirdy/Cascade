@@ -3512,8 +3512,9 @@ impl App {
             for d in &mut self.screens {
                 d.on_minimize(hwnd, into);
             }
-            // Into (or out of) its button, where Windows won't show it going.
-            if !crate::minanim::windows_animates() {
+            // Into its button where Windows won't show it going; out of it
+            // always (Windows doesn't animate a restore for its shell).
+            if !into || !crate::minanim::windows_animates() {
                 let button = std::iter::once(&self.dock).chain(self.screens.iter()).find_map(|d| d.min_rect(hwnd));
                 // Where it sits when it's out: as the restore begins it's
                 // still parked off screen, so not where it is now.
