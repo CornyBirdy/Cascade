@@ -1382,6 +1382,28 @@ fn rows(section: usize) -> Vec<Row> {
             row("win_net_reset", "Network reset", "Sets every adapter back to Windows' defaults (needs a restart).", Button("Reset now")),
         ],
         page::DEVICES => vec![
+            heading("h_quickshare", "Quick Share"),
+            row(
+                "quickshare",
+                "Quick Share",
+                "Send and receive files with Android phones and PCs nearby, over your Wi-Fi.",
+                Toggle,
+            ),
+            row("quickshare_send", "Send files", "To a phone or PC nearby (or right-click files > Share with Quick Share).", Button("Send\u{2026}")),
+            row(
+                "quickshare_accept",
+                "When someone shares",
+                "Ask shows who it is and the PIN first; automatically takes it at once.",
+                Choice(&[("ask", "Ask"), ("auto", "Automatically")]),
+            ),
+            row("quickshare_name", "Name", "What phones see this PC as. Empty: this PC's own name.", Text { secret: false }),
+            row("quickshare_folder", "Save to", "Where files you receive go. Empty: Downloads.", Text { secret: false }),
+            row(
+                "quickshare_menus",
+                "In right-click menus",
+                "Share with Quick Share on files, and in Send to.",
+                Toggle,
+            ),
             heading("h_tablet", "Pen tablet"),
             row(
                 "tablet",
@@ -1851,6 +1873,9 @@ fn shown(section: usize, key: &str, get: &dyn Fn(&str) -> String) -> bool {
         }
         // Screens.
         // The pen tablet's settings only with the driver on.
+        (page::DEVICES, "quickshare_accept" | "quickshare_name" | "quickshare_folder" | "quickshare_menus") => {
+            on("quickshare")
+        }
         (page::DEVICES, "tablet_lower_keys") => on("tablet") && get("tablet_lower") == "keys",
         (page::DEVICES, "tablet_upper_keys") => on("tablet") && get("tablet_upper") == "keys",
         (page::DEVICES, k) if k.starts_with("tablet_") => on("tablet"),
@@ -2773,6 +2798,8 @@ impl Settings {
             crate::update::status()
         } else if r.key == "update_now" && crate::update::available() > 0 {
             format!("Build {} is ready: it downloads, and Cascade restarts into it.", crate::update::available())
+        } else if r.key == "quickshare" && get(r.key) == "true" && !crate::quickshare::status().is_empty() {
+            crate::quickshare::status()
         } else if r.key == "tablet" && get(r.key) == "true" {
             crate::tablet::status()
         } else if r.key == "admin_helper" && get(r.key) == "true" {

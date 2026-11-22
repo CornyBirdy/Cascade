@@ -305,7 +305,7 @@ pub fn caption_press(hwnd: HWND, b: u8) {
 /// Cascade's apps as the taskbar knows them: (AppUserModelID, name, how
 /// it's started, Windows' stock icon for it, and a file whose icon is
 /// better where there is one: Windows' own app of the same kind).
-pub const OWN_APPS: [(&str, &str, &str, i32, &str); 11] = [
+pub const OWN_APPS: [(&str, &str, &str, i32, &str); 12] = [
     ("Cascade.Files", "Files", "--files", 3, ""),
     ("Cascade.Photos", "Photos", "--view", 72, ""),
     ("Cascade.DiskUsage", "Disk Usage", "--disk", 8, ""),
@@ -317,6 +317,7 @@ pub const OWN_APPS: [(&str, &str, &str, i32, &str); 11] = [
     ("Cascade.SoundRecorder", "Sound Recorder", "--soundrec", 71, ""),
     ("Cascade.Paint", "Paint", "--paint", 72, "mspaint.exe"),
     ("Cascade.Snip", "Snip", "--snip", 72, ""),
+    ("Cascade.QuickShare", "Quick Share", "--quickshare-send", 72, ""),
 ];
 
 /// The taskbar's id for one of Cascade's apps (`cascade-app:<AppUserModelID>`).

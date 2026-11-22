@@ -269,6 +269,15 @@ fn design(id: &str) -> Option<Design> {
             (Ring(0.32, 0.70, 0.09, 0.055, 0.0, 0.0), hex(0xE53935)),
             (Ring(0.68, 0.70, 0.09, 0.055, 0.0, 0.0), hex(0xE53935)),
         ],
+        // Sharing: three dots joined, on a blue disc.
+        "cascade.quickshare" => vec![
+            (Circle(0.5, 0.5, 0.42), hex(0x1A73E8)),
+            (Line(0.36, 0.5, 0.64, 0.33, 0.05), w),
+            (Line(0.36, 0.5, 0.64, 0.67, 0.05), w),
+            (Circle(0.36, 0.5, 0.09), w),
+            (Circle(0.64, 0.33, 0.09), w),
+            (Circle(0.64, 0.67, 0.09), w),
+        ],
         // A gear.
         "cascade.settings" => {
             let mut v = Vec::new();

@@ -54,6 +54,7 @@ mod pomodoro;
 mod preview;
 mod priority;
 mod quickmenu;
+mod quickshare;
 mod radios;
 mod recorder;
 mod recui;
@@ -207,6 +208,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args.get(i + 1).cloned());
     // Snip runs in the Cascade that's running: tell it to start one.
+    // Sending with Quick Share: the files after the flag.
+    if let Some(i) = args.iter().position(|a| a == "--quickshare-send") {
+        quickshare::send::run(args[i + 1..].to_vec());
+        return;
+    }
     if args.iter().any(|a| a == "--snip") {
         if let Some(main) = helper::main_window() {
             unsafe {

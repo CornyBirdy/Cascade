@@ -173,6 +173,14 @@ Cascade brings its own versions of Windows' everyday apps, each in a process of 
 - **Camera** (`--camera`): photos and video (with sound) to Pictures\Camera Roll, mirror, self-timer, more than one camera.
 - **Notepad** (`--notepad`), **Clock** (`--clock`: timers, stopwatch, alarms, world clock), **Media Player** (`--player`), **Sound Recorder** (`--soundrec`) and **Paint** (`--paint`).
 
+## Quick Share
+
+Settings > Bluetooth & devices > Quick Share: Google's Quick Share (the Android sharing that used to be Nearby Share), built into Cascade, over your Wi-Fi.
+
+- **Receiving**: this PC appears in a phone's Quick Share list (by the name set, or the PC's). A card asks first, showing who it is, what's coming and the PIN both screens show, then shows the progress and Open / Show in folder. Files go to Downloads (or the folder set); links open; texts are copied and saved. *Automatically* skips the question.
+- **Sending**: right-click files > **Share with Quick Share** (also in Send to), Files' **Share** button, **Quick Share** in Start, or Settings > Send. Phones appear when their Quick Share can be seen (Everyone, or your contacts with the screen on); Cascade sends the Bluetooth advert that wakes them. Pick one, check the PIN, and it sends.
+- It speaks Quick Share's own protocol (UKEY2 handshake, AES-256 and HMAC-SHA256, Protocol Buffers frames) over TCP, advertised and found with Windows' own DNS-SD; both devices need to be on the same network. Windows asks once to let Cascade through its firewall.
+
 ## Pen tablet
 
 Settings > Bluetooth & devices > Pen tablet: a driver built in for 10moon, Vinsa and their relatives (USB 08F2:6811, 0B57:902E), so their own driver can go. Cascade switches the tablet into tablet mode and reads the pen directly (as OpenTabletDriver does for the 10moon 1060N), and hands it to Windows as a real pen through Windows' synthetic pointer input (pressure in Krita, Photoshop, OneNote...) or as a mouse. It maps to every screen or the main one, keeps the screen's proportions if asked, turns round for the left hand, and learns where each pen rests (so it's never stuck pressed). A pressure graph sets where the pen starts drawing, how soft or firm it feels and how hard a full press is (your pen's pressure shows on it live), and a pad tries it out. The pen's two buttons can be right-click, middle-click, eraser or nothing. Close the tablet's own driver (`TabletService.exe`) first: Settings says if it's running.

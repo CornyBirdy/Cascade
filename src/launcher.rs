@@ -51,7 +51,7 @@ const AVATAR_PX: u32 = 64;
 /// Opens Cascade's settings window (listed with the apps).
 pub const SETTINGS_TARGET: &str = "cascade:settings";
 /// Cascade's own apps in Start: (name, target, the flag that starts them).
-pub const OWN_APPS: [(&str, &str, &str); 11] = [
+pub const OWN_APPS: [(&str, &str, &str); 12] = [
     ("Files", "cascade:files", "--files"),
     ("Disk Usage", "cascade:disk", "--disk"),
     ("Lighting", "cascade:lighting", "--rgb"),
@@ -63,6 +63,7 @@ pub const OWN_APPS: [(&str, &str, &str); 11] = [
     ("Sound Recorder", "cascade:soundrec", "--soundrec"),
     ("Paint", "cascade:paint", "--paint"),
     ("Snip", "cascade:snip", "--snip"),
+    ("Quick Share", "cascade:quickshare", "--quickshare-send"),
 ];
 
 /// Sidebar places: label, what to open, glyph.
@@ -752,7 +753,7 @@ impl Launcher {
 
     fn icon_id<'a>(&'a self, target: &'a str) -> &'a str {
         // Cascade's own apps each have their own icon (see `appicons`).
-        const ICONS: [(&str, &str); 12] = [
+        const ICONS: [(&str, &str); 13] = [
             (SETTINGS_TARGET, "cascade-app:Cascade.Settings"),
             ("cascade:files", "cascade-app:Cascade.Files"),
             ("cascade:disk", "cascade-app:Cascade.DiskUsage"),
@@ -765,6 +766,7 @@ impl Launcher {
             ("cascade:soundrec", "cascade-app:Cascade.SoundRecorder"),
             ("cascade:paint", "cascade-app:Cascade.Paint"),
             ("cascade:snip", "cascade-app:Cascade.Snip"),
+            ("cascade:quickshare", "cascade-app:Cascade.QuickShare"),
         ];
         match ICONS.iter().find(|(t, _)| *t == target) {
             Some((_, icon)) => icon,

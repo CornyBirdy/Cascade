@@ -317,12 +317,13 @@ fn sidebar() -> Vec<(char, String, Loc)> {
 }
 
 /// The command bar: (glyph, label).
-const CMDS: [(u32, &str); 9] = [
+const CMDS: [(u32, &str); 10] = [
     (0xE710, "New"),
     (0xE8C6, "Cut"),
     (0xE8C8, "Copy"),
     (0xE77F, "Paste"),
     (0xE8AC, "Rename"),
+    (0xE72D, "Share"),
     (0xE74D, "Delete"),
     (0xE8CB, "Sort"),
     (0xE8FD, "View"),
@@ -330,10 +331,11 @@ const CMDS: [(u32, &str); 9] = [
 ];
 
 /// The command bar as Explorer's: New with its label, then Cut, Copy,
-/// Paste, Rename and Delete as icons, Sort and View with labels, and More,
-/// in groups with a line between them. (x, width) of command `i`.
+/// Paste, Rename, Share (with Quick Share) and Delete as icons, Sort and
+/// View with labels, and More, in groups with a line between them. (x,
+/// width) of command `i`.
 fn cmd_rect(i: usize) -> (f32, f32) {
-    const W: [f32; 9] = [84.0, 40.0, 40.0, 40.0, 40.0, 40.0, 84.0, 84.0, 40.0];
+    const W: [f32; 10] = [84.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 84.0, 84.0, 40.0];
     let mut x = 12.0;
     for (j, w) in W.iter().enumerate() {
         if starts_group(j) {
@@ -349,12 +351,12 @@ fn cmd_rect(i: usize) -> (f32, f32) {
 
 /// Where a new group of commands starts (a line before it).
 fn starts_group(i: usize) -> bool {
-    matches!(i, 1 | 6 | 8)
+    matches!(i, 1 | 7 | 9)
 }
 
 /// Commands that show their label (and a chevron: they open a menu, or New).
 fn labelled(i: usize) -> bool {
-    matches!(i, 0 | 6 | 7)
+    matches!(i, 0 | 7 | 8)
 }
 
 impl State {
@@ -1058,12 +1060,23 @@ impl State {
             2 => self.copy(false),
             3 => self.paste(),
             4 => self.start_rename(),
-            5 => self.delete(false),
-            6 => self.sort_menu(),
-            7 => self.view_menu(),
-            8 => self.more_menu(),
+            5 => self.quick_share(),
+            6 => self.delete(false),
+            7 => self.sort_menu(),
+            8 => self.view_menu(),
+            9 => self.more_menu(),
             _ => {}
         }
+    }
+
+    /// Sends the selected files with Quick Share (to a phone or PC nearby).
+    fn quick_share(&mut self) {
+        let files: Vec<String> =
+            self.t().selected_paths().into_iter().filter(|p| std::path::Path::new(p).is_file()).collect();
+        let mut args = vec!["--quickshare-send".to_string()];
+        args.extend(files);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        appwin::launch(&refs);
     }
 
     fn new_tab(&mut self, loc: Loc) {
@@ -1391,7 +1404,8 @@ impl State {
             // Explorer's colours: New in the accent, Delete in red, the rest plain.
             let ink = match i {
                 0 => accent,
-                5 => Color(0.95, 0.45, 0.42, 1.0),
+                5 => Color(0.36, 0.62, 1.0, 1.0),
+                6 => Color(0.95, 0.45, 0.42, 1.0),
                 _ => Color::white(0.85),
             };
             if labelled(i) {

@@ -956,7 +956,12 @@ pub fn run(file: &str, args: &str) {
 
 // -------------------------------------------------------------- shortcuts --
 
-fn create_link(path: &std::path::Path, target: &std::path::Path, args: &str, desc: &str) -> windows::core::Result<()> {
+pub(crate) fn create_link(
+    path: &std::path::Path,
+    target: &std::path::Path,
+    args: &str,
+    desc: &str,
+) -> windows::core::Result<()> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         link.SetPath(&HSTRING::from(target.as_os_str()))?;

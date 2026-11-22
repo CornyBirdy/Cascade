@@ -1475,6 +1475,7 @@ impl App {
         crate::minanim::configure(self.cfg.min_animation);
         crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
+        crate::quickshare::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         desktops::watch();
@@ -3859,6 +3860,7 @@ impl App {
         crate::minanim::configure(self.cfg.min_animation);
         crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
+        crate::quickshare::configure(&self.cfg);
         crate::snapdrag::configure(self.cfg.snap_drag);
         crate::ducker::configure(self.cfg.ducker_params());
         self.perf = Perf::new(self.cfg.perf_log);
@@ -4196,6 +4198,7 @@ impl App {
                     }
                 });
             }
+            Change::Action("quickshare_send") => crate::appwin::launch(&["--quickshare-send"]),
             Change::Action("update_check_now") => {
                 update::set_status("Checking\u{2026}");
                 update::spawn_check();

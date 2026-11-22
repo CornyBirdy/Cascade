@@ -36,7 +36,7 @@ fn instance() -> HINSTANCE {
     unsafe { GetModuleHandleW(None).map(|m| HINSTANCE(m.0)).unwrap_or_default() }
 }
 
-fn register(class: PCWSTR, proc: WNDPROC) {
+pub(crate) fn register(class: PCWSTR, proc: WNDPROC) {
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -51,7 +51,7 @@ fn register(class: PCWSTR, proc: WNDPROC) {
 }
 
 /// The scale of the screen `r` is on (1.0 at 100%).
-fn scale_at(r: &RECT) -> f32 {
+pub(crate) fn scale_at(r: &RECT) -> f32 {
     let mut dpi = (96u32, 96u32);
     unsafe {
         let _ =
@@ -60,7 +60,7 @@ fn scale_at(r: &RECT) -> f32 {
     dpi.0.max(96) as f32 / 96.0
 }
 
-fn work_area(r: &RECT) -> RECT {
+pub(crate) fn work_area(r: &RECT) -> RECT {
     let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     unsafe {
         let _ = GetMonitorInfoW(MonitorFromRect(r, MONITOR_DEFAULTTONEAREST), &mut mi);
@@ -75,16 +75,16 @@ fn exclude(h: HWND) {
     }
 }
 
-fn ease(t: f32) -> f32 {
+pub(crate) fn ease(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-fn mix(a: Color, b: Color, t: f32) -> Color {
+pub(crate) fn mix(a: Color, b: Color, t: f32) -> Color {
     Color(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t, a.3 + (b.3 - a.3) * t)
 }
 
 /// Snip's glass: a soft shadow, the dark pane, a sheen from the top, a fine edge.
-fn glass(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, a: f32) {
+pub(crate) fn glass(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, a: f32) {
     for i in 1..=8 {
         let d = i as f32 * 1.5;
         p.rrect(x - d, y - d + 3.0, w + 2.0 * d, h + 2.0 * d, r + d, Color(0.0, 0.0, 0.0, 0.045 * a));
@@ -101,23 +101,23 @@ fn glass(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, a: f32) {
     p.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, (r - 0.5).max(0.0), Color::white(0.12 * a), 1.0);
 }
 
-fn glyph(p: &Painter, f: &crate::gfx::Fonts, code: u32, x: f32, y: f32, size: f32, c: Color) {
+pub(crate) fn glyph(p: &Painter, f: &crate::gfx::Fonts, code: u32, x: f32, y: f32, size: f32, c: Color) {
     if let (Some(ic), Some(ch)) = (&f.icons, char::from_u32(code)) {
         p.text(&ch.to_string(), ic, x, y, size, size, Align::Center, c);
     }
 }
 
 /// A layered window's drawing: its Direct2D, its pixels and its scale.
-struct Surface {
-    hwnd: HWND,
-    gfx: Gfx,
-    layer: Layer,
-    k: f32,
+pub(crate) struct Surface {
+    pub hwnd: HWND,
+    pub gfx: Gfx,
+    pub layer: Layer,
+    pub k: f32,
 }
 
 impl Surface {
     /// Draws `w` x `h` (logical) with `draw` and shows it at `pos` (screen pixels).
-    fn show(&mut self, pos: POINT, w: f32, h: f32, alpha: f32, draw: impl FnOnce(&Painter, &crate::gfx::Fonts)) {
+    pub fn show(&mut self, pos: POINT, w: f32, h: f32, alpha: f32, draw: impl FnOnce(&Painter, &crate::gfx::Fonts)) {
         let (pw, ph) = ((w * self.k).ceil() as i32, (h * self.k).ceil() as i32);
         if self.gfx.begin(&mut self.layer, pw, ph, self.k).is_err() {
             return;
@@ -139,7 +139,7 @@ impl Surface {
     }
 }
 
-fn layered(class: PCWSTR, ex: WINDOW_EX_STYLE, x: i32, y: i32) -> Option<HWND> {
+pub(crate) fn layered(class: PCWSTR, ex: WINDOW_EX_STYLE, x: i32, y: i32) -> Option<HWND> {
     unsafe {
         CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | ex,
@@ -159,7 +159,7 @@ fn layered(class: PCWSTR, ex: WINDOW_EX_STYLE, x: i32, y: i32) -> Option<HWND> {
     }
 }
 
-fn track_leave(hwnd: HWND) {
+pub(crate) fn track_leave(hwnd: HWND) {
     let mut t = TRACKMOUSEEVENT {
         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
         dwFlags: TME_LEAVE,
@@ -172,7 +172,7 @@ fn track_leave(hwnd: HWND) {
 }
 
 /// A mouse message's position in logical units.
-fn at(lp: LPARAM, k: f32) -> (f32, f32) {
+pub(crate) fn at(lp: LPARAM, k: f32) -> (f32, f32) {
     ((lp.0 & 0xFFFF) as i16 as f32 / k, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / k)
 }
 
@@ -325,7 +325,7 @@ pub fn countdown(area: RECT, secs: u32) -> bool {
 
 const BAR_W: f32 = 228.0;
 const BAR_H: f32 = 48.0;
-const SHADOW: f32 = 14.0;
+pub(crate) const SHADOW: f32 = 14.0;
 
 static BAR: AtomicIsize = AtomicIsize::new(0);
 

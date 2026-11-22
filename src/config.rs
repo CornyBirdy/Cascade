@@ -55,6 +55,16 @@ wobbly = false
 wobbly_strength = 1.0
 wobbly_friction = 0.35
 # The built-in pen tablet driver (10moon, Vinsa and their relatives).
+# Quick Share: send and take files with Android phones and PCs nearby, over Wi-Fi.
+quickshare = true
+# The name others see (empty: this PC's name).
+quickshare_name =
+# Where what's received goes (empty: Downloads).
+quickshare_folder =
+# ask, or auto (accept without asking).
+quickshare_accept = ask
+# Share with Quick Share in right-click menus and Send to.
+quickshare_menus = true
 tablet = true
 # ink (Windows Ink: a pen, with pressure) or mouse.
 tablet_mode = ink
@@ -389,6 +399,11 @@ pub struct Config {
     pub wobbly: bool,
     pub wobbly_strength: f32,
     pub wobbly_friction: f32,
+    pub quickshare: bool,
+    pub quickshare_name: String,
+    pub quickshare_folder: String,
+    pub quickshare_accept: String,
+    pub quickshare_menus: bool,
     pub tablet: bool,
     pub tablet_mode: String,
     pub tablet_screen: String,
@@ -539,6 +554,11 @@ impl Default for Config {
             wobbly: false,
             wobbly_strength: 1.0,
             wobbly_friction: 0.35,
+            quickshare: true,
+            quickshare_name: String::new(),
+            quickshare_folder: String::new(),
+            quickshare_accept: "ask".into(),
+            quickshare_menus: true,
             tablet: true,
             tablet_mode: "ink".into(),
             tablet_screen: "all".into(),
@@ -833,6 +853,11 @@ impl Config {
                 "wobbly" => set_b(&mut c.wobbly),
                 "wobbly_strength" => set_f(&mut c.wobbly_strength, 0.3, 2.0),
                 "wobbly_friction" => set_f(&mut c.wobbly_friction, 0.1, 1.0),
+                "quickshare" => set_b(&mut c.quickshare),
+                "quickshare_name" => c.quickshare_name = v.trim().to_string(),
+                "quickshare_folder" => c.quickshare_folder = v.trim().to_string(),
+                "quickshare_accept" if matches!(v, "ask" | "auto") => c.quickshare_accept = v.into(),
+                "quickshare_menus" => set_b(&mut c.quickshare_menus),
                 "tablet" => set_b(&mut c.tablet),
                 "tablet_mode" if matches!(v, "ink" | "mouse") => c.tablet_mode = v.into(),
                 "tablet_screen" if matches!(v, "all" | "main") => c.tablet_screen = v.into(),
@@ -1028,6 +1053,11 @@ impl Config {
             "wobbly" => b(self.wobbly),
             "wobbly_strength" => self.wobbly_strength.to_string(),
             "wobbly_friction" => self.wobbly_friction.to_string(),
+            "quickshare" => b(self.quickshare),
+            "quickshare_name" => self.quickshare_name.clone(),
+            "quickshare_folder" => self.quickshare_folder.clone(),
+            "quickshare_accept" => self.quickshare_accept.clone(),
+            "quickshare_menus" => b(self.quickshare_menus),
             "tablet" => b(self.tablet),
             "tablet_mode" => self.tablet_mode.clone(),
             "tablet_screen" => self.tablet_screen.clone(),
