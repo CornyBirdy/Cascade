@@ -1,7 +1,7 @@
 //! Icons for Cascade's own apps (Files, Calculator, Camera, Snip...), drawn
-//! here rather than borrowed from Windows: each a rounded tile in its own
-//! colour with a white picture on it, so they're told apart at a glance on
-//! the taskbar and in Start, and look like one set.
+//! here rather than borrowed from Windows: each the thing itself (a folder,
+//! a calculator, a camera...) in flat colours, no plate behind it and no
+//! gradients, so they're told apart at a glance and look like one set.
 //!
 //! They're drawn in software from a few shapes (rounded boxes, circles,
 //! rings, lines, triangles), each edge smoothed by its distance from the
@@ -20,10 +20,6 @@ const WHITE: C = C(1.0, 1.0, 1.0, 1.0);
 
 fn hex(v: u32) -> C {
     C(((v >> 16) & 0xFF) as f32 / 255.0, ((v >> 8) & 0xFF) as f32 / 255.0, (v & 0xFF) as f32 / 255.0, 1.0)
-}
-
-fn fade(c: C, a: f32) -> C {
-    C(c.0, c.1, c.2, c.3 * a)
 }
 
 /// What can be drawn: positions and sizes are shares of the icon (0..1).
@@ -136,46 +132,15 @@ impl Canvas {
         }
     }
 
-    /// A fine grain over what's inside `shape`, as a print or a matte
-    /// surface has: each pixel a touch lighter or darker, always the same.
-    fn grain(&mut self, shape: &Shape, amount: f32) {
+    /// Cuts `shape` out of what's drawn (a hole, such as a gear's middle).
+    fn cut(&mut self, shape: &Shape) {
         let n = self.size as f32;
         for y in 0..self.size {
             for x in 0..self.size {
                 let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
-                if distance(shape, u, v) > 0.0 {
-                    continue;
-                }
-                // A hash of the pixel's place, -1..1, the same every time.
-                let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
-                h ^= h >> 15;
-                h = h.wrapping_mul(0x2C1B_3C6D);
-                h ^= h >> 12;
-                let r = (h & 0xFFFF) as f32 / 32767.5 - 1.0;
-                let d = &mut self.px[y * self.size + x];
-                for c in d.iter_mut().take(3) {
-                    *c = (*c + r * amount).clamp(0.0, 1.0);
-                }
-            }
-        }
-    }
-
-    /// The tile's rim: lit along the top, shaded along the bottom, a pixel or so in.
-    fn bevel(&mut self, shape: &Shape, light: f32, shade: f32) {
-        let n = self.size as f32;
-        for y in 0..self.size {
-            for x in 0..self.size {
-                let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
-                let d = -distance(shape, u, v) * n;
-                if !(0.0..1.8).contains(&d) {
-                    continue;
-                }
-                let k = 1.0 - d / 1.8;
-                let p = &mut self.px[y * self.size + x];
-                let (target, amount) =
-                    if v < 0.5 { (1.0, light * (1.0 - v * 2.0)) } else { (0.0, shade * (v * 2.0 - 1.0)) };
-                for c in p.iter_mut().take(3) {
-                    *c += (target - *c) * amount * k;
+                let cover = (0.5 - distance(shape, u, v) * n).clamp(0.0, 1.0);
+                if cover > 0.0 {
+                    self.px[y * self.size + x][3] *= 1.0 - cover;
                 }
             }
         }
@@ -195,185 +160,143 @@ impl Canvas {
 }
 
 /// The app's tile colours (top, bottom) and its picture.
-/// A tile's colours (top, bottom) and the picture on it.
-type Design = (u32, u32, Vec<(Shape, C)>);
+/// An icon: its shapes, back to front, each in one flat colour.
+type Design = Vec<(Shape, C)>;
 
 fn design(id: &str) -> Option<Design> {
     use Shape::*;
     let w = WHITE;
-    let soft = fade(WHITE, 0.55);
     let pi = std::f32::consts::PI;
     Some(match id.to_ascii_lowercase().as_str() {
-        "cascade.files" => (
-            0xFFD54F,
-            0xF5A300,
-            vec![
-                (Box(0.22, 0.30, 0.26, 0.14, 0.04), w),
-                (Box(0.22, 0.36, 0.56, 0.36, 0.05), w),
-                (Box(0.22, 0.42, 0.56, 0.04, 0.0), fade(hex(0xF5A300), 0.35)),
-            ],
-        ),
-        "cascade.photos" => (
-            0x4FC3F7,
-            0x1E73D8,
-            vec![
-                (Box(0.20, 0.24, 0.60, 0.52, 0.07), w),
-                (Box(0.25, 0.29, 0.50, 0.42, 0.04), hex(0x2A8BE6)),
-                (Tri([(0.27, 0.69), (0.44, 0.45), (0.58, 0.69)]), w),
-                (Tri([(0.46, 0.69), (0.60, 0.53), (0.73, 0.69)]), soft),
-                (Circle(0.63, 0.39, 0.055), w),
-            ],
-        ),
-        "cascade.diskusage" => (
-            0x4DD0C0,
-            0x00897B,
-            vec![(Ring(0.5, 0.5, 0.21, 0.13, 0.0, 0.0), soft), (Ring(0.5, 0.5, 0.21, 0.13, -pi / 2.0, pi * 0.75), w)],
-        ),
-        "cascade.calculator" => (0x5C6670, 0x2E3338, {
-            let mut v = vec![(Box(0.25, 0.20, 0.50, 0.14, 0.03), fade(hex(0xB3E5FC), 0.9))];
+        // A folder: its tab and back, and the front a shade lighter.
+        "cascade.files" => vec![
+            (Box(0.08, 0.18, 0.38, 0.20, 0.05), hex(0xE5A00D)),
+            (Box(0.08, 0.26, 0.84, 0.58, 0.06), hex(0xE5A00D)),
+            (Box(0.08, 0.34, 0.84, 0.50, 0.06), hex(0xFFC83D)),
+        ],
+        // A picture: a frame, sky, hills and the sun.
+        "cascade.photos" => vec![
+            (Box(0.08, 0.16, 0.84, 0.68, 0.08), hex(0x2B7BD6)),
+            (Box(0.14, 0.22, 0.72, 0.56, 0.04), hex(0xA8DAFF)),
+            (Tri([(0.14, 0.78), (0.40, 0.44), (0.64, 0.78)]), hex(0x2E9E4F)),
+            (Tri([(0.44, 0.78), (0.64, 0.54), (0.86, 0.78)]), hex(0x56C26F)),
+            (Circle(0.68, 0.36, 0.07), hex(0xFFC83D)),
+        ],
+        // A pie: the whole drive, and the part that's used.
+        "cascade.diskusage" => vec![
+            (Ring(0.5, 0.5, 0.29, 0.20, 0.0, 0.0), hex(0xB8C4CC)),
+            (Ring(0.5, 0.5, 0.29, 0.20, -pi / 2.0, pi * 0.75), hex(0x0F9D8A)),
+        ],
+        // A calculator: its body, display and keys.
+        "cascade.calculator" => {
+            let mut v = vec![
+                (Box(0.18, 0.08, 0.64, 0.84, 0.08), hex(0x3C4043)),
+                (Box(0.26, 0.16, 0.48, 0.16, 0.03), hex(0xA8DAFF)),
+            ];
             for r in 0..3 {
                 for c in 0..3 {
-                    let col = if c == 2 && r == 2 { hex(0xFF9F43) } else { w };
-                    v.push((Box(0.25 + c as f32 * 0.18, 0.40 + r as f32 * 0.13, 0.14, 0.10, 0.025), col));
+                    let col = if c == 2 && r == 2 { hex(0xFF9F43) } else { hex(0xC4C8CC) };
+                    v.push((Box(0.26 + c as f32 * 0.17, 0.40 + r as f32 * 0.155, 0.13, 0.11, 0.025), col));
                 }
             }
             v
-        }),
-        "cascade.camera" => (
-            0x9575CD,
-            0x5E35B1,
-            vec![
-                (Box(0.38, 0.25, 0.24, 0.10, 0.03), w),
-                (Box(0.18, 0.31, 0.64, 0.44, 0.08), w),
-                (Circle(0.5, 0.53, 0.15), hex(0x6A42BE)),
-                (Circle(0.5, 0.53, 0.09), w),
-                (Circle(0.72, 0.39, 0.03), hex(0x6A42BE)),
-            ],
-        ),
-        "cascade.notepad" => (
-            0x64B5F6,
-            0x2F6FD0,
-            vec![
-                (Box(0.26, 0.18, 0.48, 0.64, 0.06), w),
-                (Line(0.34, 0.34, 0.66, 0.34, 0.04), hex(0x5A9BE8)),
-                (Line(0.34, 0.46, 0.66, 0.46, 0.04), hex(0x5A9BE8)),
-                (Line(0.34, 0.58, 0.58, 0.58, 0.04), hex(0x5A9BE8)),
-            ],
-        ),
-        "cascade.clock" => (
-            0x7986CB,
-            0x3949AB,
-            vec![
-                (Circle(0.5, 0.5, 0.29), w),
-                (Line(0.5, 0.5, 0.5, 0.31, 0.055), hex(0x3F51B5)),
-                (Line(0.5, 0.5, 0.64, 0.58, 0.055), hex(0x3F51B5)),
-                (Circle(0.5, 0.5, 0.04), hex(0xFF7043)),
-            ],
-        ),
-        "cascade.mediaplayer" => (
-            0xFF8A65,
-            0xE64A19,
-            vec![(Circle(0.5, 0.5, 0.28), w), (Tri([(0.43, 0.37), (0.43, 0.63), (0.65, 0.5)]), hex(0xEE5A2A))],
-        ),
-        "cascade.soundrecorder" => (
-            0xEF5350,
-            0xC62828,
-            vec![
-                (Box(0.40, 0.18, 0.20, 0.36, 0.10), w),
-                (Ring(0.5, 0.42, 0.18, 0.05, 0.0, pi), w),
-                (Line(0.5, 0.62, 0.5, 0.74, 0.05), w),
-                (Line(0.38, 0.76, 0.62, 0.76, 0.05), w),
-            ],
-        ),
-        "cascade.paint" => (
-            0xF06292,
-            0xAB47BC,
-            vec![
-                (Circle(0.5, 0.5, 0.30), w),
-                (Circle(0.38, 0.40, 0.055), hex(0xE53935)),
-                (Circle(0.52, 0.33, 0.055), hex(0xFDD835)),
-                (Circle(0.65, 0.42, 0.055), hex(0x43A047)),
-                (Circle(0.62, 0.58, 0.055), hex(0x1E88E5)),
-                (Circle(0.42, 0.60, 0.07), fade(hex(0xC0C0C0), 0.5)),
-            ],
-        ),
-        "cascade.lighting" => (
-            0x26C6DA,
-            0x7E57C2,
-            vec![
-                (Circle(0.5, 0.44, 0.16), w),
-                (Box(0.43, 0.58, 0.14, 0.12, 0.03), w),
-                (Line(0.5, 0.16, 0.5, 0.21, 0.04), soft),
-                (Line(0.25, 0.44, 0.30, 0.44, 0.04), soft),
-                (Line(0.70, 0.44, 0.75, 0.44, 0.04), soft),
-                (Line(0.32, 0.26, 0.36, 0.30, 0.04), soft),
-                (Line(0.68, 0.26, 0.64, 0.30, 0.04), soft),
-            ],
-        ),
-        "cascade.snip" => (
-            0xEC407A,
-            0x8E24AA,
-            vec![
-                // A selection's corners, and the scissors' rings in it.
-                (Line(0.22, 0.22, 0.36, 0.22, 0.05), w),
-                (Line(0.22, 0.22, 0.22, 0.36, 0.05), w),
-                (Line(0.78, 0.78, 0.64, 0.78, 0.05), w),
-                (Line(0.78, 0.78, 0.78, 0.64, 0.05), w),
-                (Line(0.40, 0.36, 0.62, 0.62, 0.045), w),
-                (Line(0.60, 0.36, 0.38, 0.62, 0.045), w),
-                (Ring(0.35, 0.66, 0.06, 0.04, 0.0, 0.0), w),
-                (Ring(0.65, 0.66, 0.06, 0.04, 0.0, 0.0), w),
-            ],
-        ),
-        "cascade.settings" => (0x78909C, 0x455A64, {
+        }
+        // A camera: its body, the bump on top, the lens and a glint.
+        "cascade.camera" => vec![
+            (Box(0.34, 0.18, 0.32, 0.14, 0.04), hex(0x37474F)),
+            (Box(0.08, 0.26, 0.84, 0.58, 0.09), hex(0x455A64)),
+            (Circle(0.5, 0.55, 0.21), hex(0x90A4AE)),
+            (Circle(0.5, 0.55, 0.14), hex(0x1E2A30)),
+            (Circle(0.45, 0.50, 0.035), w),
+            (Circle(0.79, 0.37, 0.035), hex(0xFFC83D)),
+        ],
+        // A page with a blue top and lines of writing.
+        "cascade.notepad" => vec![
+            (Box(0.18, 0.08, 0.64, 0.84, 0.07), hex(0xF2F4F7)),
+            (Box(0.18, 0.08, 0.64, 0.16, 0.07), hex(0x3B82F6)),
+            (Box(0.18, 0.18, 0.64, 0.06, 0.0), hex(0x3B82F6)),
+            (Line(0.30, 0.40, 0.70, 0.40, 0.045), hex(0x9AA3AE)),
+            (Line(0.30, 0.53, 0.70, 0.53, 0.045), hex(0x9AA3AE)),
+            (Line(0.30, 0.66, 0.58, 0.66, 0.045), hex(0x9AA3AE)),
+        ],
+        // A clock face with its hands.
+        "cascade.clock" => vec![
+            (Circle(0.5, 0.5, 0.40), hex(0x4F5BD5)),
+            (Circle(0.5, 0.5, 0.33), w),
+            (Line(0.5, 0.5, 0.5, 0.27, 0.06), hex(0x263238)),
+            (Line(0.5, 0.5, 0.66, 0.6, 0.06), hex(0x263238)),
+            (Circle(0.5, 0.5, 0.045), hex(0xE53935)),
+        ],
+        // A round play button.
+        "cascade.mediaplayer" => {
+            vec![(Circle(0.5, 0.5, 0.40), hex(0xF4511E)), (Tri([(0.42, 0.33), (0.42, 0.67), (0.70, 0.5)]), w)]
+        }
+        // A microphone on its stand.
+        "cascade.soundrecorder" => vec![
+            (Box(0.37, 0.10, 0.26, 0.46, 0.13), hex(0xE53935)),
+            (Ring(0.5, 0.40, 0.22, 0.06, 0.0, pi), hex(0x9AA3AE)),
+            (Line(0.5, 0.62, 0.5, 0.80, 0.06), hex(0x9AA3AE)),
+            (Line(0.34, 0.84, 0.66, 0.84, 0.06), hex(0x9AA3AE)),
+        ],
+        // A painter's palette with its paints.
+        "cascade.paint" => vec![
+            (Circle(0.5, 0.5, 0.40), hex(0xF1D7AE)),
+            (Circle(0.62, 0.66, 0.09), C(0.0, 0.0, 0.0, 0.0)),
+            (Circle(0.33, 0.40, 0.07), hex(0xE53935)),
+            (Circle(0.50, 0.28, 0.07), hex(0xFDD835)),
+            (Circle(0.67, 0.38, 0.07), hex(0x43A047)),
+            (Circle(0.34, 0.62, 0.07), hex(0x1E88E5)),
+        ],
+        // A light bulb, lit.
+        "cascade.lighting" => vec![
+            (Circle(0.5, 0.42, 0.24), hex(0xFFC83D)),
+            (Box(0.40, 0.58, 0.20, 0.16, 0.03), hex(0xFFC83D)),
+            (Box(0.39, 0.72, 0.22, 0.12, 0.04), hex(0x8D99A3)),
+            (Line(0.5, 0.06, 0.5, 0.11, 0.045), hex(0xFFC83D)),
+            (Line(0.12, 0.42, 0.18, 0.42, 0.045), hex(0xFFC83D)),
+            (Line(0.82, 0.42, 0.88, 0.42, 0.045), hex(0xFFC83D)),
+            (Line(0.22, 0.16, 0.26, 0.20, 0.045), hex(0xFFC83D)),
+            (Line(0.78, 0.16, 0.74, 0.20, 0.045), hex(0xFFC83D)),
+        ],
+        // Scissors cutting out a selection.
+        "cascade.snip" => vec![
+            (Line(0.10, 0.10, 0.30, 0.10, 0.05), hex(0x3B82F6)),
+            (Line(0.10, 0.10, 0.10, 0.30, 0.05), hex(0x3B82F6)),
+            (Line(0.90, 0.90, 0.70, 0.90, 0.05), hex(0x3B82F6)),
+            (Line(0.90, 0.90, 0.90, 0.70, 0.05), hex(0x3B82F6)),
+            (Line(0.36, 0.24, 0.62, 0.62, 0.055), hex(0x90A4AE)),
+            (Line(0.64, 0.24, 0.38, 0.62, 0.055), hex(0x90A4AE)),
+            (Ring(0.32, 0.70, 0.09, 0.055, 0.0, 0.0), hex(0xE53935)),
+            (Ring(0.68, 0.70, 0.09, 0.055, 0.0, 0.0), hex(0xE53935)),
+        ],
+        // A gear.
+        "cascade.settings" => {
             let mut v = Vec::new();
             for i in 0..8 {
                 let a = i as f32 * pi / 4.0;
                 let (c, s) = (a.cos(), a.sin());
-                v.push((Line(0.5 + 0.17 * c, 0.5 + 0.17 * s, 0.5 + 0.27 * c, 0.5 + 0.27 * s, 0.10), w));
+                v.push((Line(0.5 + 0.22 * c, 0.5 + 0.22 * s, 0.5 + 0.34 * c, 0.5 + 0.34 * s, 0.13), hex(0x6B7780)));
             }
-            v.push((Circle(0.5, 0.5, 0.21), w));
-            v.push((Circle(0.5, 0.5, 0.085), hex(0x5D707B)));
+            v.push((Circle(0.5, 0.5, 0.27), hex(0x6B7780)));
+            v.push((Circle(0.5, 0.5, 0.11), C(0.0, 0.0, 0.0, 0.0)));
             v
-        }),
+        }
         _ => return None,
     })
 }
 
 fn draw(id: &str, size: u32) -> Option<Canvas> {
-    let (top, bottom, picture) = design(id)?;
+    let picture = design(id)?;
     let mut c = Canvas::new(size.clamp(8, 512) as usize);
-    // The tile, filling the icon but for a hair of room round it.
-    let m = 0.06;
-    let tile = Shape::Box(m, m, 1.0 - 2.0 * m, 1.0 - 2.0 * m, 0.22);
-    c.fill(&tile, hex(top), Some(hex(bottom)));
-    // A soft light along the top, a grain over the tile, and its rim.
-    c.fill(&Shape::Box(m, m, 1.0 - 2.0 * m, 0.45, 0.22), fade(WHITE, 0.12), Some(fade(WHITE, 0.0)));
-    c.grain(&tile, 0.035);
-    c.bevel(&tile, 0.45, 0.35);
-    // The picture: a soft shadow under it first (a few offset copies, fading
-    // out), then itself, a little shaded towards the bottom.
-    for (k, a) in [(0.012, 0.16), (0.022, 0.10), (0.032, 0.06)] {
-        for (s, _) in &picture {
-            c.fill(&shifted(s, 0.0, k), C(0.0, 0.0, 0.0, a), None);
+    for (s, col) in &picture {
+        if col.3 == 0.0 {
+            // A hole: cut through what's drawn so far.
+            c.cut(s);
+        } else {
+            c.fill(s, *col, None);
         }
     }
-    for (s, col) in &picture {
-        let low = C(col.0 * 0.86, col.1 * 0.86, col.2 * 0.88, col.3);
-        c.fill(s, *col, Some(low));
-    }
     Some(c)
-}
-
-/// `s` moved by (dx, dy).
-fn shifted(s: &Shape, dx: f32, dy: f32) -> Shape {
-    match *s {
-        Shape::Box(x, y, w, h, r) => Shape::Box(x + dx, y + dy, w, h, r),
-        Shape::Circle(x, y, r) => Shape::Circle(x + dx, y + dy, r),
-        Shape::Ring(x, y, r, w, a0, a1) => Shape::Ring(x + dx, y + dy, r, w, a0, a1),
-        Shape::Line(x0, y0, x1, y1, w) => Shape::Line(x0 + dx, y0 + dy, x1 + dx, y1 + dy, w),
-        Shape::Tri(p) => Shape::Tri(p.map(|(x, y)| (x + dx, y + dy))),
-    }
 }
 
 /// Whether `id` (an AppUserModelID such as "Cascade.Files") has an icon here.
@@ -432,9 +355,10 @@ mod tests {
         }
         let px = pixels("Cascade.Files", 48).unwrap();
         assert_eq!(px.len(), 48 * 48 * 4);
-        // The middle is the tile (opaque), the very corner is clear.
+        // The folder's middle is solid, the corners round it clear (no plate).
         let at = |x: usize, y: usize| px[(y * 48 + x) * 4 + 3];
-        assert_eq!(at(24, 4), 255);
+        assert_eq!(at(24, 30), 255);
         assert_eq!(at(0, 0), 0);
+        assert_eq!(at(47, 47), 0);
     }
 }
