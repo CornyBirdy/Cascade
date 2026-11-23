@@ -18,6 +18,9 @@ Settings > Updates > What's new opens the list.
 - **Files, refreshing shows**: the refresh button turns, a bar runs under the command bar and the status says *Refreshing...* until the folder has loaded.
 - **Paint**: Ctrl+V pastes a picture from the clipboard as a piece you drag into place (Enter puts it down, Esc drops it), Ctrl+C copies the picture, and a new menu at the end of the bar has *Resize canvas* (cut off or add white, or stretch the picture), rotate and flip, and clear. The Fill tool is a bucket, with a drop of the colour you're using. [ and ] change the pen size; Ctrl plus, minus and 0 zoom.
 
+- **Menus, more room and more colour**: rows are tighter, and a list too long for the screen (a file's menu with all the shell's extras) runs on into a second and third column instead of scrolling a tall strip. The usual commands (Open, Copy, Paste, Delete, Rename, Refresh, Properties, New, Pin, Sort, View...) have an icon, each in a colour of its own: red for what removes, green for what makes, blue for the clipboard, amber for edits and info.
+- **The theme previews** (Settings > Personalisation) show Cascade's own taskbar in each material over a desktop with a window behind it, so frosted and clear glass can be told apart, instead of coloured blobs.
+
 **Fixed**
 - **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
 

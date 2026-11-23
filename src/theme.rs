@@ -587,29 +587,57 @@ fn sheen(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, s: f32) {
     }
 }
 
-/// A small sample of theme `t` for the settings page: the panel over a
-/// colourful wallpaper, so frosted and light glass look different.
+/// A small sample of theme `t` for the settings page: Cascade's own taskbar
+/// in the theme's glass, over a desktop with a window behind it, so what the
+/// glass does to what's behind it (frosts it, or shows it clear) can be seen.
 pub fn preview(p: &Painter, t: &Theme, x: f32, y: f32, w: f32, h: f32, r: f32) {
-    // The "wallpaper", seen through the glass: a plain colour with a few
-    // shapes on it (something for the glass to show), no gradients.
-    p.rrect(x, y, w, h, r, Color(0.16, 0.30, 0.52, 1.0));
-    p.circle(x + w * 0.80, y + h * 0.36, h * 0.30, Color(0.93, 0.46, 0.30, 1.0));
-    p.rrect(x + w * 0.10, y + h * 0.52, w * 0.36, h * 0.30, 4.0, Color(0.32, 0.62, 0.52, 1.0));
+    // The desktop: a dusk sky over two flat hills.
+    p.rrect(x, y, w, h, r, Color(0.20, 0.30, 0.52, 1.0));
+    p.rrect(x, y + h * 0.58, w, h * 0.42, r, Color(0.20, 0.40, 0.36, 1.0));
+    p.rrect(x + w * 0.46, y + h * 0.66, w * 0.54, h * 0.34, r, Color(0.14, 0.30, 0.30, 1.0));
+    p.circle(x + w * 0.84, y + h * 0.22, h * 0.11, Color(1.0, 0.80, 0.52, 1.0));
+    // A window behind the bar: a title bar, then lines of text, the sort of
+    // detail glass is meant to show through (or hide).
+    let (wx, wy, ww, wh) = (x + w * 0.10, y + h * 0.10, w * 0.56, h * 0.66);
+    p.rrect(wx, wy, ww, wh, 4.0, Color(0.95, 0.96, 0.98, 1.0));
+    p.rrect(wx, wy, ww, h * 0.13, 4.0, Color(0.27, 0.34, 0.62, 1.0));
+    for (i, k) in [0.82, 0.62, 0.74, 0.5].iter().enumerate() {
+        p.rrect(
+            wx + ww * 0.08,
+            wy + h * (0.20 + 0.105 * i as f32),
+            ww * 0.84 * k,
+            h * 0.045,
+            1.5,
+            Color(0.55, 0.58, 0.66, 1.0),
+        );
+    }
+    // The bar, in the theme's glass over all that.
+    let (bx, bh) = (x + w * 0.08, h * 0.27);
+    let (by, bw) = (y + h - bh - h * 0.09, w * 0.84);
+    let br = bh / 2.0;
     let opacity = 0.55;
     let (cr, cg, cb) = t.tint;
     match t.glass {
-        // Frost hides the wallpaper; a light blur mostly shows it.
+        // Frost hides the window; a light blur mostly shows it.
         Glass::Acrylic => {
-            p.rrect(x, y, w, h, r, Color(cr, cg, cb, (0.55 + opacity * t.tint_scale * 0.4).min(0.95)));
-            p.rrect(x, y, w, h, r, white(0.04));
+            p.rrect(bx, by, bw, bh, br, Color(cr, cg, cb, (0.55 + opacity * t.tint_scale * 0.4).min(0.95)));
+            p.rrect(bx, by, bw, bh, br, white(0.04));
         }
-        Glass::Blur => p.rrect(x, y, w, h, r, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5)),
-        Glass::Clear => p.rrect(x, y, w, h, r, Color(cr, cg, cb, opacity * t.tint_scale)),
+        Glass::Blur => p.rrect(bx, by, bw, bh, br, Color(cr, cg, cb, 0.25 + opacity * t.tint_scale * 0.5)),
+        Glass::Clear => p.rrect(bx, by, bw, bh, br, Color(cr, cg, cb, opacity * t.tint_scale)),
         Glass::Solid => {}
     }
-    paint(p, t, x, y, w, h, r, t.glass != Glass::Solid, opacity, 1.0, 1.0);
-    p.rrect(x + 12.0, y + h / 2.0 - 2.0, 30.0, 4.0, 2.0, t.accent);
-    p.circle(x + w - 16.0, y + h / 2.0, 4.0, white(0.85));
+    paint(p, t, bx, by, bw, bh, br, t.glass != Glass::Solid, opacity, 1.0, 1.0);
+    // Its apps: flat coloured squares, the one in front with its dash under it.
+    let icon = bh * 0.52;
+    let gap = icon * 0.45;
+    let start = bx + (bw - (4.0 * icon + 3.0 * gap)) / 2.0;
+    let colours = [t.accent, Color(0.96, 0.96, 0.97, 1.0), Color(0.99, 0.62, 0.30, 1.0), Color(0.46, 0.80, 0.52, 1.0)];
+    for (i, c) in colours.iter().enumerate() {
+        let ix = start + i as f32 * (icon + gap);
+        p.rrect(ix, by + (bh - icon) / 2.0 - 1.0, icon, icon, icon * 0.28, *c);
+    }
+    p.rrect(start + icon / 2.0 - 4.0, by + bh - 4.0, 8.0, 2.0, 1.0, t.accent);
 }
 
 #[cfg(test)]

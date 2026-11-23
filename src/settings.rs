@@ -489,7 +489,7 @@ const TILE_GAP: f32 = 6.0;
 
 /// The theme gallery: columns of samples, each a preview over its name.
 const SWATCH_COLS: usize = 5;
-const SWATCH_PREVIEW: f32 = 50.0;
+const SWATCH_PREVIEW: f32 = 72.0;
 const SWATCH_H: f32 = SWATCH_PREVIEW + 24.0;
 const SWATCH_GAP: f32 = 10.0;
 
