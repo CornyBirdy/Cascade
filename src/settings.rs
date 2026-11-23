@@ -1501,14 +1501,13 @@ fn rows(section: usize) -> Vec<Row> {
 
             row("theme", "Theme", "", Gallery),
             heading("h_colour", "Colour"),
-            row("accent", "Cascade's accent colour", "", Accents(false)),
+            row("accent", "Accent colour", "", Accents(false)),
             row(
                 "accent_glass",
                 "Accent colour on the glass",
                 "Tint the taskbar, Start menu, panels and the lip with it, as Windows can.",
                 Toggle,
             ),
-            row("win_accent", "Windows' accent colour", "", Accents(true)),
             row("win_accent_bars", "Accent colour on title bars", "And on window borders.", Toggle),
             heading("h_mode", "Light and dark"),
             row("win_dark_apps", "Dark mode for apps", "Apps that follow Windows' choice.", Toggle),
@@ -2762,24 +2761,13 @@ impl Settings {
             matches!(r.ctl, Ctl::Gallery).then(|| theme::THEMES.iter().find(|t| t.key == get(r.key))).flatten();
         let desc = if let Some(t) = picked {
             t.about.to_string()
-        } else if matches!(r.ctl, Ctl::Accents(true)) {
-            let v = get(r.key);
-            let name = match theme::parse_accent(&v) {
-                Some(c) if Some(c) == cascade_accent_rgb() => "the same as Cascade's".to_string(),
-                Some(c) => theme::PALETTE
-                    .iter()
-                    .find(|(p, _)| *p == c)
-                    .map_or_else(|| format!("#{c:06X}"), |(_, n)| n.to_string()),
-                None => "Windows' default".to_string(),
-            };
-            format!("Highlights, buttons and links in Windows' own windows: {name}.")
-        } else if matches!(r.ctl, Ctl::Accents(false)) {
-            // What's picked.
+        } else if matches!(r.ctl, Ctl::Accents(_)) {
+            // What's picked: one colour for Cascade and for Windows' own windows.
             match theme::parse_accent(&get(r.key)) {
                 None => "Your Windows accent colour, followed when you change it.".to_string(),
                 Some(c) => match theme::PALETTE.iter().find(|(p, _)| *p == c) {
-                    Some((_, name)) => format!("{name}, picked here."),
-                    None => format!("#{c:06X}, your own colour (+ to pick another)."),
+                    Some((_, name)) => format!("{name}, for Cascade and for Windows' own windows."),
+                    None => format!("#{c:06X}, your own colour, for Cascade and Windows (+ to pick another)."),
                 },
             }
         } else if r.key == "about" && build > 0 {
@@ -3232,14 +3220,6 @@ impl Settings {
                 }
                 self.invalidate();
                 None
-            }
-            Hit::Accent(i, k) if matches!(self.rows().get(i).map(|r| &r.ctl), Some(Ctl::Accents(true))) => {
-                self.invalidate();
-                match k {
-                    CUSTOM_DOT => Some(Change::Action("win_accent_custom")),
-                    0 => Some(Change::Set("win_accent", format!("#{:06X}", cascade_accent_rgb()?))),
-                    k => Some(Change::Set("win_accent", accent_value(k)?)),
-                }
             }
             Hit::Accent(_, CUSTOM_DOT) => {
                 self.invalidate();

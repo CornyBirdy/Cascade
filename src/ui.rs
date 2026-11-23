@@ -4083,6 +4083,13 @@ impl App {
     }
 
     fn apply_change(&mut self, change: Change) {
+        // One accent colour: a colour picked for Cascade is Windows' too
+        // (Windows' own windows; "follow Windows" leaves Windows as it is).
+        if let Change::Set("accent", v) = &change {
+            if let Some(rgb) = theme::parse_accent(v) {
+                crate::winset::set("win_accent", &format!("#{rgb:06X}"));
+            }
+        }
         match change {
             Change::Set("autostart", v) => shell::set_autostart(v == "true"),
             Change::Set(key, v) if key.starts_with("win_") => crate::winset::set(key, &v),
@@ -4167,6 +4174,7 @@ impl App {
                 std::thread::spawn(move || {
                     if let Some(c) = crate::rgb::app::pick_colour(HWND(owner as *mut _), start) {
                         Config::set("accent", &format!("#{c:06X}"));
+                        crate::winset::set("win_accent", &format!("#{c:06X}"));
                         msg::post(msg::RELOAD, 0, 0);
                     }
                 });
@@ -4190,16 +4198,6 @@ impl App {
             Change::Action("profile_picture_clear") => {
                 Config::set("profile_picture", "");
                 self.reload_config();
-            }
-            // Any colour for Windows' accent, from the colour picker.
-            Change::Action("win_accent_custom") => {
-                let owner = self.settings.as_ref().map_or(0, |s| s.hwnd.0 as isize);
-                let start = theme::parse_accent(&setting_value(&self.cfg, "win_accent")).unwrap_or(0x0078D4);
-                std::thread::spawn(move || {
-                    if let Some(c) = crate::rgb::app::pick_colour(HWND(owner as *mut _), start) {
-                        crate::winset::set("win_accent", &format!("#{c:06X}"));
-                    }
-                });
             }
             Change::Action("quickshare_send") => crate::appwin::launch(&["--quickshare-send"]),
             Change::Action("update_check_now") => {

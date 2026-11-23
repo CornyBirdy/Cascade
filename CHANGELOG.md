@@ -21,6 +21,8 @@ Settings > Updates > What's new opens the list.
 - **Menus, more room and more colour**: rows are tighter, and a list too long for the screen (a file's menu with all the shell's extras) runs on into a second and third column instead of scrolling a tall strip. The usual commands (Open, Copy, Paste, Delete, Rename, Refresh, Properties, New, Pin, Sort, View...) have an icon, each in a colour of its own: red for what removes, green for what makes, blue for the clipboard, amber for edits and info.
 - **The theme previews** (Settings > Personalisation) show Cascade's own taskbar in each material over a desktop with a window behind it, so frosted and clear glass can be told apart, instead of coloured blobs.
 
+- **One accent colour** (Settings > Personalisation): the second palette is gone. The colour picked is Cascade's accent and Windows' own too (highlights, buttons and links in its windows); the first dot still follows Windows' colour and leaves it as it is.
+
 **Fixed**
 - **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
 
