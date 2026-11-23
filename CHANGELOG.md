@@ -23,6 +23,8 @@ Settings > Updates > What's new opens the list.
 
 - **One accent colour** (Settings > Personalisation): the second palette is gone. The colour picked is Cascade's accent and Windows' own too (highlights, buttons and links in its windows); the first dot still follows Windows' colour and leaves it as it is.
 
+- **Liquid Glass, reworked** to look like Apple's: a light blur you can still see the page through (it was clear and sharp, and read as a dark flat panel), a cool light wash so white text reads, a lens round the whole edge that bends and smears what's outside it (softened first, so print and edges don't turn up as stray bits inside the glass), and a thicker, brighter rim with a glow inside it. The preview shows it.
+
 **Fixed**
 - **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
 

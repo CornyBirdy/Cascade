@@ -35,14 +35,14 @@ use crate::gfx::{Color, Painter};
 pub enum Glass {
     /// Frosted acrylic, like the Windows 11 taskbar.
     Acrylic,
-    /// A plain blur with no frost or noise (no theme uses it now; Liquid
-    /// Glass did, before it went clear).
-    #[allow(dead_code)]
+    /// A plain blur with no frost or noise (Liquid Glass's).
     Blur,
     /// No blur: a solid panel (the Blur setting off).
     Solid,
     /// Clear glass: nothing blurred, what's behind seen sharp through a light
-    /// tint, the glass shown by its edge bending the light (see `lens`).
+    /// tint, the glass shown by its edge bending the light (see `lens`). No
+    /// theme uses it now; Liquid Glass is a light blur.
+    #[allow(dead_code)]
     Clear,
 }
 
@@ -129,24 +129,26 @@ pub const THEMES: [Theme; 2] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Apple's liquid glass: clear, not frosted, what's behind it seen sharp and bent round its edge like a lens, with a bright lit rim.",
-        glass: Glass::Clear,
-        // Barely tinted, as Apple's is: just enough that white text reads
-        // over a bright wallpaper (the Tint slider sets how much).
-        tint: (0.02, 0.02, 0.03),
-        tint_scale: 0.30,
-        solid: (0.19, 0.19, 0.2),
-        film: (white(0.02), white(0.008)),
-        // The rim: a thin bright line lit at the top left and again at the
-        // bottom right, as the light catches a curved edge, and only a
-        // whisper of an outline where it isn't lit.
-        rim: Rim::Shine { lit: 0.85, back: 0.5, hairline: 0.04 },
-        // A little light gathered in the curved edge, its colours split, a
+        about: "Apple's liquid glass: a light blur you can still see the page through, smeared and bent round its edge like a lens, with a thick lit rim.",
+        glass: Glass::Blur,
+        // A cool, light wash over the blur: enough that white text reads over
+        // a bright wallpaper without it going grey and flat (the Tint slider
+        // sets how much).
+        tint: (0.16, 0.19, 0.28),
+        tint_scale: 0.42,
+        solid: (0.17, 0.19, 0.25),
+        film: (white(0.07), white(0.015)),
+        // The rim: a thick bright edge lit at the top left and again at the
+        // bottom right, as the light catches a curved edge, with a softer glow
+        // inside it, and a whisper of an outline where it isn't lit.
+        rim: Rim::Shine { lit: 0.95, back: 0.6, hairline: 0.06 },
+        // Light gathered in the curved edge, its colours split a little, a
         // soft highlight from the top left, and the glass's thickness as a
         // faint shade along the bottom inside.
-        light: Light { lens: (7.0, 0.05), dispersion: 0.07, sheen: 0.22, depth: 0.10 },
-        // 24 px of curved rim, bent up to 43 px, colours split as they bend.
-        refract: Some(crate::lens::Lens { band: 24.0, bend: 1.8, split: 0.12 }),
+        light: Light { lens: (9.0, 0.10), dispersion: 0.05, sheen: 0.20, depth: 0.08 },
+        // 28 px of curved edge (all of a taskbar's height), bent up to 39 px,
+        // with what's bent in softened first, colours split a little.
+        refract: Some(crate::lens::Lens { band: 28.0, bend: 1.4, split: 0.08, soften: 5.0 }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
@@ -505,7 +507,7 @@ fn shine_rim(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, lit: f32, back
     };
     // From the top-left corner to the bottom-right one, over `run`.
     let (x0, y0, x1, y1) = (x + w / 2.0 - run / 2.0, y, x + w / 2.0 + run / 2.0, y + h);
-    for (inset, k, width) in [(line * 1.5, 1.0, line * 1.5), (line * 3.0, 0.35, line * 2.0)] {
+    for (inset, k, width) in [(line * 1.8, 1.0, line * 2.2), (line * 4.2, 0.4, line * 3.2)] {
         if w <= 2.0 * inset || h <= 2.0 * inset {
             break;
         }

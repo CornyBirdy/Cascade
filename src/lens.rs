@@ -60,6 +60,9 @@ pub struct Lens {
     /// How much more red bends than blue (the colour fringes), as a share
     /// of the bend.
     pub split: f32,
+    /// How much the light read from round the pane is softened before it's
+    /// bent in, in px (0 for none): what bends is blurred, not sharp print.
+    pub soften: f32,
 }
 
 /// A 32-bit top-down bitmap selected into a memory DC.
@@ -351,6 +354,7 @@ fn paint(ring: &mut Ring, force: bool) -> bool {
         ReleaseDC(None, screen);
     }
     let src = capture.pixels();
+    let soften = (ring.lens.soften * scale).round() as i32;
     // FNV-1a over the pixels around the panel (all the ring reads): nothing
     // to do if they didn't change. What's inside is the panel and the ring
     // themselves, which change with every frame drawn.
@@ -371,6 +375,9 @@ fn paint(ring: &mut Ring, force: bool) -> bool {
         return false;
     }
     ring.seen = hash;
+    // The strips were just copied from the screen afresh, so softening them
+    // in place is safe: the next look starts from new pixels.
+    lensmath::soften(src, cw, ch, margin, soften);
 
     // Only the part of the capture that is on a screen is worth reading.
     let (vx, vy, vw, vh) = unsafe {

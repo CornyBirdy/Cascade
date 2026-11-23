@@ -198,6 +198,57 @@ pub fn compose(mesh: &Mesh, src: &[u8], dst: &mut [u8]) {
     }
 }
 
+/// Softens the four strips of the capture (all the ring reads from) with a
+/// box blur `radius` px wide, each kept to itself so nothing from the middle
+/// (which isn't copied from the screen) bleeds into them. Sharp print and
+/// edges read from just outside would otherwise be bent into the ring as
+/// they are, where glass bends light that has already been softened.
+pub fn soften(src: &mut [u8], cw: i32, ch: i32, margin: i32, radius: i32) {
+    if radius <= 0 || margin <= 0 {
+        return;
+    }
+    let strips = [
+        (0, 0, cw, margin),
+        (0, ch - margin, cw, margin),
+        (0, margin, margin, ch - 2 * margin),
+        (cw - margin, margin, margin, ch - 2 * margin),
+    ];
+    for (x, y, w, h) in strips {
+        if w > 0 && h > 0 {
+            box_blur(src, cw as usize, (x as usize, y as usize, w as usize, h as usize), radius as usize);
+        }
+    }
+}
+
+/// Blurs the rectangle (x, y, w, h) of `src` (rows `stride` px wide) with a
+/// box of `2r + 1` px, along its rows and then down its columns, the edges
+/// held where they are.
+fn box_blur(src: &mut [u8], stride: usize, (x, y, w, h): (usize, usize, usize, usize), r: usize) {
+    let n = (2 * r + 1) as u32;
+    let mut tmp = vec![0u8; w * h * 4];
+    let ri = r as isize;
+    for row in 0..h {
+        for c in 0..3 {
+            let at = |i: isize| src[((y + row) * stride + x + i.clamp(0, w as isize - 1) as usize) * 4 + c] as u32;
+            let mut sum: u32 = (-ri..=ri).map(at).sum();
+            for i in 0..w as isize {
+                tmp[(row * w + i as usize) * 4 + c] = ((sum + n / 2) / n) as u8;
+                sum = sum + at(i + ri + 1) - at(i - ri);
+            }
+        }
+    }
+    for col in 0..w {
+        for c in 0..3 {
+            let at = |j: isize| tmp[(j.clamp(0, h as isize - 1) as usize * w + col) * 4 + c] as u32;
+            let mut sum: u32 = (-ri..=ri).map(at).sum();
+            for j in 0..h as isize {
+                src[((y + j as usize) * stride + x + col) * 4 + c] = ((sum + n / 2) / n) as u8;
+                sum = sum + at(j + ri + 1) - at(j - ri);
+            }
+        }
+    }
+}
+
 /// How far in from the edge the light-catching glint of the plain ring is
 /// drawn, in px.
 const GLINT_BAND: f32 = 3.0;
@@ -325,6 +376,26 @@ mod tests {
         let worst = want.iter().zip(&got).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
         let drawn = want.chunks(4).filter(|p| p.iter().any(|&b| b != 0)).count();
         (worst, drawn)
+    }
+
+    #[test]
+    fn softening_blurs_the_strips_and_leaves_the_middle_alone() {
+        let g = geometry(100, 40, 8.0, None);
+        let mut src = capture(g.cw, g.ch);
+        let before = src.clone();
+        soften(&mut src, g.cw, g.ch, g.margin, 4);
+        let stride = (g.cw * 4) as usize;
+        // A strip is smoother afterwards: neighbouring pixels differ less.
+        let rough = |s: &[u8]| (0..40usize).map(|x| (s[x * 4] as i32 - s[(x + 1) * 4] as i32).abs()).sum::<i32>();
+        assert!(rough(&src) < rough(&before) / 2);
+        // The middle of the capture (the panel itself) isn't touched.
+        let mid = g.margin as usize + 20;
+        let at = (g.margin as usize + 10) * stride + mid * 4;
+        assert_eq!(src[at..at + 4], before[at..at + 4]);
+        // A flat colour stays that colour, at the strip's edges too.
+        let mut flat = vec![90u8; (g.cw * g.ch * 4) as usize];
+        soften(&mut flat, g.cw, g.ch, g.margin, 4);
+        assert!(flat.iter().all(|&b| b == 90));
     }
 
     #[test]
