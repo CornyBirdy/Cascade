@@ -605,6 +605,8 @@ pub(crate) fn app_user_model_id(h: HWND) -> Option<String> {
 pub fn focus_window(h: HWND) {
     unsafe {
         if IsIconic(h).as_bool() {
+            // Out of sight until the animation lands it (see `minanim`).
+            crate::minanim::park_for_restore(h);
             let _ = ShowWindow(h, SW_RESTORE);
             // Some windows are slow to take it or ignore it (the click then
             // seems to do nothing): ask the way the title bar's own button does,
@@ -624,6 +626,10 @@ pub fn focus_window(h: HWND) {
                     Some(&mut res),
                 );
             }
+        }
+        // A restore that didn't happen leaves the window where it was.
+        if IsIconic(h).as_bool() {
+            crate::minanim::unpark(h);
         }
         let _ = SetForegroundWindow(h);
         // Windows' foreground lock can turn that down (a click that took a
@@ -2112,8 +2118,20 @@ impl Dock {
                     ),
                 }
                 if running {
-                    let (w, c) = if active { (16.0, theme::accent()) } else { (6.0, Color::white(0.55)) };
-                    p.rrect(cx - w / 2.0, by + b - 3.0, w, 3.0, 1.5, c.alpha(presence));
+                    let c = if active { theme::accent() } else { Color::white(0.55) };
+                    let y = by + b - 3.0;
+                    if a.windows.len() < 2 {
+                        // One window: a single dash, long when it's the one in front.
+                        let w = if active { 16.0 } else { 6.0 };
+                        p.rrect(cx - w / 2.0, y, w, 3.0, 1.5, c.alpha(presence));
+                    } else {
+                        // Several: a long dash and a short one after it, as Windows draws
+                        // them, the pair centred under the icon.
+                        let (long, short, gap) = if active { (12.0, 4.0, 2.5) } else { (6.0, 3.0, 2.0) };
+                        let x = cx - (long + gap + short) / 2.0;
+                        p.rrect(x, y, long, 3.0, 1.5, c.alpha(presence));
+                        p.rrect(x + long + gap, y, short, 3.0, 1.5, c.alpha(presence * 0.75));
+                    }
                 }
                 if self.hovered == Some(Hot::App(i)) && self.dragging.is_none() && presence > 0.9 {
                     tip = Some((cx, self.name(i)));

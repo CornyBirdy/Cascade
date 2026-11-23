@@ -1554,6 +1554,12 @@ fn rows(section: usize) -> Vec<Row> {
                 Toggle,
             ),
             row(
+                "menu_animation",
+                "Menu animation",
+                "Cascade's menus (in Files and everywhere) fade and slide in, and their highlight glides to the row you point at. Off, they appear at once.",
+                Toggle,
+            ),
+            row(
                 "wobbly",
                 "Wobbly windows",
                 "Windows bend like jelly while you drag them, and wobble as they settle.",

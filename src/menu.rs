@@ -104,6 +104,18 @@ const MAX_H: f32 = 520.0;
 const RADIUS: f32 = 8.0;
 /// How long the fade and slide in take.
 const OPEN_S: f32 = 0.14;
+
+static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether menus animate (`menu_animation`): fade and slide in, and a
+/// highlight that glides. Off, they open at once and the highlight jumps.
+pub fn configure(on: bool) {
+    ANIMATE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn animate() -> bool {
+    ANIMATE.load(std::sync::atomic::Ordering::Relaxed)
+}
 /// How long the pointer rests on an item before its submenu opens.
 const SUB_DELAY_S: f32 = 0.28;
 const TIMER: usize = 1;
@@ -228,11 +240,12 @@ impl Panel {
     }
 
     fn animating(&self) -> bool {
-        let opening = self.opened.elapsed().as_secs_f32() < OPEN_S;
-        let gliding = match (self.glide, self.hover.and_then(|h| self.shown.iter().position(|&s| s == h))) {
-            (Some(g), Some(n)) => (g - (self.row(n).0 + self.scroll)).abs() > 0.3,
-            _ => false,
-        };
+        let opening = animate() && self.opened.elapsed().as_secs_f32() < OPEN_S;
+        let gliding = animate()
+            && match (self.glide, self.hover.and_then(|h| self.shown.iter().position(|&s| s == h))) {
+                (Some(g), Some(n)) => (g - (self.row(n).0 + self.scroll)).abs() > 0.3,
+                _ => false,
+            };
         opening || gliding
     }
 }
@@ -655,12 +668,12 @@ impl State {
         let k = p.k;
         let (tw, th) = (p.w + SHADOW * 2.0, p.h + SHADOW * 2.0);
         let (pw, ph) = ((tw * k).ceil() as i32, (th * k).ceil() as i32);
-        let t = ease(p.opened.elapsed().as_secs_f32() / OPEN_S);
+        let t = if animate() { ease(p.opened.elapsed().as_secs_f32() / OPEN_S) } else { 1.0 };
         let slide = (1.0 - t) * 8.0 * if p.up { 1.0 } else { -1.0 };
         // The highlight glides to the hovered row.
         let target = p.hover.and_then(|h| p.shown.iter().position(|&s| s == h)).map(|row| p.row(row).0 + p.scroll);
         p.glide = match (p.glide, target) {
-            (Some(g), Some(tg)) => Some(g + (tg - g) * 0.45),
+            (Some(g), Some(tg)) if animate() => Some(g + (tg - g) * 0.45),
             (_, tg) => tg,
         };
         if gfx.begin(&mut p.layer, pw, ph, k).is_err() {

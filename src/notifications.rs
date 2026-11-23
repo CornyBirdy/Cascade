@@ -2,7 +2,9 @@
 //! through Windows' notification listener. Runs on its own thread and only
 //! does anything when the panel asks (while it's open).
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
 
 use windows::core::Result;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -26,6 +28,9 @@ pub struct Notif {
     pub app: String,
     pub title: String,
     pub body: String,
+    /// For Cascade's own notifications (see `add_own`): the file that opens
+    /// when it's clicked. Empty for Windows'.
+    pub file: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -46,6 +51,62 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self { access: Access::Unknown, items: Vec::new() }
+    }
+}
+
+/// Cascade's own notifications (a screenshot or recording saved...), newest
+/// first. They're not Windows toasts, so Windows' list never has them: the
+/// panel's Notifications card adds them to what it reads (`merge_own`).
+static OWN: Mutex<Vec<Notif>> = Mutex::new(Vec::new());
+/// Their ids start here, clear of Windows' own.
+const OWN_FIRST: u32 = 0x8000_0000;
+static OWN_ID: AtomicU32 = AtomicU32::new(OWN_FIRST);
+/// The most kept.
+const OWN_MAX: usize = 30;
+
+/// Whether `id` is one of Cascade's own notifications.
+pub fn is_own(id: u32) -> bool {
+    id >= OWN_FIRST
+}
+
+/// Adds a notification of Cascade's own to the panel's list: `app` says who
+/// it's from, and clicking it opens `file` (if there is one).
+pub fn add_own(app: &str, title: &str, body: &str, file: &str) {
+    let id = OWN_ID.fetch_add(1, Ordering::Relaxed).max(OWN_FIRST);
+    if let Ok(mut own) = OWN.lock() {
+        own.insert(
+            0,
+            Notif {
+                id,
+                aumid: String::new(),
+                app: app.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                file: file.to_string(),
+            },
+        );
+        own.truncate(OWN_MAX);
+    }
+}
+
+pub fn remove_own(id: u32) {
+    if let Ok(mut own) = OWN.lock() {
+        own.retain(|n| n.id != id);
+    }
+}
+
+pub fn clear_own() {
+    if let Ok(mut own) = OWN.lock() {
+        own.clear();
+    }
+}
+
+/// `snapshot` with Cascade's own notifications first, newest first.
+pub fn merge_own(snapshot: &mut Snapshot) {
+    if let Ok(own) = OWN.lock() {
+        if !own.is_empty() {
+            snapshot.items.splice(0..0, own.iter().cloned());
+        }
     }
 }
 
@@ -141,5 +202,5 @@ fn describe(n: &UserNotification) -> Option<Notif> {
     }
     let title = lines.first().cloned().unwrap_or_else(|| app.clone());
     let body = lines.get(1..).map(|l| l.join(" ")).unwrap_or_default();
-    Some(Notif { id, aumid, app, title, body })
+    Some(Notif { id, aumid, app, title, body, file: String::new() })
 }

@@ -55,6 +55,101 @@ const ID_ADDR: usize = 10;
 const ID_SEARCH: usize = 11;
 const ID_RENAME: usize = 12;
 
+/// How a folder is shown, kept for next time (see `ViewStore`).
+#[derive(Clone, Copy, PartialEq)]
+struct FolderView {
+    view: View,
+    sort: (usize, bool),
+    group: u8,
+}
+
+const DEFAULT_VIEW: FolderView = FolderView { view: View::Details, sort: (0, true), group: 0 };
+
+/// What Files remembers between runs, in `files_view.ini` beside the config:
+/// each folder's view, sorting and grouping (as Explorer keeps them per
+/// folder), and, for every folder, hidden items and the columns' widths.
+/// Lines: `hidden=1`, `cols=170,170,100`, `name=300` (0 = takes the rest) and
+/// `f|<folder, lower case>|details|<sort column>|<ascending>|<group>`.
+#[derive(Default)]
+struct ViewStore {
+    folders: HashMap<String, FolderView>,
+    hidden: bool,
+    cols: Option<[f32; 3]>,
+    name: Option<f32>,
+}
+
+fn store_path() -> std::path::PathBuf {
+    crate::config::dir().join("files_view.ini")
+}
+
+/// What a place is remembered by (none for search results).
+fn folder_key(loc: &Loc) -> Option<String> {
+    match loc {
+        Loc::Home => Some("home".into()),
+        Loc::Path(p) => Some(p.trim_end_matches('\\').to_lowercase()),
+        Loc::Shell(_, name) => Some(format!("shell:{}", name.to_lowercase())),
+        Loc::Search(..) => None,
+    }
+}
+
+impl ViewStore {
+    fn parse(text: &str) -> Self {
+        let mut s = ViewStore::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("hidden=") {
+                s.hidden = v.trim() == "1";
+            } else if let Some(v) = line.strip_prefix("cols=") {
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if let [a, b, c] = n[..] {
+                    s.cols = Some([a.clamp(60.0, 600.0), b.clamp(60.0, 600.0), c.clamp(60.0, 600.0)]);
+                }
+            } else if let Some(v) = line.strip_prefix("name=") {
+                s.name = v.trim().parse::<f32>().ok().filter(|n| *n >= 120.0).map(|n| n.min(1400.0));
+            } else if let Some(v) = line.strip_prefix("f|") {
+                let p: Vec<&str> = v.split('|').collect();
+                if let [path, view, col, asc, group] = p[..] {
+                    let (Ok(col), Ok(group)) = (col.parse::<usize>(), group.parse::<u8>()) else { continue };
+                    if col >= COLS.len() || group > 3 {
+                        continue;
+                    }
+                    let view = if view == "icons" { View::Icons } else { View::Details };
+                    s.folders.insert(path.to_string(), FolderView { view, sort: (col, asc == "1"), group });
+                }
+            }
+        }
+        s
+    }
+
+    fn text(&self) -> String {
+        let mut out = String::from("# Files: how each folder is shown. Written by Cascade.\n");
+        out.push_str(&format!("hidden={}\n", self.hidden as u8));
+        if let Some(c) = self.cols {
+            out.push_str(&format!("cols={},{},{}\n", c[0], c[1], c[2]));
+        }
+        out.push_str(&format!("name={}\n", self.name.unwrap_or(0.0)));
+        let mut folders: Vec<_> = self.folders.iter().collect();
+        folders.sort_by(|a, b| a.0.cmp(b.0));
+        for (path, v) in folders {
+            let view = if v.view == View::Icons { "icons" } else { "details" };
+            out.push_str(&format!("f|{path}|{view}|{}|{}|{}\n", v.sort.0, v.sort.1 as u8, v.group));
+        }
+        out
+    }
+
+    fn load() -> Self {
+        std::fs::read_to_string(store_path()).map(|t| Self::parse(&t)).unwrap_or_default()
+    }
+
+    fn save(&self) {
+        let path = store_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.text());
+    }
+}
+
 const COLS: [(&str, f32); 4] = [("Name", 0.0), ("Date modified", 170.0), ("Type", 170.0), ("Size", 100.0)];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -241,6 +336,8 @@ struct State {
     /// Group by: 0 none, 1 type, 2 date modified, 3 size.
     group: u8,
     measure: Option<crate::gfx::Measure>,
+    /// What's remembered of how folders are shown.
+    store: ViewStore,
 }
 
 thread_local! {
@@ -444,7 +541,35 @@ impl State {
 
     // ------------------------------------------------------- navigating --
 
+    /// The view, sorting and grouping this folder was left with (the plain
+    /// ones for a folder not seen before). Search results keep what's set.
+    fn apply_view(&mut self) {
+        let Some(key) = folder_key(&self.t().loc) else { return };
+        let v = self.store.folders.get(&key).copied().unwrap_or(DEFAULT_VIEW);
+        self.view = v.view;
+        self.sort = v.sort;
+        self.group = v.group;
+    }
+
+    /// Keeps how the current folder is shown, and Files' own settings (hidden
+    /// items, column widths), for next time.
+    fn remember(&mut self) {
+        let here = FolderView { view: self.view, sort: self.sort, group: self.group };
+        if let Some(key) = folder_key(&self.t().loc) {
+            if here == DEFAULT_VIEW {
+                self.store.folders.remove(&key);
+            } else {
+                self.store.folders.insert(key, here);
+            }
+        }
+        self.store.hidden = self.show_hidden;
+        self.store.cols = Some(self.col_w);
+        self.store.name = self.name_fixed;
+        self.store.save();
+    }
+
     fn load(&mut self) {
+        self.apply_view();
         let generation = NEXT_GEN.fetch_add(1, Ordering::AcqRel);
         let hidden = self.show_hidden;
         let tab = self.tab();
@@ -888,6 +1013,7 @@ impl State {
         if let Some(i) = show(self.hwnd, entries, Place::Cursor).checked_sub(1) {
             self.sort = if self.sort.0 == i { (i, !self.sort.1) } else { (i, i == 0 || i == 2) };
             self.resort();
+            self.remember();
         }
     }
 
@@ -904,7 +1030,8 @@ impl State {
             check(12, "Group by date modified", self.group == 2),
             check(13, "Group by size", self.group == 3),
         ];
-        match show(self.hwnd, entries, Place::Cursor) {
+        let chosen = show(self.hwnd, entries, Place::Cursor);
+        match chosen {
             1 => self.view = View::Details,
             2 => self.view = View::Icons,
             g @ 10..=13 => {
@@ -913,9 +1040,13 @@ impl State {
             }
             3 => {
                 self.show_hidden = !self.show_hidden;
+                self.remember();
                 self.load();
             }
             _ => {}
+        }
+        if matches!(chosen, 1 | 2 | 10..=13) {
+            self.remember();
         }
         let m = self.max_scroll();
         let t = self.tab();
@@ -1043,11 +1174,18 @@ impl State {
                 }
             }
             7 => self.properties(),
-            10 => self.view = View::Details,
-            11 => self.view = View::Icons,
+            10 => {
+                self.view = View::Details;
+                self.remember();
+            }
+            11 => {
+                self.view = View::Icons;
+                self.remember();
+            }
             n @ 20..=23 => {
                 self.sort = (n - 20, true);
                 self.resort();
+                self.remember();
             }
             _ => {}
         }
@@ -1108,6 +1246,12 @@ impl State {
         }
         self.watch();
         self.set_title();
+        // Each folder keeps its own view: the one in front's.
+        let (view, sort, group) = (self.view, self.sort, self.group);
+        self.apply_view();
+        if (self.view, self.sort, self.group) != (view, sort, group) {
+            self.resort();
+        }
         appwin::redraw(self.hwnd);
     }
 
@@ -1710,6 +1854,7 @@ impl State {
             Some(Hit::Header(i)) => {
                 self.sort = if self.sort.0 == i { (i, !self.sort.1) } else { (i, i != 1 && i != 3) };
                 self.resort();
+                self.remember();
             }
             Some(Hit::HeaderEdge(i)) => {
                 let (_, _, cw, _) = self.content();
@@ -1827,7 +1972,9 @@ impl State {
 
     fn on_up(&mut self) {
         self.press = None;
-        self.col_drag = None;
+        if self.col_drag.take().is_some() {
+            self.remember();
+        }
         if self.band.take().is_some() {
             appwin::redraw(self.hwnd);
         }
@@ -2508,6 +2655,7 @@ pub fn run(start: Option<String>) {
         let (icon_tx, icon_done) = filesio::icon_worker(hwnd, ICONS);
         let target: IDropTarget = DropHere.into();
         let _ = RegisterDragDrop(hwnd, &target);
+        let store = ViewStore::load();
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
                 hwnd,
@@ -2517,7 +2665,7 @@ pub fn run(start: Option<String>) {
                 cur: 0,
                 view: View::Details,
                 sort: (0, true),
-                show_hidden: false,
+                show_hidden: store.hidden,
                 icons: HashMap::new(),
                 asked: HashSet::new(),
                 icon_tx,
@@ -2533,12 +2681,13 @@ pub fn run(start: Option<String>) {
                 last_click: None,
                 side: sidebar(),
                 typed: (String::new(), Instant::now()),
-                col_w: [COLS[1].1, COLS[2].1, COLS[3].1],
+                col_w: store.cols.unwrap_or([COLS[1].1, COLS[2].1, COLS[3].1]),
                 col_drag: None,
-                name_fixed: None,
+                name_fixed: store.name,
                 editing_addr: false,
                 group: 0,
                 measure: crate::gfx::Measure::new().ok(),
+                store,
             })
         });
     }
@@ -2561,6 +2710,25 @@ mod tests {
         assert_eq!(parts[2].1, Loc::Path("C:\\Users".into()));
         assert_eq!(parts[1].1, Loc::Path("C:\\".into()));
         assert_eq!(crumbs(&Loc::Home).len(), 1);
+    }
+
+    #[test]
+    fn remembers_how_folders_are_shown() {
+        let mut store = ViewStore::default();
+        store.hidden = true;
+        store.cols = Some([150.0, 160.0, 90.0]);
+        store.name = Some(320.0);
+        let key = folder_key(&Loc::Path("C:\\Users\\You\\Downloads\\".into())).unwrap();
+        assert_eq!(key, "c:\\users\\you\\downloads");
+        store.folders.insert(key.clone(), FolderView { view: View::Icons, sort: (1, false), group: 2 });
+        let back = ViewStore::parse(&store.text());
+        assert!(back.hidden);
+        assert_eq!(back.cols, Some([150.0, 160.0, 90.0]));
+        assert_eq!(back.name, Some(320.0));
+        assert!(back.folders.get(&key) == Some(&FolderView { view: View::Icons, sort: (1, false), group: 2 }));
+        // Search results aren't remembered; nonsense lines are skipped.
+        assert!(folder_key(&Loc::Search("C:\\".into(), "x".into())).is_none());
+        assert!(ViewStore::parse("f|c:\\x|details|9|1|0\nf|c:\\y|icons|1|1|7\n").folders.is_empty());
     }
 
     #[test]

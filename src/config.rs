@@ -49,6 +49,8 @@ battery_saver = false
 super_drag = true
 # Windows go into their taskbar button when minimised, and come back out of it.
 min_animation = true
+# Cascade's menus (in Files and everywhere) fade and slide in, and their highlight glides.
+menu_animation = true
 # Windows bend like jelly while you drag them about.
 wobbly = false
 # How much they wobble (0.3 to 2), and how quickly they settle (0.1 to 1).
@@ -396,6 +398,7 @@ pub struct Config {
     pub battery_saver: bool,
     pub super_drag: bool,
     pub min_animation: bool,
+    pub menu_animation: bool,
     pub wobbly: bool,
     pub wobbly_strength: f32,
     pub wobbly_friction: f32,
@@ -551,6 +554,7 @@ impl Default for Config {
             battery_saver: false,
             super_drag: true,
             min_animation: true,
+            menu_animation: true,
             wobbly: false,
             wobbly_strength: 1.0,
             wobbly_friction: 0.35,
@@ -850,6 +854,7 @@ impl Config {
                 "battery_saver" => set_b(&mut c.battery_saver),
                 "super_drag" => set_b(&mut c.super_drag),
                 "min_animation" => set_b(&mut c.min_animation),
+                "menu_animation" => set_b(&mut c.menu_animation),
                 "wobbly" => set_b(&mut c.wobbly),
                 "wobbly_strength" => set_f(&mut c.wobbly_strength, 0.3, 2.0),
                 "wobbly_friction" => set_f(&mut c.wobbly_friction, 0.1, 1.0),
@@ -1050,6 +1055,7 @@ impl Config {
             "battery_saver" => b(self.battery_saver),
             "super_drag" => b(self.super_drag),
             "min_animation" => b(self.min_animation),
+            "menu_animation" => b(self.menu_animation),
             "wobbly" => b(self.wobbly),
             "wobbly_strength" => self.wobbly_strength.to_string(),
             "wobbly_friction" => self.wobbly_friction.to_string(),

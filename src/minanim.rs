@@ -11,6 +11,7 @@
 //! composition while it does.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, BOOL};
@@ -43,6 +44,71 @@ pub fn windows_animates() -> bool {
         .is_ok()
     };
     ok && info.iMinAnimate != 0 && crate::shellmode::active()
+}
+
+/// Windows about to be restored from the taskbar, already parked off the
+/// screen: the window, its placement before, and where it belongs (screen
+/// pixels).
+static PARKED: Mutex<Vec<(isize, WINDOWPLACEMENT, RECT)>> = Mutex::new(Vec::new());
+
+/// Before a minimised `window` is restored: change where it will come back to,
+/// off the screen, so Windows restores it out of sight. Without this the
+/// restored window shows in its place for a frame before the animation takes
+/// it off the screen to grow it out of its button (the flicker). The animation
+/// (`play`) puts it back where it belongs when it lands, and if nothing plays
+/// one within a moment the window is put back anyway. Windows that come back
+/// maximised aren't parked: they have no place to hide in.
+pub fn park_for_restore(window: HWND) {
+    if !ON.load(Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        if !IsIconic(window).as_bool() || IsZoomed(window).as_bool() {
+            return;
+        }
+        let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        if GetWindowPlacement(window, &mut wp).is_err() || wp.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0 {
+            return;
+        }
+        let Some(place) = normal_rect(window) else { return };
+        let original = wp;
+        wp.rcNormalPosition.right -= wp.rcNormalPosition.left + 32000;
+        wp.rcNormalPosition.bottom -= wp.rcNormalPosition.top + 32000;
+        wp.rcNormalPosition.left = -32000;
+        wp.rcNormalPosition.top = -32000;
+        if SetWindowPlacement(window, &wp).is_err() {
+            return;
+        }
+        if let Ok(mut parked) = PARKED.lock() {
+            parked.retain(|p| p.0 != window.0 as isize);
+            parked.push((window.0 as isize, original, place));
+        }
+        let w = window.0 as isize;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(900));
+            unpark(HWND(w as *mut _));
+        });
+    }
+}
+
+/// Puts a window `park_for_restore` moved back where it belongs, if it's still
+/// parked (the restore failed, or no animation came to do it).
+pub fn unpark(window: HWND) {
+    let Some((_, original, place)) = take_parked(window) else { return };
+    unsafe {
+        if IsIconic(window).as_bool() {
+            let _ = SetWindowPlacement(window, &original);
+        } else {
+            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+            let _ = SetWindowPos(window, None, place.left, place.top, 0, 0, flags);
+        }
+    }
+}
+
+fn take_parked(window: HWND) -> Option<(isize, WINDOWPLACEMENT, RECT)> {
+    let mut parked = PARKED.lock().ok()?;
+    let at = parked.iter().position(|p| p.0 == window.0 as isize)?;
+    Some(parked.remove(at))
 }
 
 /// Where `window` sits when not minimised (screen pixels).
@@ -110,7 +176,12 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
                 std::thread::sleep(Duration::from_millis(4));
             }
             let mut r = RECT::default();
-            if !IsIconic(window).as_bool() && GetWindowRect(window, &mut r).is_ok() && r.left > -10000 {
+            if let Some((_, _, parked)) = take_parked(window) {
+                // Restored out of sight already (`park_for_restore`): nothing
+                // to move away, only to put back at the end.
+                place = parked;
+                hidden_at = Some(parked);
+            } else if !IsIconic(window).as_bool() && GetWindowRect(window, &mut r).is_ok() && r.left > -10000 {
                 place = r;
                 let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
                 if SetWindowPos(window, None, -32000, -32000, 0, 0, flags).is_ok() {

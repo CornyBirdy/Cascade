@@ -1025,6 +1025,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             with_app(move |a| {
                 a.announce_notifs(&n);
                 a.notifs = *n;
+                notifications::merge_own(&mut a.notifs);
                 a.widgets.dirty = true;
             });
             return LRESULT(0);
@@ -1473,6 +1474,7 @@ impl App {
         self.apply_calendar();
         crate::superdrag::configure(self.cfg.super_drag);
         crate::minanim::configure(self.cfg.min_animation);
+        crate::menu::configure(self.cfg.menu_animation);
         crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
         crate::quickshare::configure(&self.cfg);
@@ -3858,6 +3860,7 @@ impl App {
         self.pomo.configure(self.cfg.focus_minutes, self.cfg.break_minutes);
         crate::superdrag::configure(self.cfg.super_drag);
         crate::minanim::configure(self.cfg.min_animation);
+        crate::menu::configure(self.cfg.menu_animation);
         crate::wobble::configure(self.cfg.wobbly, self.cfg.wobbly_strength, self.cfg.wobbly_friction);
         crate::tablet::configure(&self.cfg);
         crate::quickshare::configure(&self.cfg);
@@ -5021,6 +5024,10 @@ impl App {
                 let (x, y) = lparam_xy(lp);
                 self.widgets.on_move(x, y);
                 let carried = self.widgets.carrying();
+                // A card's corner let go: its new size is kept.
+                if let Some(style) = self.widgets.finish_resize() {
+                    self.apply_change(Change::Many(vec![("widgets_style", style)]));
+                }
                 // Put down: the new order is kept.
                 if let Some(order) = self.widgets.on_up() {
                     self.apply_change(Change::Many(vec![("widgets_panel", order)]));
@@ -5049,13 +5056,24 @@ impl App {
                     }
                     Some(widgets::Action::ClearNotifications) => {
                         self.notifs.items.clear();
+                        notifications::clear_own();
                         let _ = self.notif_tx.send(NotifCmd::Clear);
                     }
                     Some(widgets::Action::OpenNotification(id)) => {
                         // Like clicking it in Windows' own list: open the app
                         // and the notification goes away.
                         let aumid = self.notifs.items.iter().find(|n| n.id == id).map(|n| n.aumid.clone());
+                        let file = self.notifs.items.iter().find(|n| n.id == id).map(|n| n.file.clone());
                         self.widgets.hide();
+                        if notifications::is_own(id) {
+                            // Cascade's own (a saved snip or recording): open the file.
+                            if let Some(f) = file.filter(|f| !f.is_empty()) {
+                                shell::open(&f);
+                            }
+                            self.notifs.items.retain(|n| n.id != id);
+                            notifications::remove_own(id);
+                            return Some(LRESULT(0));
+                        }
                         match aumid.filter(|a| !a.is_empty()) {
                             Some(a) => {
                                 // The Snipping Tool's own notification opens the new
@@ -5078,7 +5096,11 @@ impl App {
                         // Gone right away; the next read confirms it.
                         self.notifs.items.retain(|n| n.id != id);
                         self.widgets.hovered_clear();
-                        let _ = self.notif_tx.send(NotifCmd::Remove(id));
+                        if notifications::is_own(id) {
+                            notifications::remove_own(id);
+                        } else {
+                            let _ = self.notif_tx.send(NotifCmd::Remove(id));
+                        }
                     }
                     Some(widgets::Action::NotificationSettings) => {
                         self.widgets.hide();

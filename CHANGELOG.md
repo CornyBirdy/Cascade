@@ -4,6 +4,18 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-23
+
+**New**
+- **Files remembers**: each folder keeps how you left it (details or icons, what it's sorted by and which way, Group by), as Explorer does, so Downloads grouped by date modified is still grouped the next time you open it. Hidden items and the columns' widths are kept too.
+- **Widgets, edit mode**: cards glide to their new places as you move them, and the + and - buttons are gone: drag the dot on a card's top left corner to make it bigger or smaller.
+- **Taskbar**: an app with two or more windows open shows a long dash and a short one after it under its icon, as Windows does; one window is still a single dash.
+- **Menu animation** (Settings > Personalisation): Cascade's menus, in Files and everywhere, can open at once instead of fading in.
+- **Screenshots and recordings in the Notifications card**: the preview that pops up when a snip or recording is saved now stays in the widgets panel's Notifications card too (click it to open the file).
+
+**Fixed**
+- **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
+
 ## 2026-11-22
 
 **New**

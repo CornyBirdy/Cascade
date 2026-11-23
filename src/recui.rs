@@ -870,15 +870,24 @@ unsafe extern "system" fn preview_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
 /// Pops up the preview of a saved recording at the bottom right of the
 /// screen `near` is on; `secs` is how long it runs. Returns at once.
 pub fn preview(path: PathBuf, thumb: Option<Thumb>, secs: f32, near: RECT) {
+    keep_notification(&path, "Screen recording saved");
     show_preview(path, thumb, None, secs, near);
 }
 
 /// Pops up the preview of a screenshot just taken (`pixels`, `w`×`h`,
 /// saved at `path`), as a recording's: Edit opens it in the editor.
 pub fn screenshot_preview(path: PathBuf, pixels: Vec<u32>, w: i32, h: i32, near: RECT) {
+    keep_notification(&path, "Screenshot saved");
     let bytes: Vec<u8> = pixels.iter().flat_map(|p| (p | 0xFF00_0000).to_le_bytes()).collect();
     let thumb = Thumb::from_frame(&bytes, w as u32, h as u32, 640);
     show_preview(path, thumb, Some((pixels, w, h)), 0.0, near);
+}
+
+/// The same news in the widgets panel's Notifications card, where it stays
+/// after the preview goes (click it to open the file).
+fn keep_notification(path: &std::path::Path, title: &str) {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    crate::notifications::add_own("Snip", title, &name, &path.to_string_lossy());
 }
 
 fn show_preview(path: PathBuf, thumb: Option<Thumb>, still: Option<(Vec<u32>, i32, i32)>, secs: f32, near: RECT) {

@@ -179,6 +179,7 @@ pub fn init() {
     crate::theme::set(&cfg.theme);
     crate::theme::set_accent(&cfg.accent, cfg.accent_glass);
     crate::theme::refresh_accent();
+    crate::menu::configure(cfg.menu_animation);
 }
 
 // ------------------------------------------- a frame with no title bar --
