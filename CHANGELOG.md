@@ -13,6 +13,11 @@ Settings > Updates > What's new opens the list.
 - **Menu animation** (Settings > Personalisation): Cascade's menus, in Files and everywhere, can open at once instead of fading in.
 - **Screenshots and recordings in the Notifications card**: the preview that pops up when a snip or recording is saved now stays in the widgets panel's Notifications card too (click it to open the file).
 
+- **Files, hotkeys**: Ctrl+wheel (and Ctrl plus and minus) change the size of icons, going from Details to Icons and back; Ctrl+Shift+1 to 4 pick extra large to small icons and Ctrl+Shift+6 Details, as in Explorer; Ctrl+1 to 9 jump to a tab; Ctrl+R and F5 refresh, Ctrl+E search, Alt+D the address, Alt+Enter properties, Ctrl+D delete, Esc clears the selection and Ctrl+Shift+. shows hidden items.
+- **Files, a sidebar you can edit**: right-click a pinned folder to unpin it or move it up or down, or to restore the usual six; *Pin to sidebar* is in the folder's background menu and in More (it pins the selected folder, or the one you're in).
+- **Files, refreshing shows**: the refresh button turns, a bar runs under the command bar and the status says *Refreshing...* until the folder has loaded.
+- **Paint**: Ctrl+V pastes a picture from the clipboard as a piece you drag into place (Enter puts it down, Esc drops it), Ctrl+C copies the picture, and a new menu at the end of the bar has *Resize canvas* (cut off or add white, or stretch the picture), rotate and flip, and clear. The Fill tool is a bucket, with a drop of the colour you're using. [ and ] change the pen size; Ctrl plus, minus and 0 zoom.
+
 **Fixed**
 - **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
 

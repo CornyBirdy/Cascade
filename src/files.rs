@@ -43,8 +43,6 @@ const SIDE_W: f32 = 214.0;
 const HEAD_H: f32 = 30.0;
 const ROW_H: f32 = 30.0;
 const STATUS_H: f32 = 26.0;
-const TILE_W: f32 = 112.0;
-const TILE_H: f32 = 124.0;
 const TAB_W: f32 = 200.0;
 
 const LOADED: u32 = WM_APP + 101;
@@ -76,6 +74,10 @@ struct ViewStore {
     hidden: bool,
     cols: Option<[f32; 3]>,
     name: Option<f32>,
+    /// How big icons are drawn in Icons view (1 = medium).
+    scale: Option<f32>,
+    /// The folders pinned in the sidebar (None: the usual six).
+    pins: Option<Vec<String>>,
 }
 
 fn store_path() -> std::path::PathBuf {
@@ -106,6 +108,15 @@ impl ViewStore {
                 }
             } else if let Some(v) = line.strip_prefix("name=") {
                 s.name = v.trim().parse::<f32>().ok().filter(|n| *n >= 120.0).map(|n| n.min(1400.0));
+            } else if let Some(v) = line.strip_prefix("scale=") {
+                s.scale =
+                    v.trim().parse::<f32>().ok().map(|n| n.clamp(ICON_STEPS[0], ICON_STEPS[ICON_STEPS.len() - 1]));
+            } else if line == "pins=1" {
+                s.pins.get_or_insert_with(Vec::new);
+            } else if let Some(v) = line.strip_prefix("pin|") {
+                if !v.is_empty() {
+                    s.pins.get_or_insert_with(Vec::new).push(v.to_string());
+                }
             } else if let Some(v) = line.strip_prefix("f|") {
                 let p: Vec<&str> = v.split('|').collect();
                 if let [path, view, col, asc, group] = p[..] {
@@ -128,6 +139,15 @@ impl ViewStore {
             out.push_str(&format!("cols={},{},{}\n", c[0], c[1], c[2]));
         }
         out.push_str(&format!("name={}\n", self.name.unwrap_or(0.0)));
+        if let Some(k) = self.scale {
+            out.push_str(&format!("scale={k}\n"));
+        }
+        if let Some(pins) = &self.pins {
+            out.push_str("pins=1\n");
+            for pin in pins {
+                out.push_str(&format!("pin|{pin}\n"));
+            }
+        }
         let mut folders: Vec<_> = self.folders.iter().collect();
         folders.sort_by(|a, b| a.0.cmp(b.0));
         for (path, v) in folders {
@@ -149,6 +169,12 @@ impl ViewStore {
         let _ = std::fs::write(path, self.text());
     }
 }
+
+/// The sizes icons step through (Ctrl+wheel, Ctrl+plus and minus).
+const ICON_STEPS: [f32; 5] = [0.65, 0.85, 1.0, 1.4, 1.9];
+/// How long a refresh shows as busy at least, so it can be seen.
+const BUSY_MIN: std::time::Duration = std::time::Duration::from_millis(600);
+const TIMER_BUSY: usize = 7;
 
 const COLS: [(&str, f32); 4] = [("Name", 0.0), ("Date modified", 170.0), ("Type", 170.0), ("Size", 100.0)];
 
@@ -338,6 +364,12 @@ struct State {
     measure: Option<crate::gfx::Measure>,
     /// What's remembered of how folders are shown.
     store: ViewStore,
+    /// How big icons are drawn in Icons view (1 = medium).
+    icon_scale: f32,
+    /// When a refresh was asked for (it shows as busy for a moment, and while it loads).
+    refresh_at: Option<Instant>,
+    /// How many folders are pinned in the sidebar (after Home).
+    pin_n: usize,
 }
 
 thread_local! {
@@ -364,25 +396,54 @@ fn glyph(code: u32) -> String {
 }
 
 /// The sidebar: your folders, This PC and each drive, the Recycle Bin, Network.
-fn sidebar() -> Vec<(char, String, Loc)> {
-    let mut out = vec![('\u{E80F}', "Home".to_string(), Loc::Home)];
-    unsafe {
-        let folders: [(&windows::core::GUID, char); 6] = [
-            (&FOLDERID_Desktop, '\u{E8FC}'),
-            (&FOLDERID_Downloads, '\u{E896}'),
-            (&FOLDERID_Documents, '\u{E8A5}'),
-            (&FOLDERID_Pictures, '\u{E91B}'),
-            (&FOLDERID_Music, '\u{E8D6}'),
-            (&FOLDERID_Videos, '\u{E714}'),
-        ];
-        for (id, g) in folders {
-            if let Ok(p) = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) {
-                let path = p.to_string().unwrap_or_default();
-                CoTaskMemFree(Some(p.0 as *const _));
-                let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
-                out.push((g, name, Loc::Path(path)));
-            }
+/// The folders pinned in the sidebar until you change them: Desktop,
+/// Downloads, Documents, Pictures, Music and Videos.
+fn default_pins() -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, _) in known_folders() {
+        if let Some(p) = known_path(id) {
+            out.push(p);
         }
+    }
+    out
+}
+
+fn known_folders() -> [(&'static windows::core::GUID, char); 6] {
+    [
+        (&FOLDERID_Desktop, '\u{E8FC}'),
+        (&FOLDERID_Downloads, '\u{E896}'),
+        (&FOLDERID_Documents, '\u{E8A5}'),
+        (&FOLDERID_Pictures, '\u{E91B}'),
+        (&FOLDERID_Music, '\u{E8D6}'),
+        (&FOLDERID_Videos, '\u{E714}'),
+    ]
+}
+
+fn known_path(id: &windows::core::GUID) -> Option<String> {
+    unsafe {
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let path = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        path
+    }
+}
+
+/// A pinned folder's icon: its own for Windows' usual folders, else a folder.
+fn pin_glyph(path: &str) -> char {
+    for (id, g) in known_folders() {
+        if known_path(id).is_some_and(|k| k.eq_ignore_ascii_case(path)) {
+            return g;
+        }
+    }
+    '\u{E8B7}'
+}
+
+fn sidebar(pins: &[String]) -> Vec<(char, String, Loc)> {
+    let mut out = vec![('\u{E80F}', "Home".to_string(), Loc::Home)];
+    for path in pins {
+        let name = path.trim_end_matches('\\').rsplit('\\').next().unwrap_or(path).to_string();
+        let name = if name.is_empty() { path.clone() } else { name };
+        out.push((pin_glyph(path), name, Loc::Path(path.clone())));
     }
     out.push(('\u{E7F8}', "This PC".into(), filesio::this_pc()));
     let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
@@ -480,9 +541,18 @@ impl State {
         }
     }
 
+    /// A tile's size in Icons view: it grows with the icon.
+    fn tile_w(&self) -> f32 {
+        40.0 + 72.0 * self.icon_scale
+    }
+
+    fn tile_h(&self) -> f32 {
+        52.0 + 72.0 * self.icon_scale
+    }
+
     fn cols(&self) -> usize {
         let (_, _, cw, _) = self.content();
-        ((cw - 16.0) / TILE_W).floor().max(1.0) as usize
+        ((cw - 16.0) / self.tile_w()).floor().max(1.0) as usize
     }
 
     /// Where item `pos` (in display order) is: (x, y, w, h), before scrolling.
@@ -495,7 +565,8 @@ impl State {
             }
             View::Icons => {
                 let c = self.cols();
-                (x0 + 8.0 + (pos % c) as f32 * TILE_W, top + (pos / c) as f32 * TILE_H, TILE_W - 6.0, TILE_H - 6.0)
+                let (tw, th) = (self.tile_w(), self.tile_h());
+                (x0 + 8.0 + (pos % c) as f32 * tw, top + (pos / c) as f32 * th, tw - 6.0, th - 6.0)
             }
         }
     }
@@ -504,7 +575,7 @@ impl State {
         let n = self.t().order.len();
         match self.view {
             View::Details => n as f32 * ROW_H + self.t().heads.len() as f32 * GROUP_H + 8.0,
-            View::Icons => (n.div_ceil(self.cols())) as f32 * TILE_H + 8.0,
+            View::Icons => (n.div_ceil(self.cols())) as f32 * self.tile_h() + 8.0,
         }
     }
 
@@ -564,6 +635,7 @@ impl State {
         }
         self.store.hidden = self.show_hidden;
         self.store.cols = Some(self.col_w);
+        self.store.scale = Some(self.icon_scale);
         self.store.name = self.name_fixed;
         self.store.save();
     }
@@ -632,6 +704,109 @@ impl State {
         tab.filter.clear();
         self.clear_search();
         self.load();
+    }
+
+    /// Reads the folder again, and shows that it's doing it: the refresh
+    /// button turns and a bar runs under the command bar until it's loaded.
+    fn refresh(&mut self) {
+        self.refresh_at = Some(Instant::now());
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_BUSY, 16, None);
+        }
+        // A phone plugged in since shows in the sidebar too.
+        self.set_side();
+        self.load();
+    }
+
+    /// Whether a refresh is showing as busy.
+    fn busy(&self) -> bool {
+        self.refresh_at.is_some_and(|t| {
+            let e = t.elapsed();
+            e < BUSY_MIN || (self.tabs[self.cur].loading && e < std::time::Duration::from_secs(30))
+        })
+    }
+
+    fn tick(&mut self) {
+        if !self.busy() {
+            self.refresh_at = None;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_BUSY);
+            }
+        }
+        appwin::redraw(self.hwnd);
+    }
+
+    fn pins(&self) -> Vec<String> {
+        self.store.pins.clone().unwrap_or_else(default_pins)
+    }
+
+    /// The sidebar from what's pinned.
+    fn set_side(&mut self) {
+        let pins = self.pins();
+        self.pin_n = pins.len();
+        self.side = sidebar(&pins);
+    }
+
+    /// Pins `path` (a folder) in the sidebar, or takes it off.
+    fn toggle_pin(&mut self, path: &str) {
+        let mut pins = self.pins();
+        match pins.iter().position(|p| p.eq_ignore_ascii_case(path)) {
+            Some(i) => {
+                pins.remove(i);
+            }
+            None => pins.push(path.to_string()),
+        }
+        self.store.pins = Some(pins);
+        self.set_side();
+        self.store.save();
+    }
+
+    /// The right-click menu of sidebar entry `i`: pinned folders can be
+    /// taken off and moved up and down.
+    fn side_menu(&mut self, i: usize) {
+        use crate::menu::{item, show, Entry, Item as MI, Place};
+        let pinned = i >= 1 && i <= self.pin_n;
+        let mut entries = vec![item(1, "Open"), item(2, "Open in new tab")];
+        if pinned {
+            entries.push(Entry::Separator);
+            entries.push(item(3, "Unpin from sidebar"));
+            entries.push(Entry::Item(MI { id: 4, text: "Move up".into(), enabled: i > 1, ..Default::default() }));
+            entries.push(Entry::Item(MI {
+                id: 5,
+                text: "Move down".into(),
+                enabled: i < self.pin_n,
+                ..Default::default()
+            }));
+        }
+        entries.push(Entry::Separator);
+        entries.push(item(6, "Restore the usual folders"));
+        let loc = self.side[i].2.clone();
+        let choice = show(self.hwnd, entries, Place::Cursor);
+        match choice {
+            1 => self.go(loc),
+            2 => self.new_tab(loc),
+            3..=5 if pinned => {
+                let mut pins = self.pins();
+                let at = i - 1;
+                match choice {
+                    3 => {
+                        pins.remove(at);
+                    }
+                    4 if at > 0 => pins.swap(at, at - 1),
+                    5 if at + 1 < pins.len() => pins.swap(at, at + 1),
+                    _ => {}
+                }
+                self.store.pins = Some(pins);
+                self.set_side();
+                self.store.save();
+            }
+            6 => {
+                self.store.pins = None;
+                self.set_side();
+                self.store.save();
+            }
+            _ => {}
+        }
     }
 
     fn clear_search(&self) {
@@ -1071,12 +1246,45 @@ impl State {
         }
     }
 
+    /// "Pin to sidebar" or "Unpin from sidebar" for the folder shown (greyed
+    /// where it can't be pinned: This PC, search results...).
+    fn pin_entry(&self, id: usize) -> crate::menu::Entry {
+        let here = self.pin_target();
+        let pinned = here.as_ref().is_some_and(|h| self.pins().iter().any(|p| p.eq_ignore_ascii_case(h)));
+        crate::menu::Entry::Item(crate::menu::Item {
+            id,
+            text: if pinned { "Unpin from sidebar" } else { "Pin to sidebar" }.into(),
+            enabled: here.is_some(),
+            ..Default::default()
+        })
+    }
+
+    /// The folder to pin: the one selected (if it's one folder), else the one shown.
+    fn pin_target(&self) -> Option<String> {
+        let sel = self.t().selected();
+        if let [i] = sel[..] {
+            let it = &self.t().items[i];
+            return (it.folder && std::path::Path::new(&it.path).is_dir()).then(|| it.path.clone());
+        }
+        match &self.t().loc {
+            Loc::Path(p) if !p.starts_with("\\\\") => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    fn pin_current(&mut self) {
+        if let Some(p) = self.pin_target() {
+            self.toggle_pin(&p);
+        }
+    }
+
     fn more_menu(&mut self) {
         use crate::menu::{item, show, Entry, Place};
         let entries = vec![
             item(1, "Open in Terminal"),
             item(2, "Copy path"),
             item(3, "Disk usage of this folder"),
+            self.pin_entry(7),
             Entry::Separator,
             item(4, "Select all"),
             item(5, "Select none"),
@@ -1085,6 +1293,7 @@ impl State {
         ];
         let dir = self.t().loc.dir();
         match show(self.hwnd, entries, Place::Cursor) {
+            7 => self.pin_current(),
             1 => {
                 if let Some(d) = dir {
                     if !crate::shell::launch("wt.exe", &format!("-d \"{d}\""), false) {
@@ -1154,10 +1363,12 @@ impl State {
             }),
             Entry::Separator,
             Entry::Item(MI { id: 6, text: "Open in Terminal".into(), enabled: has_dir, ..Default::default() }),
+            self.pin_entry(8),
             item(7, "Properties"),
         ];
         match show(self.hwnd, entries, Place::Cursor) {
-            1 => self.load(),
+            8 => self.pin_current(),
+            1 => self.refresh(),
             2 => self.paste(),
             3 => {
                 if let Some(d) = self.t().loc.dir() {
@@ -1351,7 +1562,7 @@ impl State {
         let n = self.t().order.len();
         let (row, per) = match self.view {
             View::Details => (ROW_H, 1),
-            View::Icons => (TILE_H, self.cols()),
+            View::Icons => (self.tile_h(), self.cols()),
         };
         // Group headings push rows down: start early enough, and take more.
         let heads = if self.view == View::Details { self.t().heads.len() } else { 0 };
@@ -1478,6 +1689,7 @@ impl State {
         // The bar: back, forward, up, refresh (the address and search boxes are text boxes over it).
         p.rrect(0.0, TABS_H, w, BAR_H + CMD_H, 0.0, PANEL);
         let t = self.t();
+        let busy = self.busy();
         let can = [!t.back.is_empty(), !t.forward.is_empty(), !matches!(t.loc, Loc::Home), true];
         for (k, (code, hit)) in
             [(0xE72B, Hit::Back), (0xE72A, Hit::Forward), (0xE74A, Hit::Up), (0xE72C, Hit::Refresh)].iter().enumerate()
@@ -1486,7 +1698,16 @@ impl State {
             if hov == Some(*hit) && can[k] {
                 p.rrect(x, TABS_H + 7.0, 32.0, 30.0, 5.0, Color::white(0.08));
             }
-            glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, Color::white(if can[k] { 0.85 } else { 0.3 }));
+            let ink = Color::white(if can[k] { 0.85 } else { 0.3 });
+            if *hit == Hit::Refresh && busy {
+                // Turning while it reads the folder again.
+                let turn = self.refresh_at.map_or(0.0, |t| t.elapsed().as_secs_f32()) * 540.0;
+                p.rotated(turn % 360.0, x + 16.0, TABS_H + 22.0, || {
+                    glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, accent)
+                });
+            } else {
+                glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, ink);
+            }
         }
         // The address and search boxes, in exactly the text boxes' colour so
         // each reads as one box (not a box in a box).
@@ -1580,7 +1801,7 @@ impl State {
             // A line between your folders, the drives and the rest, as Explorer has.
             let next = self.side.get(i + 1).map(|s| &s.2);
             let group_ends = matches!((loc, next), (Loc::Path(_), Some(Loc::Shell(..))))
-                || (i == 6 && matches!(next, Some(Loc::Shell(..)) | Some(Loc::Path(_))));
+                || (i == self.pin_n && matches!(next, Some(Loc::Shell(..)) | Some(Loc::Path(_))));
             if group_ends {
                 p.line(16.0, y + 31.0, SIDE_W - 16.0, y + 31.0, Color::white(0.07), 1.0);
             }
@@ -1703,17 +1924,25 @@ impl State {
                     }
                 }
                 View::Icons => {
-                    let s = 72.0;
+                    let s = 72.0 * self.icon_scale;
                     if let Some(b) = bmp {
                         p.image(b, ix + (iw - s) / 2.0, iy + 6.0, s, s, alpha);
                     }
                     if let Some((free, total)) = item.space {
                         let frac = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
-                        p.rrect(ix + 12.0, iy + 80.0, iw - 24.0, 4.0, 2.0, Color::white(0.12));
+                        p.rrect(ix + 12.0, iy + 8.0 + s, iw - 24.0, 4.0, 2.0, Color::white(0.12));
                         let c = if frac > 0.9 { Color(0.9, 0.3, 0.28, 1.0) } else { accent };
-                        p.rrect(ix + 12.0, iy + 80.0, (iw - 24.0) * frac, 4.0, 2.0, c);
+                        p.rrect(ix + 12.0, iy + 8.0 + s, (iw - 24.0) * frac, 4.0, 2.0, c);
                     }
-                    p.text_wrap(&item.name, &f.small, ix + 4.0, iy + 86.0, iw - 8.0, 30.0, Color::white(0.95 * alpha));
+                    p.text_wrap(
+                        &item.name,
+                        &f.small,
+                        ix + 4.0,
+                        iy + 14.0 + s,
+                        iw - 8.0,
+                        30.0,
+                        Color::white(0.95 * alpha),
+                    );
                 }
             }
         }
@@ -1748,6 +1977,18 @@ impl State {
         // Status.
         let sel = t.selected();
         let mut status = format!("{} item{}", t.order.len(), if t.order.len() == 1 { "" } else { "s" });
+        if busy {
+            status = "Refreshing\u{2026}".to_string();
+            // A bar runs along the bottom of the command bar.
+            let secs = self.refresh_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
+            let (seg, by) = (w * 0.3, TABS_H + BAR_H + CMD_H - 3.0);
+            let at = -seg + (secs * 0.9 % 1.0) * (w + seg);
+            let (l, r) = (at.max(0.0), (at + seg).min(w));
+            p.rrect(0.0, by, w, 3.0, 0.0, accent.alpha(0.18));
+            if r > l {
+                p.rrect(l, by, r - l, 3.0, 1.5, accent);
+            }
+        }
         if !sel.is_empty() {
             let bytes: u64 = sel.iter().filter_map(|&i| t.items[i].size).sum();
             status += &format!(
@@ -1840,11 +2081,7 @@ impl State {
             Some(Hit::Back) => self.back(),
             Some(Hit::Forward) => self.forward(),
             Some(Hit::Up) => self.up(),
-            Some(Hit::Refresh) => {
-                // A phone plugged in since shows in the sidebar too.
-                self.side = sidebar();
-                self.load();
-            }
+            Some(Hit::Refresh) => self.refresh(),
             Some(Hit::Cmd(i)) => self.command(i),
             Some(Hit::Caption(b)) => appwin::caption_press(self.hwnd, b),
             Some(Hit::Side(i)) => {
@@ -1999,6 +2236,7 @@ impl State {
                 appwin::redraw(self.hwnd);
                 self.background_menu();
             }
+            Some(Hit::Side(i)) => self.side_menu(i),
             Some(Hit::Tab(i)) | Some(Hit::TabClose(i)) => {
                 use crate::menu::{item, show, Place};
                 match show(
@@ -2023,7 +2261,52 @@ impl State {
         }
     }
 
+    /// Bigger or smaller icons (Ctrl+wheel, Ctrl+plus and minus): Icons view
+    /// steps through its sizes; bigger from Details goes to Icons, and
+    /// smaller than the smallest goes back to Details.
+    fn zoom_icons(&mut self, bigger: bool) {
+        if self.view == View::Details {
+            if !bigger {
+                return;
+            }
+            self.view = View::Icons;
+        } else {
+            let at = ICON_STEPS.iter().position(|s| *s >= self.icon_scale - 0.01).unwrap_or(2);
+            if bigger {
+                self.icon_scale = ICON_STEPS[(at + 1).min(ICON_STEPS.len() - 1)];
+            } else if at == 0 {
+                self.view = View::Details;
+            } else {
+                self.icon_scale = ICON_STEPS[at - 1];
+            }
+        }
+        let m = self.max_scroll();
+        let t = self.tab();
+        t.scroll = t.scroll.min(m);
+        self.remember();
+        appwin::redraw(self.hwnd);
+    }
+
+    /// Explorer's Ctrl+Shift+1 to 4 (extra large to small icons) and 6 (details).
+    fn view_size(&mut self, n: u8) {
+        match n {
+            1 => (self.view, self.icon_scale) = (View::Icons, ICON_STEPS[4]),
+            2 => (self.view, self.icon_scale) = (View::Icons, ICON_STEPS[3]),
+            3 => (self.view, self.icon_scale) = (View::Icons, ICON_STEPS[2]),
+            4 => (self.view, self.icon_scale) = (View::Icons, ICON_STEPS[1]),
+            _ => self.view = View::Details,
+        }
+        let m = self.max_scroll();
+        let t = self.tab();
+        t.scroll = t.scroll.min(m);
+        self.remember();
+    }
+
     fn on_wheel(&mut self, delta: i16) {
+        if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 {
+            self.zoom_icons(delta > 0);
+            return;
+        }
         let m = self.max_scroll();
         let t = self.tab();
         t.scroll = (t.scroll - delta as f32 / 120.0 * ROW_H * 3.0).clamp(0.0, m);
@@ -2036,15 +2319,18 @@ impl State {
         let n = self.t().order.len();
         let k = VIRTUAL_KEY(vk);
         match k {
+            VK_RETURN if alt => self.properties(),
             VK_RETURN => self.open_selected(),
             VK_BACK => self.up(),
+            VK_ESCAPE => self.tab().sel.iter_mut().for_each(|s| *s = false),
             VK_LEFT if alt => self.back(),
             VK_RIGHT if alt => self.forward(),
             VK_UP if alt => self.up(),
             VK_F2 => self.start_rename(),
-            VK_F5 => self.load(),
+            VK_F5 => self.refresh(),
             VK_DELETE => self.delete(shift),
             VK_F4 => self.focus_addr(),
+            VK_D if alt => self.focus_addr(),
             VK_F3 => unsafe {
                 let _ = SetFocus(Some(self.search));
             },
@@ -2074,6 +2360,28 @@ impl State {
                 self.select_only(Some(next));
             }
             _ if ctrl => match vk as u8 {
+                // Ctrl+Shift+1 to 4, 6: the size of icons, details. Ctrl+1 to 9: that tab.
+                d @ (b'1'..=b'4' | b'6') if shift => self.view_size(d - b'0'),
+                d @ b'1'..=b'9' => {
+                    let tab = (d - b'1') as usize;
+                    if tab < self.tabs.len() {
+                        self.switch(tab);
+                    }
+                }
+                // Ctrl+plus and minus (the keypad's too).
+                0xBB | 0x6B => self.zoom_icons(true),
+                0xBD | 0x6D => self.zoom_icons(false),
+                b'R' => self.refresh(),
+                b'D' => self.delete(false),
+                b'E' => unsafe {
+                    let _ = SetFocus(Some(self.search));
+                },
+                // Ctrl+Shift+. shows and hides hidden items, as in Explorer.
+                0xBE if shift => {
+                    self.show_hidden = !self.show_hidden;
+                    self.remember();
+                    self.load();
+                }
                 b'A' => self.tab().sel.iter_mut().for_each(|s| *s = true),
                 b'C' => self.copy(false),
                 b'X' => self.copy(true),
@@ -2574,6 +2882,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             let delta = ((wp.0 >> 16) & 0xFFFF) as i16;
             with(|s| s.on_wheel(delta));
         }
+        WM_TIMER if wp.0 == TIMER_BUSY => {
+            with(|s| s.tick());
+        }
         WM_XBUTTONUP => {
             let back = (wp.0 >> 16) & 0xFFFF == 1;
             with(|s| if back { s.back() } else { s.forward() });
@@ -2656,6 +2967,7 @@ pub fn run(start: Option<String>) {
         let target: IDropTarget = DropHere.into();
         let _ = RegisterDragDrop(hwnd, &target);
         let store = ViewStore::load();
+        let pins = store.pins.clone().unwrap_or_else(default_pins);
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
                 hwnd,
@@ -2679,7 +2991,7 @@ pub fn run(start: Option<String>) {
                 press: None,
                 rename: None,
                 last_click: None,
-                side: sidebar(),
+                side: sidebar(&pins),
                 typed: (String::new(), Instant::now()),
                 col_w: store.cols.unwrap_or([COLS[1].1, COLS[2].1, COLS[3].1]),
                 col_drag: None,
@@ -2687,6 +2999,9 @@ pub fn run(start: Option<String>) {
                 editing_addr: false,
                 group: 0,
                 measure: crate::gfx::Measure::new().ok(),
+                icon_scale: store.scale.unwrap_or(1.0),
+                refresh_at: None,
+                pin_n: pins.len(),
                 store,
             })
         });
