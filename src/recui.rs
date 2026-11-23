@@ -935,6 +935,9 @@ fn show_preview(path: PathBuf, thumb: Option<Thumb>, still: Option<(Vec<u32>, i3
             }
         });
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Above whatever else is always on top (a game or a video in front
+        // would otherwise hide it), without taking the focus from it.
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SetTimer(Some(hwnd), 1, 16, None);
         let mut m = MSG::default();
         while GetMessageW(&mut m, None, 0, 0).0 > 0 {

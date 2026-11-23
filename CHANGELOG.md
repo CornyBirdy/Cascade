@@ -26,6 +26,7 @@ Settings > Updates > What's new opens the list.
 - **Liquid Glass, reworked** to look like Apple's: a light blur you can still see the page through (it was clear and sharp, and read as a dark flat panel), a cool light wash so white text reads, a lens round the whole edge that bends and smears what's outside it (softened first, so print and edges don't turn up as stray bits inside the glass), and a thicker, brighter rim with a glow inside it. The preview shows it.
 
 **Fixed**
+- **A snip over an app that keeps the front**: the snip bar and the preview card now take the top of the always-on-top windows even when the app in front won't give up focus (an administrator's, a game, a video), and the snip asks Windows and the admin helper for the front too. `cascade.log` now says what a snip opened over and whether it got the front, to track down any app it still can't.
 - **A flicker when restoring a window from the taskbar**: the window showed in its place for a moment before the animation grew it out of its button; it now comes back out of sight and is put in place as the animation lands. (Windows that were maximised still flash.)
 
 ## 2026-11-22

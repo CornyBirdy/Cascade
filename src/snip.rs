@@ -269,6 +269,8 @@ fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
         return;
     }
     unsafe {
+        // What's in front now, for the log (some apps keep the front from us).
+        let before = GetForegroundWindow();
         let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
         let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
         let windows = window_rects((x, y));
@@ -345,6 +347,24 @@ fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
         let _ = ShowWindow(window, SW_SHOW);
         crate::launcher::force_foreground(window);
         let _ = SetFocus(Some(window));
+        // An app can hold the front (an administrator's, or one that's
+        // locked it): ask the other ways Windows has, then the admin helper's,
+        // and in any case sit at the top of the always-on-top windows, so the
+        // snip is seen and can be used with the mouse whatever's in front.
+        if GetForegroundWindow() != window {
+            SwitchToThisWindow(window, true);
+        }
+        if GetForegroundWindow() != window {
+            crate::helper::request_focus(window);
+        }
+        let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(before, &mut class).max(0) as usize;
+        config::log(&format!(
+            "snip: opened over \"{}\"; in front: {}",
+            String::from_utf16_lossy(&class[..n]),
+            GetForegroundWindow() == window
+        ));
     }
 }
 
