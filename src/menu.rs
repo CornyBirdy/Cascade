@@ -159,7 +159,7 @@ fn visible(entries: &[Entry], filter: &str) -> Vec<usize> {
 /// An icon (a glyph of the icon font) and its colour for what an item says,
 /// so the usual commands are recognised at a glance wherever they come from.
 fn style_of(text: &str) -> Option<(u32, Color)> {
-    let t = text.replace('&', "").replace('\u{2026}', "").trim().to_lowercase();
+    let t = text.replace(['&', '\u{2026}'], "").trim().to_lowercase();
     let t = t.as_str();
     let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
     let start = |words: &[&str]| words.iter().any(|w| t.starts_with(w));
