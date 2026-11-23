@@ -45,6 +45,9 @@ pub struct Item {
     /// A shortcut shown on the right, greyed.
     pub hint: String,
     pub checked: bool,
+    /// An icon (a glyph of the icon font), or 0 for the one that goes with
+    /// the item's words (Open, Copy, Delete...), if any (see `style_of`).
+    pub icon: u32,
     pub enabled: bool,
     /// The default command (bold), as Open in a file's menu.
     pub bold: bool,
@@ -92,9 +95,13 @@ pub fn set_anchor(r: RECT) {
 
 const SHADOW: f32 = 16.0;
 const PAD: f32 = 4.0;
-const ROW: f32 = 32.0;
-const SEP: f32 = 9.0;
-const HEAD: f32 = 28.0;
+const ROW: f32 = 28.0;
+const SEP: f32 = 7.0;
+const HEAD: f32 = 26.0;
+/// The most columns a long list is spread over.
+const MAX_COLS: usize = 3;
+/// What an icon takes in front of an item's text.
+const ICON_W: f32 = 26.0;
 const FILTER_H: f32 = 40.0;
 /// From this many items, a filter box.
 const FILTER_FROM: usize = 15;
@@ -149,6 +156,62 @@ fn visible(entries: &[Entry], filter: &str) -> Vec<usize> {
         .collect()
 }
 
+/// An icon (a glyph of the icon font) and its colour for what an item says,
+/// so the usual commands are recognised at a glance wherever they come from.
+fn style_of(text: &str) -> Option<(u32, Color)> {
+    let t = text.replace('&', "").replace('\u{2026}', "").trim().to_lowercase();
+    let t = t.as_str();
+    let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+    let start = |words: &[&str]| words.iter().any(|w| t.starts_with(w));
+    let red = Color(0.97, 0.48, 0.45, 1.0);
+    let green = Color(0.48, 0.84, 0.58, 1.0);
+    let amber = Color(1.0, 0.78, 0.40, 1.0);
+    let purple = Color(0.74, 0.64, 1.0, 1.0);
+    let blue = Color(0.45, 0.72, 1.0, 1.0);
+    let accent = theme::accent();
+    Some(match () {
+        _ if start(&["open in new tab", "open in new window", "new tab", "new window"]) => (0xE8A7, accent),
+        _ if has(&["open file location", "show in folder", "reveal"]) => (0xE838, amber),
+        _ if start(&["run as administrator"]) => (0xE7EF, amber),
+        _ if start(&["open"]) => (0xE8E5, accent),
+        _ if start(&["properties", "info"]) => (0xE946, amber),
+        _ if start(&["refresh", "reload"]) => (0xE72C, accent),
+        _ if start(&["paste"]) => (0xE77F, blue),
+        _ if start(&["cut"]) => (0xE8C6, blue),
+        _ if start(&["copy", "duplicate"]) => (0xE8C8, blue),
+        _ if start(&["rename"]) => (0xE8AC, amber),
+        _ if start(&["unpin"]) => (0xE77A, red),
+        _ if start(&["delete", "remove", "clear", "empty"]) => (0xE74D, red),
+        _ if start(&["close", "quit", "exit"]) => (0xE711, red),
+        _ if start(&["new folder"]) => (0xE8F4, green),
+        _ if start(&["new", "add", "create"]) => (0xE710, green),
+        _ if start(&["pin"]) => (0xE718, green),
+        _ if start(&["share", "send"]) => (0xE72D, accent),
+        _ if start(&["sort", "order"]) => (0xE8CB, purple),
+        _ if start(&["view", "details", "icons", "group"]) => (0xE8FD, purple),
+        _ if start(&["select all"]) => (0xE8B3, purple),
+        _ if has(&["terminal", "command prompt", "powershell"]) => (0xE756, green),
+        _ if start(&["restore"]) => (0xE777, amber),
+        _ if start(&["move up"]) => (0xE74A, accent),
+        _ if start(&["move down"]) => (0xE74B, accent),
+        _ if start(&["save"]) => (0xE74E, blue),
+        _ if start(&["print"]) => (0xE749, blue),
+        _ if start(&["edit"]) => (0xE70F, amber),
+        _ if start(&["play"]) => (0xE768, green),
+        _ if start(&["download", "install"]) => (0xE896, green),
+        _ if has(&["settings", "personali"]) => (0xE713, accent),
+        _ => return None,
+    })
+}
+
+/// The icon and colour of `it`: its own, or what its words say.
+fn item_style(it: &Item) -> Option<(u32, Color)> {
+    if it.icon != 0 {
+        return Some((it.icon, style_of(&it.text).map_or(theme::accent(), |s| s.1)));
+    }
+    style_of(&it.text)
+}
+
 fn pickable(e: &Entry) -> bool {
     matches!(e, Entry::Item(it) if it.enabled)
 }
@@ -179,6 +242,13 @@ struct Panel {
     up: bool,
     /// Which entry its open submenu belongs to.
     child_of: Option<usize>,
+    /// A long list runs down a column and on into the next: how many, each
+    /// one's width, and where each row of `shown` goes (column, top, height).
+    cols: usize,
+    col_w: f32,
+    lay: Vec<(usize, f32, f32)>,
+    /// Some item has an icon: all the text is moved over for them.
+    icons: bool,
 }
 
 impl Panel {
@@ -191,7 +261,31 @@ impl Panel {
     }
 
     fn content_h(&self) -> f32 {
-        self.shown.iter().map(|&i| row_h(&self.entries[i])).sum::<f32>() + PAD
+        self.lay.iter().map(|&(_, y, h)| y + h).fold(0.0, f32::max) + PAD
+    }
+
+    /// Lays `shown` out over the columns, each about the same height.
+    fn relayout(&mut self) {
+        let hs: Vec<f32> = self.shown.iter().map(|&i| row_h(&self.entries[i])).collect();
+        let cols = self.cols.max(1);
+        let target = hs.iter().sum::<f32>() / cols as f32;
+        self.lay.clear();
+        let (mut col, mut y) = (0usize, 0.0f32);
+        for (n, &h) in hs.iter().enumerate() {
+            if col + 1 < cols && y > 0.0 && y + h / 2.0 > target {
+                col += 1;
+                y = 0.0;
+            }
+            // A line at the top of a column has nothing to divide.
+            let h = if y == 0.0 && matches!(self.entries[self.shown[n]], Entry::Separator) { 0.0 } else { h };
+            self.lay.push((col, y, h));
+            y += h;
+        }
+    }
+
+    /// Which column row `n` of `shown` is in.
+    fn col_of(&self, n: usize) -> usize {
+        self.lay.get(n).map_or(0, |l| l.0)
     }
 
     fn max_scroll(&self) -> f32 {
@@ -200,8 +294,8 @@ impl Panel {
 
     /// Row `n` of `shown`: its top (scrolled) and height.
     fn row(&self, n: usize) -> (f32, f32) {
-        let y: f32 = self.shown.iter().take(n).map(|&i| row_h(&self.entries[i])).sum();
-        (self.top() + y - self.scroll, row_h(&self.entries[self.shown[n]]))
+        let (_, y, h) = self.lay[n];
+        (self.top() + y - self.scroll, h)
     }
 
     /// The entry at a point (logical, relative to the panel's content).
@@ -209,9 +303,10 @@ impl Panel {
         if lx < 0.0 || lx >= self.w || ly < self.top() || ly >= self.h {
             return None;
         }
+        let col = (lx / self.col_w) as usize;
         (0..self.shown.len()).find_map(|n| {
             let (y, h) = self.row(n);
-            (ly >= y && ly < y + h).then_some(self.shown[n])
+            (self.col_of(n) == col && ly >= y && ly < y + h).then_some(self.shown[n])
         })
     }
 
@@ -330,7 +425,9 @@ impl State {
             })
             .fold(0.0, f32::max);
         let lead = if checks { 34.0 } else { 14.0 };
-        let w = (widest + lead + 22.0 + PAD * 2.0).max(MIN_W).max(min_w).min(MAX_W).ceil();
+        let icons = entries.iter().any(|e| matches!(e, Entry::Item(it) if item_style(it).is_some()));
+        let icon_w = if icons { ICON_W } else { 0.0 };
+        let w = (widest + lead + icon_w + 22.0 + PAD * 2.0).max(MIN_W).max(min_w).min(MAX_W).ceil();
         let shown: Vec<usize> = (0..entries.len()).collect();
         let mut panel = Panel {
             hwnd: HWND::default(),
@@ -351,10 +448,26 @@ impl State {
             opened: Instant::now(),
             up: false,
             child_of: None,
+            cols: 1,
+            col_w: w,
+            lay: Vec::new(),
+            icons,
         };
+        panel.relayout();
         let full = panel.top() + panel.content_h();
         let room = ((work.bottom - work.top) as f32 / k - 16.0).max(ROW * 3.0);
-        panel.h = full.min(MAX_H).min(room).ceil();
+        let limit = MAX_H.min(room);
+        // Too tall for the screen: the list runs on into more columns beside
+        // (not for a drop-down under its control, which scrolls).
+        if min_w == 0.0 && full > limit {
+            let fit = (((work.right - work.left) as f32 / k - 24.0) / w).floor().max(1.0) as usize;
+            panel.cols = ((full / limit).ceil() as usize).clamp(1, MAX_COLS).min(fit);
+            panel.w = w * panel.cols as f32;
+            panel.relayout();
+        }
+        let w = panel.w;
+        let full = panel.top() + panel.content_h();
+        panel.h = full.min(limit).ceil();
         // Placed so it fits on the screen.
         let (pw, ph) = ((w * k) as i32, (panel.h * k) as i32);
         let m = (SHADOW * k) as i32;
@@ -448,10 +561,11 @@ impl State {
         let (y, h) = p.row(row);
         let k = p.k;
         let (ox, oy) = (p.x + (SHADOW * k) as i32, p.y + (SHADOW * k) as i32);
+        let left = ox + ((p.col_of(row) as f32 * p.col_w) * k) as i32;
         Some(RECT {
-            left: ox,
+            left,
             top: oy + (y * k) as i32,
-            right: ox + (p.w * k) as i32,
+            right: left + (p.col_w * k) as i32,
             bottom: oy + ((y + h) * k) as i32,
         })
     }
@@ -627,6 +741,7 @@ impl State {
     fn set_filter(&mut self, f: String) {
         let p = &mut self.panels[0];
         p.shown = visible(&p.entries, &f);
+        p.relayout();
         p.filter = f;
         p.scroll = 0.0;
         p.hover = p.shown.iter().copied().find(|&i| pickable(&p.entries[i]));
@@ -721,27 +836,31 @@ impl State {
             d.clip(x0, y0 + top, p.w, p.h - top);
             if let (Some(g), Some(_)) = (p.glide, p.hover) {
                 let gy = y0 + g - p.scroll;
-                d.rrect(x0 + PAD, gy + 2.0, p.w - PAD * 2.0, ROW - 4.0, 4.0, Color::white(0.075));
+                let hot = p.hover.and_then(|h| p.shown.iter().position(|&s| s == h)).map_or(0, |n| p.col_of(n));
+                let gx = x0 + hot as f32 * p.col_w;
+                d.rrect(gx + PAD, gy + 2.0, p.col_w - PAD * 2.0, ROW - 4.0, 4.0, Color::white(0.075));
             }
             let checks = p.entries.iter().any(|e| matches!(e, Entry::Item(it) if it.checked));
             let lead = if checks { 34.0 } else { 14.0 };
+            let icon_w = if p.icons { ICON_W } else { 0.0 };
             for (row, &i) in p.shown.iter().enumerate() {
                 let (ry, rh) = p.row(row);
                 if ry + rh < top - 2.0 || ry > p.h {
                     continue;
                 }
                 let ry = y0 + ry;
+                let (cx0, cwid) = (x0 + p.col_of(row) as f32 * p.col_w, p.col_w);
                 match &p.entries[i] {
                     Entry::Separator => {
-                        d.rrect(x0 + PAD + 8.0, ry + SEP / 2.0, p.w - PAD * 2.0 - 16.0, 1.0, 0.0, Color::white(0.09));
+                        d.rrect(cx0 + PAD + 8.0, ry + SEP / 2.0, cwid - PAD * 2.0 - 16.0, 1.0, 0.0, Color::white(0.09));
                     }
                     Entry::Header(text) => {
                         d.text(
                             text,
                             &f.small,
-                            x0 + 14.0,
+                            cx0 + 14.0,
                             ry + 6.0,
-                            p.w - 28.0,
+                            cwid - 28.0,
                             rh - 6.0,
                             Align::Left,
                             Color::white(0.5),
@@ -750,7 +869,7 @@ impl State {
                     Entry::Item(it) => {
                         let a = if it.enabled { 0.93 } else { 0.38 };
                         if it.checked {
-                            let (cx, cy) = (x0 + 18.0, ry + rh / 2.0);
+                            let (cx, cy) = (cx0 + 18.0, ry + rh / 2.0);
                             let c = theme::accent();
                             d.line(cx - 4.5, cy, cx - 1.3, cy + 3.5, c, 1.7);
                             d.line(cx - 1.3, cy + 3.5, cx + 5.0, cy - 3.5, c, 1.7);
@@ -758,14 +877,21 @@ impl State {
                         let right = if it.sub.is_empty() { 14.0 } else { 30.0 };
                         let hint_w = if it.hint.is_empty() { 0.0 } else { gfx.measure(&it.hint, &f.small) + 16.0 };
                         let font = if it.bold { &f.num } else { &f.body };
-                        let tw = p.w - lead - right - hint_w;
-                        d.text(&it.text, font, x0 + lead, ry, tw, rh, Align::Left, Color::white(a));
+                        let tw = cwid - lead - icon_w - right - hint_w;
+                        // Its icon, in the colour that goes with what it does.
+                        if let (Some((glyph, tint)), Some(font), true) = (item_style(it), &f.icons, p.icons) {
+                            if let Some(ch) = char::from_u32(glyph) {
+                                let c = tint.alpha(if it.enabled { 0.95 } else { 0.35 });
+                                d.text(&ch.to_string(), font, cx0 + lead, ry, 16.0, rh, Align::Center, c);
+                            }
+                        }
+                        d.text(&it.text, font, cx0 + lead + icon_w, ry, tw, rh, Align::Left, Color::white(a));
                         if !it.hint.is_empty() {
-                            let hx = x0 + p.w - right - hint_w;
+                            let hx = cx0 + cwid - right - hint_w;
                             d.text(&it.hint, &f.small, hx, ry, hint_w, rh, Align::Right, Color::white(a * 0.55));
                         }
                         if !it.sub.is_empty() {
-                            let (ax, ay) = (x0 + p.w - 18.0, ry + rh / 2.0);
+                            let (ax, ay) = (cx0 + cwid - 18.0, ry + rh / 2.0);
                             d.line(ax - 2.0, ay - 4.0, ax + 2.0, ay, Color::white(a * 0.8), 1.4);
                             d.line(ax + 2.0, ay, ax - 2.0, ay + 4.0, Color::white(a * 0.8), 1.4);
                         }
@@ -965,6 +1091,7 @@ pub fn from_hmenu(menu: HMENU, init: &mut dyn FnMut(HMENU, u32)) -> Vec<Entry> {
                 enabled: mi.fState.0 & MFS_DISABLED.0 == 0,
                 bold: mi.fState.0 & MFS_DEFAULT.0 != 0,
                 sub,
+                icon: 0,
             }));
         }
     }
