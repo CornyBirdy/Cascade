@@ -2,7 +2,9 @@
 //! drives the Alt+Tab switcher, and takes the Win+key shortcuts Cascade has
 //! its own menus for (Win+X, Win+N, Win+A, Win+V, Win+Tab, each only when
 //! turned on). Every
-//! other Win+key (Win+E, Win+R, Win+Shift+S...) is left completely alone.
+//! other Win+key (Win+E, Win+R...) is left completely alone, except that
+//! while Cascade is the shell, Win+Shift+S and Print Screen (the snip) are
+//! taken here too, so they work over any app.
 //!
 //! A shortcut's key press and release are kept from Windows, so it never
 //! sees the combination; a mask key tap (see below) stops the Win release
@@ -67,6 +69,8 @@ const MAX_CHECKS: u32 = 4;
 pub const KEY_CHECK_MSG: u32 = WM_APP + 41;
 
 /// Win+arrows held down now (bit n: Left + n), their releases swallowed too.
+/// Win+Shift+S is held (its key repeats; the snip opens once).
+static SNIP_HELD: AtomicBool = AtomicBool::new(false);
 static ARROWS_HELD: AtomicU32 = AtomicU32::new(0);
 
 /// Whether Cascade is the shell (Explorer has no taskbar up): Windows moves
@@ -432,6 +436,32 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return LRESULT(1);
                 }
                 if up && ARROWS_HELD.fetch_and(!bit, Ordering::Relaxed) & bit != 0 {
+                    return LRESULT(1);
+                }
+            }
+
+            // Win+Shift+S, the snip, while Cascade is the shell: taken here too,
+            // so it opens whichever app is in front and whatever else has
+            // claimed the shortcut (Windows' own Snipping Tool, a game bar,
+            // an app of its own). The registered shortcut stays as the way
+            // in when the hook isn't running.
+            if vk == b'S' as u16 || vk == VK_SNAPSHOT.0 {
+                let win_held = WIN_DOWN.load(Ordering::Relaxed) || down_now(VK_LWIN) || down_now(VK_RWIN);
+                // (Print Screen on its own does the same.)
+                let keys =
+                    if vk == VK_SNAPSHOT.0 { !down_now(VK_SHIFT) && !win_held } else { win_held && down_now(VK_SHIFT) };
+                if down && keys && !down_now(VK_MENU) && !down_now(VK_CONTROL) && handled_here() && shell_is_ours() {
+                    COMBO.store(true, Ordering::Relaxed);
+                    // Held down, the key repeats: one snip for one press.
+                    if !SNIP_HELD.swap(true, Ordering::Relaxed) {
+                        if win_held {
+                            mask_tap();
+                        }
+                        notify(msg::SNIP, 0);
+                    }
+                    return LRESULT(1);
+                }
+                if up && SNIP_HELD.swap(false, Ordering::Relaxed) {
                     return LRESULT(1);
                 }
             }

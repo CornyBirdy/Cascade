@@ -17,6 +17,9 @@ Settings > Updates > What's new opens the list.
 - **Files, history**: right-click Back or Forward for the places they'd go, and pick one to jump straight there.
 - **Files, undo and redo**: Ctrl+Z takes back a rename or a new folder or file, Ctrl+Y does it again. *Invert selection* is in More.
 
+**Fixed**
+- **Win+Shift+S and Print Screen over any app** (shell mode): the snip's shortcuts are now taken by Cascade's keyboard watcher as well as registered with Windows, so they open the snip whichever app is in front (Discord, Opera, Steam, Claude...) and whatever else has claimed them. If it still doesn't open, `cascade.log` says why ("snip: ..." lines).
+
 ## 2026-11-23
 
 **New**
