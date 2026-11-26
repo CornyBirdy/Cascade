@@ -11,6 +11,12 @@ Settings > Updates > What's new opens the list.
 - **Uninstall an app, reworked** (Settings > Apps): the list shows who made each app and how big it is, Store apps are marked, and it's one column that scrolls with the filter box (hundreds of apps no longer spill into three columns). Components Windows won't let you remove aren't listed, installers that say "install" are turned into uninstalls, and Cascade tells you when the app is gone.
 - **Startup apps** stay open after a switch, so several can be turned on or off in one go.
 
+- **Files, a View menu like Explorer's**: Extra large, Large, Medium and Small icons or Details, Group by, **Compact view** (tighter rows), and Show: **Navigation pane** (hide the sidebar), **Details pane**, **File name extensions** and Hidden items.
+- **Files, the Details pane** (View > Show, or Alt+Shift+P): a big picture of what's selected (a thumbnail for pictures and videos) with its type, size, date and where it is; with several selected, how many and how big; with none, the folder.
+- **Files, the arrows in the address bar**: click the arrow after any part of the path to see the folders inside it and jump to one (the drives, for This PC).
+- **Files, history**: right-click Back or Forward for the places they'd go, and pick one to jump straight there.
+- **Files, undo and redo**: Ctrl+Z takes back a rename or a new folder or file, Ctrl+Y does it again. *Invert selection* is in More.
+
 ## 2026-11-23
 
 **New**

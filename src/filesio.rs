@@ -464,9 +464,21 @@ pub fn explorer_settings() -> (bool, bool, bool) {
     (hidden, system, hide_ext)
 }
 
+/// File name extensions as Files has them: 0 as Windows says, 1 shown, 2 hidden.
+static EXT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_ext_mode(mode: u8) {
+    EXT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// What's at `loc` (on the calling thread: call it from a worker).
 pub fn load(loc: &Loc, show_hidden: bool) -> Vec<Item> {
     let (hidden, system, hide_ext) = explorer_settings();
+    let hide_ext = match EXT_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => hide_ext,
+    };
     let hidden = hidden || show_hidden;
     unsafe {
         match loc {

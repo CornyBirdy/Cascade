@@ -40,8 +40,12 @@ const TABS_H: f32 = 38.0;
 const BAR_H: f32 = 44.0;
 const CMD_H: f32 = 40.0;
 const SIDE_W: f32 = 214.0;
+/// The details pane on the right.
+const PANE_W: f32 = 290.0;
 const HEAD_H: f32 = 30.0;
 const ROW_H: f32 = 30.0;
+/// Rows in compact view.
+const ROW_COMPACT: f32 = 24.0;
 const STATUS_H: f32 = 26.0;
 const TAB_W: f32 = 200.0;
 
@@ -78,6 +82,13 @@ struct ViewStore {
     scale: Option<f32>,
     /// The folders pinned in the sidebar (None: the usual six).
     pins: Option<Vec<String>>,
+    /// The navigation pane is hidden, the details pane shown, rows packed
+    /// closer (compact view), and file name extensions (0 as Windows has
+    /// them, 1 shown, 2 hidden).
+    hide_nav: bool,
+    details: bool,
+    compact: bool,
+    exts: u8,
 }
 
 fn store_path() -> std::path::PathBuf {
@@ -111,6 +122,14 @@ impl ViewStore {
             } else if let Some(v) = line.strip_prefix("scale=") {
                 s.scale =
                     v.trim().parse::<f32>().ok().map(|n| n.clamp(ICON_STEPS[0], ICON_STEPS[ICON_STEPS.len() - 1]));
+            } else if let Some(v) = line.strip_prefix("nav=") {
+                s.hide_nav = v.trim() == "0";
+            } else if let Some(v) = line.strip_prefix("details=") {
+                s.details = v.trim() == "1";
+            } else if let Some(v) = line.strip_prefix("compact=") {
+                s.compact = v.trim() == "1";
+            } else if let Some(v) = line.strip_prefix("exts=") {
+                s.exts = v.trim().parse::<u8>().ok().filter(|n| *n <= 2).unwrap_or(0);
             } else if line == "pins=1" {
                 s.pins.get_or_insert_with(Vec::new);
             } else if let Some(v) = line.strip_prefix("pin|") {
@@ -139,6 +158,10 @@ impl ViewStore {
             out.push_str(&format!("cols={},{},{}\n", c[0], c[1], c[2]));
         }
         out.push_str(&format!("name={}\n", self.name.unwrap_or(0.0)));
+        out.push_str(&format!("nav={}\n", !self.hide_nav as u8));
+        out.push_str(&format!("details={}\n", self.details as u8));
+        out.push_str(&format!("compact={}\n", self.compact as u8));
+        out.push_str(&format!("exts={}\n", self.exts));
         if let Some(k) = self.scale {
             out.push_str(&format!("scale={k}\n"));
         }
@@ -202,8 +225,12 @@ enum Hit {
     HeaderEdge(usize),
     /// A part of the path in the address bar, and the bar around them.
     Crumb(usize),
+    /// The arrow after a part of the path: what's inside it, to jump to.
+    CrumbMenu(usize),
     Address,
     Item(usize),
+    /// The details pane.
+    Pane,
     Empty,
 }
 
@@ -370,6 +397,24 @@ struct State {
     refresh_at: Option<Instant>,
     /// How many folders are pinned in the sidebar (after Home).
     pin_n: usize,
+    /// The navigation pane (the sidebar), the details pane, compact rows.
+    nav: bool,
+    details: bool,
+    compact: bool,
+    /// File name extensions: 0 as Windows has them, 1 shown, 2 hidden.
+    exts: u8,
+    /// What can be undone and redone (renames and new items).
+    undo: Vec<Undo>,
+    redo: Vec<Undo>,
+}
+
+/// A change Ctrl+Z can take back.
+#[derive(Clone, Debug, PartialEq)]
+enum Undo {
+    /// An item renamed: where it was, where it is now.
+    Rename(String, String),
+    /// A new, empty folder or file (undone by deleting it).
+    Created(String),
 }
 
 thread_local! {
@@ -529,7 +574,35 @@ impl State {
     fn content(&self) -> (f32, f32, f32, f32) {
         let (w, h) = appwin::client(self.hwnd);
         let y0 = TABS_H + BAR_H + CMD_H;
-        (SIDE_W, y0, w - SIDE_W, h - y0 - STATUS_H)
+        let (side, pane) = (self.side_w(), self.pane_w());
+        (side, y0, (w - side - pane).max(120.0), h - y0 - STATUS_H)
+    }
+
+    /// The navigation pane's width (none when it's hidden).
+    fn side_w(&self) -> f32 {
+        if self.nav {
+            SIDE_W
+        } else {
+            0.0
+        }
+    }
+
+    /// The details pane's width (none when it's hidden).
+    fn pane_w(&self) -> f32 {
+        if self.details {
+            PANE_W
+        } else {
+            0.0
+        }
+    }
+
+    /// A row's height in Details view.
+    fn row_h(&self) -> f32 {
+        if self.compact {
+            ROW_COMPACT
+        } else {
+            ROW_H
+        }
     }
 
     fn rows_top(&self) -> f32 {
@@ -560,9 +633,12 @@ impl State {
         let (x0, _, cw, _) = self.content();
         let top = self.rows_top();
         match self.view {
-            View::Details => {
-                (x0 + 8.0, top + pos as f32 * ROW_H + self.heads_before(pos) as f32 * GROUP_H, cw - 24.0, ROW_H)
-            }
+            View::Details => (
+                x0 + 8.0,
+                top + pos as f32 * self.row_h() + self.heads_before(pos) as f32 * GROUP_H,
+                cw - 24.0,
+                self.row_h(),
+            ),
             View::Icons => {
                 let c = self.cols();
                 let (tw, th) = (self.tile_w(), self.tile_h());
@@ -574,7 +650,7 @@ impl State {
     fn content_height(&self) -> f32 {
         let n = self.t().order.len();
         match self.view {
-            View::Details => n as f32 * ROW_H + self.t().heads.len() as f32 * GROUP_H + 8.0,
+            View::Details => n as f32 * self.row_h() + self.t().heads.len() as f32 * GROUP_H + 8.0,
             View::Icons => (n.div_ceil(self.cols())) as f32 * self.tile_h() + 8.0,
         }
     }
@@ -637,6 +713,10 @@ impl State {
         self.store.cols = Some(self.col_w);
         self.store.scale = Some(self.icon_scale);
         self.store.name = self.name_fixed;
+        self.store.hide_nav = !self.nav;
+        self.store.details = self.details;
+        self.store.compact = self.compact;
+        self.store.exts = self.exts;
         self.store.save();
     }
 
@@ -831,6 +911,125 @@ impl State {
             let old = std::mem::replace(&mut tab.loc, loc);
             tab.back.push(old);
             tab.scroll = 0.0;
+            self.load();
+        }
+    }
+
+    /// The arrow after part `i` of the path: the folders inside it, to jump
+    /// to one (the drives for This PC), as in Explorer's address bar.
+    fn crumb_menu(&mut self, i: usize) {
+        use crate::menu::{item, show, Place};
+        let Some((_, loc)) = crumbs(&self.t().loc).into_iter().nth(i) else { return };
+        let mut places: Vec<(String, Loc)> = Vec::new();
+        match &loc {
+            Loc::Path(dir) => {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for e in entries.flatten() {
+                        let Ok(kind) = e.file_type() else { continue };
+                        if !kind.is_dir() {
+                            continue;
+                        }
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        let path = e.path();
+                        if !self.show_hidden {
+                            use std::os::windows::fs::MetadataExt;
+                            // Hidden (0x2) and system (0x4) folders stay out of the list, as they do in the pane.
+                            if e.metadata().is_ok_and(|m| m.file_attributes() & 0x6 != 0) {
+                                continue;
+                            }
+                        }
+                        places.push((name, Loc::Path(path.to_string_lossy().into_owned())));
+                    }
+                }
+            }
+            Loc::Shell(..) if loc == filesio::this_pc() => {
+                // This PC: its drives.
+                places = self
+                    .side
+                    .iter()
+                    .filter(|s| matches!(s.2, Loc::Path(_)) && s.1.len() == 2)
+                    .map(|s| (s.1.clone(), s.2.clone()))
+                    .collect();
+            }
+            _ => {}
+        }
+        if places.is_empty() {
+            return;
+        }
+        places.sort_by(|a, b| natural(&a.0, &b.0));
+        let entries = places.iter().enumerate().map(|(n, (name, _))| item(n + 1, name.as_str())).collect();
+        if let Some(n) = show(self.hwnd, entries, Place::Cursor).checked_sub(1) {
+            self.go(places[n].1.clone());
+        }
+    }
+
+    /// Right-click on Back or Forward: where they'd go, nearest first, to jump
+    /// straight to one (as Explorer's list of recent places).
+    fn history_menu(&mut self, back: bool) {
+        use crate::menu::{item, show, Place};
+        let tab = self.t();
+        let list: Vec<&Loc> = if back { tab.back.iter().rev().collect() } else { tab.forward.iter().rev().collect() };
+        if list.is_empty() {
+            return;
+        }
+        let entries = list.iter().take(12).enumerate().map(|(n, l)| item(n + 1, l.title())).collect();
+        let Some(n) = show(self.hwnd, entries, Place::Cursor).checked_sub(1) else { return };
+        // Jumping n + 1 places takes n + 1 steps.
+        for _ in 0..=n {
+            if back {
+                self.back();
+            } else {
+                self.forward();
+            }
+        }
+    }
+
+    /// Ctrl+Z: takes back the last rename or new item.
+    fn undo(&mut self) {
+        let Some(last) = self.undo.pop() else { return };
+        let done = match &last {
+            Undo::Rename(from, to) => {
+                let ok = !std::path::Path::new(from).exists() && std::fs::rename(to, from).is_ok();
+                ok.then(|| last.clone())
+            }
+            Undo::Created(path) => {
+                let p = std::path::Path::new(path);
+                // Only what's still empty goes, so nothing put in it since is lost.
+                let gone = if p.is_dir() {
+                    std::fs::remove_dir(p).is_ok()
+                } else {
+                    std::fs::metadata(p).is_ok_and(|m| m.len() == 0) && std::fs::remove_file(p).is_ok()
+                };
+                gone.then(|| last.clone())
+            }
+        };
+        if let Some(d) = done {
+            self.redo.push(d);
+            self.load();
+        }
+    }
+
+    /// Ctrl+Y: does again what Ctrl+Z took back.
+    fn redo_last(&mut self) {
+        let Some(last) = self.redo.pop() else { return };
+        let done = match &last {
+            Undo::Rename(from, to) => {
+                let ok = !std::path::Path::new(to).exists() && std::fs::rename(from, to).is_ok();
+                ok.then(|| last.clone())
+            }
+            Undo::Created(path) => {
+                let p = std::path::Path::new(path);
+                let ok = !p.exists()
+                    && if path.ends_with('\\') || p.extension().is_none() {
+                        std::fs::create_dir(p).is_ok()
+                    } else {
+                        std::fs::write(p, b"").is_ok()
+                    };
+                ok.then(|| last.clone())
+            }
+        };
+        if let Some(d) = done {
+            self.undo.push(d);
             self.load();
         }
     }
@@ -1090,6 +1289,8 @@ impl State {
         let Some(dir) = self.t().loc.dir() else { return };
         let Some(path) = crate::deskicons::free_name(std::path::Path::new(&dir), "New folder", "") else { return };
         if std::fs::create_dir(&path).is_ok() {
+            self.undo.push(Undo::Created(path.to_string_lossy().into_owned()));
+            self.redo.clear();
             *PENDING_RENAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_string_lossy().into_owned());
             self.load();
         }
@@ -1101,6 +1302,8 @@ impl State {
             return;
         };
         if std::fs::write(&path, b"").is_ok() {
+            self.undo.push(Undo::Created(path.to_string_lossy().into_owned()));
+            self.redo.clear();
             *PENDING_RENAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_string_lossy().into_owned());
             self.load();
         }
@@ -1171,6 +1374,11 @@ impl State {
         if !keep || name.is_empty() || name == old {
             return;
         }
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let to = dir.join(&name).to_string_lossy().into_owned();
+            self.undo.push(Undo::Rename(path.clone(), to));
+            self.redo.clear();
+        }
         crate::shell::off_thread(move || unsafe {
             let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(path.as_str()), None) else {
                 return;
@@ -1193,22 +1401,46 @@ impl State {
     }
 
     fn view_menu(&mut self) {
-        use crate::menu::{check, show, Entry, Place};
+        use crate::menu::{check, show, sub, Entry, Place};
+        let icons_at = |k: f32| self.view == View::Icons && (self.icon_scale - k).abs() < 0.01;
         let entries = vec![
+            check(4, "Extra large icons", icons_at(ICON_STEPS[4])),
+            check(5, "Large icons", icons_at(ICON_STEPS[3])),
+            check(6, "Medium icons", icons_at(ICON_STEPS[2])),
+            check(7, "Small icons", icons_at(ICON_STEPS[1])),
             check(1, "Details", self.view == View::Details),
-            check(2, "Icons", self.view == View::Icons),
             Entry::Separator,
-            check(3, "Hidden items", self.show_hidden),
+            sub(
+                "Group by",
+                vec![
+                    check(10, "None", self.group == 0),
+                    check(11, "Type", self.group == 1),
+                    check(12, "Date modified", self.group == 2),
+                    check(13, "Size", self.group == 3),
+                ],
+            ),
             Entry::Separator,
-            check(10, "Group by: none", self.group == 0),
-            check(11, "Group by type", self.group == 1),
-            check(12, "Group by date modified", self.group == 2),
-            check(13, "Group by size", self.group == 3),
+            check(20, "Compact view", self.compact),
+            sub(
+                "Show",
+                vec![
+                    check(21, "Navigation pane", self.nav),
+                    check(22, "Details pane", self.details),
+                    Entry::Separator,
+                    check(23, "File name extensions", self.shows_extensions()),
+                    check(3, "Hidden items", self.show_hidden),
+                ],
+            ),
         ];
         let chosen = show(self.hwnd, entries, Place::Cursor);
         match chosen {
             1 => self.view = View::Details,
-            2 => self.view = View::Icons,
+            n @ 4..=7 => self.view_size(match n {
+                4 => 1,
+                5 => 2,
+                6 => 3,
+                _ => 4,
+            }),
             g @ 10..=13 => {
                 self.group = (g - 10) as u8;
                 self.resort();
@@ -1218,14 +1450,33 @@ impl State {
                 self.remember();
                 self.load();
             }
+            20 => self.compact = !self.compact,
+            21 => self.nav = !self.nav,
+            22 => self.details = !self.details,
+            23 => {
+                self.exts = if self.shows_extensions() { 2 } else { 1 };
+                filesio::set_ext_mode(self.exts);
+                self.load();
+            }
             _ => {}
         }
-        if matches!(chosen, 1 | 2 | 10..=13) {
+        if matches!(chosen, 1 | 4..=7 | 10..=13 | 20..=23) {
             self.remember();
+            self.place_boxes();
         }
         let m = self.max_scroll();
         let t = self.tab();
         t.scroll = t.scroll.min(m);
+        appwin::redraw(self.hwnd);
+    }
+
+    /// Whether file names show their extensions (as Windows says, unless set here).
+    fn shows_extensions(&self) -> bool {
+        match self.exts {
+            1 => true,
+            2 => false,
+            _ => !filesio::explorer_settings().2,
+        }
     }
 
     fn new_menu(&mut self) {
@@ -1288,6 +1539,7 @@ impl State {
             Entry::Separator,
             item(4, "Select all"),
             item(5, "Select none"),
+            item(8, "Invert selection"),
             Entry::Separator,
             item(6, "Properties"),
         ];
@@ -1313,6 +1565,13 @@ impl State {
             }
             4 => self.tab().sel.iter_mut().for_each(|s| *s = true),
             5 => self.tab().sel.iter_mut().for_each(|s| *s = false),
+            8 => {
+                let t = self.tab();
+                let order = t.order.clone();
+                for i in order {
+                    t.sel[i] = !t.sel[i];
+                }
+            }
             6 => self.properties(),
             _ => {}
         }
@@ -1492,6 +1751,9 @@ impl State {
                         if x >= cx && x < cx + cw {
                             return Some(Hit::Crumb(i));
                         }
+                        if x >= cx + cw && x < cx + cw + 14.0 {
+                            return Some(Hit::CrumbMenu(i));
+                        }
                     }
                 }
                 return Some(Hit::Address);
@@ -1512,7 +1774,10 @@ impl State {
                 })
                 .map(Hit::Cmd);
         }
-        if x < SIDE_W {
+        if self.details && x >= w - PANE_W {
+            return Some(Hit::Pane);
+        }
+        if self.nav && x < SIDE_W {
             let i = ((y - TABS_H - BAR_H - CMD_H - 8.0) / 32.0).floor();
             return (i >= 0.0 && (i as usize) < self.side.len()).then_some(Hit::Side(i as usize));
         }
@@ -1561,7 +1826,7 @@ impl State {
         let scroll = self.t().scroll;
         let n = self.t().order.len();
         let (row, per) = match self.view {
-            View::Details => (ROW_H, 1),
+            View::Details => (self.row_h(), 1),
             View::Icons => (self.tile_h(), self.cols()),
         };
         // Group headings push rows down: start early enough, and take more.
@@ -1621,9 +1886,15 @@ impl State {
             })
             .collect();
         let side: Vec<Option<ID2D1Bitmap>> = (0..self.side.len()).map(|i| self.side_icon(i)).collect();
+        // The details pane's big picture of the one thing selected.
+        let one = match self.t().selected()[..] {
+            [i] if self.details => Some(i),
+            _ => None,
+        };
+        let pane_icon = one.and_then(|i| self.icon_for(i, true));
         let hwnd = self.hwnd;
         let Some(mut gfx) = self.gfx.take() else { return };
-        appwin::paint(hwnd, &mut gfx, |p, f, w, h| self.draw(p, f, w, h, &icons, &side));
+        appwin::paint(hwnd, &mut gfx, |p, f, w, h| self.draw(p, f, w, h, &icons, &side, &pane_icon));
         self.gfx = Some(gfx);
     }
 
@@ -1636,6 +1907,7 @@ impl State {
         h: f32,
         icons: &[(usize, Option<ID2D1Bitmap>)],
         side: &[Option<ID2D1Bitmap>],
+        pane_icon: &Option<ID2D1Bitmap>,
     ) {
         let accent = theme::accent();
         let hov = self.hovered;
@@ -1713,7 +1985,7 @@ impl State {
         // each reads as one box (not a box in a box).
         let (ax, aw, sw) = self.box_layout(w);
         let field = Color(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0);
-        let addr_lit = matches!(hov, Some(Hit::Address) | Some(Hit::Crumb(_)));
+        let addr_lit = matches!(hov, Some(Hit::Address) | Some(Hit::Crumb(_)) | Some(Hit::CrumbMenu(_)));
         p.rrect(ax, TABS_H + 7.0, aw, 30.0, 5.0, field);
         p.stroke_rrect(
             ax + 0.5,
@@ -1740,6 +2012,9 @@ impl State {
                     p.rrect(*cx, TABS_H + 10.0, *cwid, 24.0, 4.0, Color::white(0.08));
                 }
                 let last = n + 1 == layout.len();
+                if hov == Some(Hit::CrumbMenu(*i)) {
+                    p.rrect(*cx + *cwid, TABS_H + 10.0, 14.0, 24.0, 4.0, Color::white(0.08));
+                }
                 p.text(
                     &parts[*i].0,
                     &f.body,
@@ -1750,9 +2025,7 @@ impl State {
                     Align::Left,
                     Color::white(if last { 0.95 } else { 0.78 }),
                 );
-                if !last {
-                    glyph_at(0xE76C, cx + cwid + 1.0, TABS_H + 17.0, 10.0, Color::white(0.5));
-                }
+                glyph_at(0xE76C, cx + cwid + 1.0, TABS_H + 17.0, 10.0, Color::white(if last { 0.3 } else { 0.5 }));
             }
         }
         // Commands.
@@ -1783,8 +2056,10 @@ impl State {
         }
         // Sidebar.
         let y0 = TABS_H + BAR_H + CMD_H;
-        p.rrect(0.0, y0, SIDE_W, h - y0, 0.0, Color(0.11, 0.11, 0.115, 1.0));
-        for (i, (g, name, loc)) in self.side.iter().enumerate() {
+        if self.nav {
+            p.rrect(0.0, y0, SIDE_W, h - y0, 0.0, Color(0.11, 0.11, 0.115, 1.0));
+        }
+        for (i, (g, name, loc)) in self.side.iter().enumerate().filter(|_| self.nav) {
             let y = y0 + 8.0 + i as f32 * 32.0;
             let on = *loc == t.loc;
             if on || hov == Some(Hit::Side(i)) {
@@ -1860,7 +2135,7 @@ impl State {
         // Group headings (Group by), above each group's first row.
         if self.view == View::Details {
             for (k, (pos, name, count)) in t.heads.iter().enumerate() {
-                let hy = top + *pos as f32 * ROW_H + k as f32 * GROUP_H - scroll;
+                let hy = top + *pos as f32 * self.row_h() + k as f32 * GROUP_H - scroll;
                 if hy + GROUP_H < top || hy > cy0 + chh {
                     continue;
                 }
@@ -1892,7 +2167,7 @@ impl State {
             match self.view {
                 View::Details => {
                     if let Some(b) = bmp {
-                        p.image(b, ix + 8.0, iy + 6.0, 18.0, 18.0, alpha);
+                        p.image(b, ix + 8.0, iy + (ih - 18.0) / 2.0, 18.0, 18.0, alpha);
                     }
                     let nw = self.name_w(cw);
                     p.text(&item.name, &f.body, ix + 34.0, iy, nw - 40.0, ih, Align::Left, Color::white(0.95 * alpha));
@@ -1997,16 +2272,108 @@ impl State {
                 if bytes > 0 { format!(", {}", size_text(bytes)) } else { String::new() }
             );
         }
+        let side = self.side_w();
         p.text(
             &status,
             &f.small,
-            SIDE_W + 12.0,
+            side + 12.0,
             h - STATUS_H,
-            w - SIDE_W - 24.0,
+            w - side - 24.0,
             STATUS_H,
             Align::Left,
             Color::white(0.55),
         );
+        if self.details {
+            self.draw_pane(p, f, w, h, pane_icon);
+        }
+    }
+
+    /// The details pane: a big picture of what's selected (its thumbnail or
+    /// icon) with its name, kind, size, dates and where it is; or, with
+    /// several selected, how many and how big; or, with none, the folder.
+    fn draw_pane(&self, p: &Painter, f: &crate::gfx::Fonts, w: f32, h: f32, pic: &Option<ID2D1Bitmap>) {
+        let t = self.t();
+        let x = w - PANE_W;
+        let y0 = TABS_H + BAR_H + CMD_H;
+        p.rrect(x, y0, PANE_W, h - y0, 0.0, Color(0.11, 0.11, 0.115, 1.0));
+        p.line(x, y0, x, h, Color::white(0.07), 1.0);
+        let sel = t.selected();
+        let line = |label: &str, value: &str, y: &mut f32| {
+            if value.is_empty() {
+                return;
+            }
+            p.text(label, &f.small, x + 18.0, *y, PANE_W - 36.0, 16.0, Align::Left, Color::white(0.45));
+            let lines = ((p.measure(value, &f.small) * 1.1 / (PANE_W - 36.0)).ceil() as usize).clamp(1, 4) as f32;
+            p.text_wrap(value, &f.small, x + 18.0, *y + 16.0, PANE_W - 36.0, 16.0 * lines, Color::white(0.88));
+            *y += 22.0 + 16.0 * lines;
+        };
+        let mut y = y0 + 22.0;
+        match sel[..] {
+            [i] => {
+                let item = &t.items[i];
+                let box_h = 150.0;
+                let (bw, bh) = (PANE_W - 36.0, box_h);
+                p.rrect(x + 18.0, y, bw, bh, 8.0, Color::white(0.04));
+                if let Some(b) = pic {
+                    let s = 96.0f32.min(bh - 16.0);
+                    p.image(b, x + 18.0 + (bw - s) / 2.0, y + (bh - s) / 2.0, s, s, 1.0);
+                }
+                y += bh + 14.0;
+                p.text_wrap(&item.name, &f.body, x + 18.0, y, PANE_W - 36.0, 44.0, Color::white(0.95));
+                y += 46.0;
+                let size = match (item.size, item.space) {
+                    (_, Some((free, total))) => format!("{} free of {}", size_text(free), size_text(total)),
+                    (Some(s), _) => size_text(s),
+                    _ => String::new(),
+                };
+                line("Type", &item.kind, &mut y);
+                line(if item.folder { "Contents" } else { "Size" }, &size, &mut y);
+                line("Date modified", &item.date, &mut y);
+                if let Some(dir) = std::path::Path::new(&item.path).parent().filter(|_| !item.path.starts_with("::")) {
+                    line("Location", &dir.to_string_lossy(), &mut y);
+                }
+            }
+            [] => {
+                let n = t.order.len();
+                p.text(&t.loc.title(), &f.body, x + 18.0, y, PANE_W - 36.0, 28.0, Align::Left, Color::white(0.95));
+                y += 40.0;
+                line("Items", &format!("{n}"), &mut y);
+                let files: u64 = t.items.iter().filter(|i| !i.folder).filter_map(|i| i.size).sum();
+                if files > 0 {
+                    line("Files' size", &size_text(files), &mut y);
+                }
+                p.text(
+                    "Select a file to see its details.",
+                    &f.small,
+                    x + 18.0,
+                    y + 6.0,
+                    PANE_W - 36.0,
+                    20.0,
+                    Align::Left,
+                    Color::white(0.4),
+                );
+            }
+            _ => {
+                let bytes: u64 = sel.iter().filter_map(|&i| t.items[i].size).sum();
+                p.text(
+                    &format!("{} items selected", sel.len()),
+                    &f.body,
+                    x + 18.0,
+                    y,
+                    PANE_W - 36.0,
+                    28.0,
+                    Align::Left,
+                    Color::white(0.95),
+                );
+                y += 40.0;
+                if bytes > 0 {
+                    line("Total size", &size_text(bytes), &mut y);
+                }
+                let folders = sel.iter().filter(|&&i| t.items[i].folder).count();
+                line("Folders", &format!("{folders}"), &mut y);
+                line("Files", &format!("{}", sel.len() - folders), &mut y);
+            }
+        }
     }
 
     /// The address box's x and width, and the search box's width.
@@ -2107,6 +2474,7 @@ impl State {
                     }
                 }
             }
+            Some(Hit::CrumbMenu(i)) => self.crumb_menu(i),
             Some(Hit::Address) => self.focus_addr(),
             Some(Hit::Item(pos)) => {
                 let i = self.t().order[pos];
@@ -2153,7 +2521,7 @@ impl State {
                     SetCapture(self.hwnd);
                 }
             }
-            None => {}
+            Some(Hit::Pane) | None => {}
         }
         appwin::redraw(self.hwnd);
     }
@@ -2237,6 +2605,8 @@ impl State {
                 self.background_menu();
             }
             Some(Hit::Side(i)) => self.side_menu(i),
+            Some(Hit::Back) => self.history_menu(true),
+            Some(Hit::Forward) => self.history_menu(false),
             Some(Hit::Tab(i)) | Some(Hit::TabClose(i)) => {
                 use crate::menu::{item, show, Place};
                 match show(
@@ -2308,8 +2678,9 @@ impl State {
             return;
         }
         let m = self.max_scroll();
+        let row = if self.view == View::Details { self.row_h() } else { ROW_H };
         let t = self.tab();
-        t.scroll = (t.scroll - delta as f32 / 120.0 * ROW_H * 3.0).clamp(0.0, m);
+        t.scroll = (t.scroll - delta as f32 / 120.0 * row * 3.0).clamp(0.0, m);
         appwin::redraw(self.hwnd);
     }
 
@@ -2327,6 +2698,10 @@ impl State {
             VK_RIGHT if alt => self.forward(),
             VK_UP if alt => self.up(),
             VK_F2 => self.start_rename(),
+            VK_P if alt && shift => {
+                self.details = !self.details;
+                self.remember();
+            }
             VK_F5 => self.refresh(),
             VK_DELETE => self.delete(shift),
             VK_F4 => self.focus_addr(),
@@ -2341,7 +2716,7 @@ impl State {
             }
             VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT | VK_HOME | VK_END | VK_PRIOR | VK_NEXT if n > 0 => {
                 let per = if self.view == View::Icons { self.cols() as isize } else { 1 };
-                let page = ((self.content().3 / ROW_H) as isize).max(1);
+                let page = ((self.content().3 / self.row_h()) as isize).max(1);
                 let at = self.t().anchor.map_or(-1, |a| a as isize);
                 let step = match k {
                     VK_UP => -per,
@@ -2372,6 +2747,8 @@ impl State {
                 0xBB | 0x6B => self.zoom_icons(true),
                 0xBD | 0x6D => self.zoom_icons(false),
                 b'R' => self.refresh(),
+                b'Z' => self.undo(),
+                b'Y' => self.redo_last(),
                 b'D' => self.delete(false),
                 b'E' => unsafe {
                     let _ = SetFocus(Some(self.search));
@@ -2967,6 +3344,7 @@ pub fn run(start: Option<String>) {
         let target: IDropTarget = DropHere.into();
         let _ = RegisterDragDrop(hwnd, &target);
         let store = ViewStore::load();
+        filesio::set_ext_mode(store.exts);
         let pins = store.pins.clone().unwrap_or_else(default_pins);
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
@@ -3002,6 +3380,12 @@ pub fn run(start: Option<String>) {
                 icon_scale: store.scale.unwrap_or(1.0),
                 refresh_at: None,
                 pin_n: pins.len(),
+                nav: !store.hide_nav,
+                details: store.details,
+                compact: store.compact,
+                exts: store.exts,
+                undo: Vec::new(),
+                redo: Vec::new(),
                 store,
             })
         });
@@ -3033,6 +3417,10 @@ mod tests {
         store.hidden = true;
         store.cols = Some([150.0, 160.0, 90.0]);
         store.name = Some(320.0);
+        store.hide_nav = true;
+        store.details = true;
+        store.compact = true;
+        store.exts = 1;
         let key = folder_key(&Loc::Path("C:\\Users\\You\\Downloads\\".into())).unwrap();
         assert_eq!(key, "c:\\users\\you\\downloads");
         store.folders.insert(key.clone(), FolderView { view: View::Icons, sort: (1, false), group: 2 });
@@ -3040,6 +3428,11 @@ mod tests {
         assert!(back.hidden);
         assert_eq!(back.cols, Some([150.0, 160.0, 90.0]));
         assert_eq!(back.name, Some(320.0));
+        assert!(back.hide_nav && back.details && back.compact);
+        assert_eq!(back.exts, 1);
+        // Nothing saved: the navigation pane shows, the rest is off.
+        let plain = ViewStore::parse("");
+        assert!(!plain.hide_nav && !plain.details && !plain.compact && plain.exts == 0);
         assert!(back.folders.get(&key) == Some(&FolderView { view: View::Icons, sort: (1, false), group: 2 }));
         // Search results aren't remembered; nonsense lines are skipped.
         assert!(folder_key(&Loc::Search("C:\\".into(), "x".into())).is_none());
