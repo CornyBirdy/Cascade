@@ -31,6 +31,9 @@ struct Frame {
 
 static LATEST: Mutex<Option<Frame>> = Mutex::new(None);
 
+/// The picture sizes the running camera offers, biggest first.
+static SIZES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
 /// The cameras there are: their names and activators.
 fn cameras() -> Vec<(String, IMFActivate)> {
     let mut out = Vec::new();
@@ -68,7 +71,7 @@ fn cameras() -> Vec<(String, IMFActivate)> {
 
 /// Reads camera `index` until `stop`, putting each frame in LATEST and
 /// telling the window.
-fn capture(index: usize, stop: Arc<AtomicBool>, hwnd: isize) -> Result<(), String> {
+fn capture(index: usize, want: Option<(u32, u32)>, stop: Arc<AtomicBool>, hwnd: isize) -> Result<(), String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
@@ -85,6 +88,37 @@ fn capture(index: usize, stop: Arc<AtomicBool>, hwnd: isize) -> Result<(), Strin
         let _ = ty.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video);
         let _ = ty.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        // What the camera can do: its sizes (for the settings), and the type for the one asked for
+        // (of those, the one with the most frames a second).
+        let mut modes: Vec<(u32, u32, f64, IMFMediaType)> = Vec::new();
+        for i in 0.. {
+            let Ok(t) = reader.GetNativeMediaType(stream, i) else { break };
+            let Ok(size) = t.GetUINT64(&MF_MT_FRAME_SIZE) else { continue };
+            let fps = t.GetUINT64(&MF_MT_FRAME_RATE).map_or(30.0, |r| {
+                let (n, d) = ((r >> 32) as f64, (r & 0xFFFF_FFFF) as f64);
+                if d > 0.0 {
+                    n / d
+                } else {
+                    30.0
+                }
+            });
+            modes.push(((size >> 32) as u32, (size & 0xFFFF_FFFF) as u32, fps, t));
+        }
+        let mut sizes: Vec<(u32, u32)> = modes.iter().map(|m| (m.0, m.1)).collect();
+        sizes.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)).then(b.cmp(a)));
+        sizes.dedup();
+        *SIZES.lock().unwrap_or_else(|e| e.into_inner()) = sizes;
+        if let Some((ww, wh)) = want {
+            let pick = modes
+                .iter()
+                .filter(|m| (m.0, m.1) == (ww, wh))
+                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(m) = pick {
+                if reader.SetCurrentMediaType(stream, None, &m.3).is_err() {
+                    crate::config::log(&format!("camera: {ww}x{wh} wasn't taken, using the camera's own pick"));
+                }
+            }
+        }
         reader.SetCurrentMediaType(stream, None, &ty).map_err(|e| e.to_string())?;
         let cur = reader.GetCurrentMediaType(stream).map_err(|e| e.to_string())?;
         let size = cur.GetUINT64(&MF_MT_FRAME_SIZE).map_err(|e| e.to_string())?;
@@ -158,8 +192,15 @@ struct Camera {
     mirror: bool,
     video_mode: bool,
     clip: Option<(Clip, Arc<Shared>)>,
-    timer: bool,
+    /// The self-timer's seconds (0 for none).
+    timer: u32,
     countdown: Option<Instant>,
+    /// The picture size asked for (None: the camera's own pick).
+    res: Option<(u32, u32)>,
+    /// Rule-of-thirds lines over the picture.
+    grid: bool,
+    /// Photos as JPEG instead of PNG.
+    jpeg: bool,
     last: Option<PathBuf>,
     flash: Option<Instant>,
     hwnd: HWND,
@@ -176,10 +217,10 @@ impl Camera {
             s.store(true, Ordering::Release);
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let (s, idx, hwnd) = (stop.clone(), self.index, self.hwnd.0 as isize);
+        let (s, idx, hwnd, res) = (stop.clone(), self.index, self.hwnd.0 as isize, self.res);
         self.error = None;
         std::thread::spawn(move || {
-            if let Err(e) = capture(idx, s, hwnd) {
+            if let Err(e) = capture(idx, res, s, hwnd) {
                 crate::config::log(&format!("camera: {e}"));
                 *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 ERROR.lock().map(|mut m| *m = Some(e)).ok();
@@ -200,7 +241,7 @@ impl Camera {
             }
         }
         let _ = std::fs::create_dir_all(camera_roll());
-        let path = camera_roll().join(super::stamped("Photo", "png"));
+        let path = camera_roll().join(super::stamped("Photo", if self.jpeg { "jpg" } else { "png" }));
         if unsafe { crate::snip::save_image(&path, &pixels, w as i32, h as i32) } {
             self.last = Some(path);
             self.flash = Some(Instant::now());
@@ -296,6 +337,67 @@ impl Camera {
         }
     }
 
+    /// The settings menu: the picture's size, the self-timer, a grid, the photo format.
+    fn settings(&mut self) {
+        use crate::menu::{check, item, show, sub, Entry, Place};
+        let sizes = SIZES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let recording = self.clip.is_some();
+        let mut quality = vec![check(100, "Automatic", self.res.is_none())];
+        for (i, (w, h)) in sizes.iter().enumerate() {
+            let tag = match h {
+                2160.. => " (4K)",
+                1440..=2159 => " (QHD)",
+                1080..=1439 => " (Full HD)",
+                720..=1079 => " (HD)",
+                _ => "",
+            };
+            quality.push(check(101 + i, format!("{w} \u{d7} {h}{tag}"), self.res == Some((*w, *h))));
+        }
+        let timer = |id: usize, s: u32| {
+            check(id, if s == 0 { "Off".to_string() } else { format!("{s} seconds") }, self.timer == s)
+        };
+        let mut entries = vec![
+            sub("Quality", quality),
+            sub("Self-timer", vec![timer(10, 0), timer(11, 3), timer(12, 5), timer(13, 10)]),
+            Entry::Separator,
+            check(20, "Grid", self.grid),
+            check(21, "Mirror the picture", self.mirror),
+            Entry::Separator,
+            sub("Photo format", vec![check(30, "PNG", !self.jpeg), check(31, "JPEG (smaller files)", self.jpeg)]),
+            Entry::Separator,
+            item(40, "Open the Camera Roll"),
+        ];
+        if recording {
+            // The picture size can't change in the middle of a video.
+            entries.remove(0);
+        }
+        match show(self.hwnd, entries, Place::Cursor) {
+            100 => self.set_res(None),
+            n @ 101..=199 => self.set_res(sizes.get(n - 101).copied()),
+            10 => self.timer = 0,
+            11 => self.timer = 3,
+            12 => self.timer = 5,
+            13 => self.timer = 10,
+            20 => self.grid = !self.grid,
+            21 => self.mirror = !self.mirror,
+            30 => self.jpeg = false,
+            31 => self.jpeg = true,
+            40 => crate::appwin::launch(&["--files", &camera_roll().to_string_lossy()]),
+            _ => {}
+        }
+    }
+
+    /// Restarts the camera at another picture size.
+    fn set_res(&mut self, res: Option<(u32, u32)>) {
+        if self.res == res || self.clip.is_some() {
+            return;
+        }
+        self.res = res;
+        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.bmp = None;
+        self.start();
+    }
+
     /// A new frame for the clip being made.
     fn write_frame(&mut self) {
         let Some((clip, shared)) = &self.clip else { return };
@@ -333,6 +435,7 @@ const MIRROR: u32 = 4;
 const TIMER: u32 = 5;
 const LAST: u32 = 6;
 const FOLDER: u32 = 7;
+const SETTINGS: u32 = 8;
 
 impl App for Camera {
     fn draw(&mut self, p: &Painter, f: &Fonts, w: f32, h: f32, kit: &mut Kit) {
@@ -359,6 +462,14 @@ impl App for Camera {
                 } else {
                     p.image(b, dx, dy, dw, dh, 1.0);
                 }
+                if self.grid {
+                    let line = Color::white(0.45);
+                    for n in 1..3 {
+                        let (gx, gy) = (dx + dw * n as f32 / 3.0, dy + dh * n as f32 / 3.0);
+                        p.line(gx, dy, gx, dy + dh, line, 1.0);
+                        p.line(dx, gy, dx + dw, gy, line, 1.0);
+                    }
+                }
             }
         } else {
             let msg = self.error.clone().unwrap_or_else(|| "Starting the camera\u{2026}".into());
@@ -371,7 +482,7 @@ impl App for Camera {
             }
         }
         if let Some(t) = self.countdown {
-            let left = 3.0 - t.elapsed().as_secs_f32();
+            let left = self.timer as f32 - t.elapsed().as_secs_f32();
             p.scaled(4.0, vw / 2.0, vh / 2.0, || {
                 p.text(
                     &format!("{}", left.ceil().max(1.0) as u32),
@@ -407,7 +518,11 @@ impl App for Camera {
             kit.round(p, f, cx, 40.0, 20.0, 0xE89E, Look::Plain, SWITCH);
         }
         kit.round(p, f, cx, 90.0, 20.0, 0xE8AB, if self.mirror { Look::Accent } else { Look::Plain }, MIRROR);
-        kit.round(p, f, cx, 140.0, 20.0, 0xE916, if self.timer { Look::Accent } else { Look::Plain }, TIMER);
+        kit.round(p, f, cx, 140.0, 20.0, 0xE916, if self.timer > 0 { Look::Accent } else { Look::Plain }, TIMER);
+        if self.timer > 0 {
+            p.text(&format!("{} s", self.timer), &f.small, vw, 164.0, side, 18.0, Align::Center, Color::white(0.6));
+        }
+        kit.round(p, f, cx, 200.0, 20.0, 0xE713, Look::Plain, SETTINGS);
         let mid = h / 2.0;
         kit.round(p, f, cx, mid - 64.0, 16.0, if self.video_mode { 0xE722 } else { 0xE714 }, Look::Plain, MODE);
         let recording = self.clip.is_some();
@@ -441,7 +556,7 @@ impl App for Camera {
     fn press(&mut self, id: u32, ctx: &Ctx) {
         match id {
             SHUTTER if self.video_mode => self.record(),
-            SHUTTER if self.timer => self.countdown = Some(Instant::now()),
+            SHUTTER if self.timer > 0 => self.countdown = Some(Instant::now()),
             SHUTTER => self.photo(),
             MODE if self.clip.is_none() => self.video_mode = !self.video_mode,
             SWITCH if self.clip.is_none() => {
@@ -451,7 +566,15 @@ impl App for Camera {
                 self.start();
             }
             MIRROR => self.mirror = !self.mirror,
-            TIMER => self.timer = !self.timer,
+            TIMER => {
+                self.timer = match self.timer {
+                    0 => 3,
+                    3 => 5,
+                    5 => 10,
+                    _ => 0,
+                }
+            }
+            SETTINGS => self.settings(),
             LAST => {
                 if let Some(p) = &self.last {
                     let flag = if p.extension().is_some_and(|e| e == "mp4") { "--player" } else { "--view" };
@@ -481,7 +604,7 @@ impl App for Camera {
     }
 
     fn tick(&mut self, _: &Ctx) -> bool {
-        if self.countdown.is_some_and(|t| t.elapsed() >= Duration::from_secs(3)) {
+        if self.countdown.is_some_and(|t| t.elapsed() >= Duration::from_secs(self.timer as u64)) {
             self.countdown = None;
             self.photo();
         }
@@ -537,8 +660,11 @@ pub fn run() {
             mirror: true,
             video_mode: false,
             clip: None,
-            timer: false,
+            timer: 0,
             countdown: None,
+            res: None,
+            grid: false,
+            jpeg: false,
             last: None,
             flash: None,
             hwnd: ctx.hwnd,

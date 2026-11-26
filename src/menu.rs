@@ -103,6 +103,8 @@ const MAX_COLS: usize = 3;
 /// What an icon takes in front of an item's text.
 const ICON_W: f32 = 26.0;
 const FILTER_H: f32 = 40.0;
+/// Past this many items a list is one scrolling column, not several.
+const COLS_UP_TO: usize = 80;
 /// From this many items, a filter box.
 const FILTER_FROM: usize = 15;
 const MIN_W: f32 = 180.0;
@@ -459,7 +461,8 @@ impl State {
         let limit = MAX_H.min(room);
         // Too tall for the screen: the list runs on into more columns beside
         // (not for a drop-down under its control, which scrolls).
-        if min_w == 0.0 && full > limit {
+        // (A long list of choices, as the apps to uninstall, scrolls in one column, with its filter.)
+        if min_w == 0.0 && full > limit && items <= COLS_UP_TO {
             let fit = (((work.right - work.left) as f32 / k - 24.0) / w).floor().max(1.0) as usize;
             panel.cols = ((full / limit).ceil() as usize).clamp(1, MAX_COLS).min(fit);
             panel.w = w * panel.cols as f32;

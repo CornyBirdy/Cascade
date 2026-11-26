@@ -4,6 +4,13 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-26
+
+**New**
+- **Camera settings**: a gear button opens a menu with the picture's size (Quality: every size the camera offers, up to 4K, or Automatic), the self-timer's length (off, 3, 5 or 10 seconds; the timer button steps through them too), a rule-of-thirds grid, mirroring, and photos as PNG or smaller JPEG files.
+- **Uninstall an app, reworked** (Settings > Apps): the list shows who made each app and how big it is, Store apps are marked, and it's one column that scrolls with the filter box (hundreds of apps no longer spill into three columns). Components Windows won't let you remove aren't listed, installers that say "install" are turned into uninstalls, and Cascade tells you when the app is gone.
+- **Startup apps** stay open after a switch, so several can be turned on or off in one go.
+
 ## 2026-11-23
 
 **New**

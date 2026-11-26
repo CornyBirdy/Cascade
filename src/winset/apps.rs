@@ -16,12 +16,15 @@ use crate::{config, msg};
 /// Something that can be uninstalled.
 struct Installed {
     name: String,
+    /// Who made it and how big it is, shown beside its name.
+    hint: String,
     how: Remove,
 }
 
 enum Remove {
-    /// A desktop program's own uninstaller (its command).
-    Command(String),
+    /// A desktop program's own uninstaller (its command) and the registry key
+    /// it's listed under (which goes when it has been uninstalled).
+    Command(String, HKEY, String, REG_SAM_FLAGS),
     /// A Store app's package (its full name).
     Package(String),
 }
@@ -38,33 +41,45 @@ fn programs() -> Vec<Installed> {
     ] {
         for sub in subkeys(root, UNINSTALL, access) {
             let key = format!("{UNINSTALL}\\{sub}");
-            let read = |v: &str| -> Option<String> {
-                // (Opened through the right view for 32-bit programs.)
-                unsafe {
-                    let mut h = HKEY::default();
-                    if RegOpenKeyExW(root, &HSTRING::from(key.as_str()), Some(0), KEY_READ | access, &mut h)
-                        != windows::Win32::Foundation::ERROR_SUCCESS
-                    {
-                        return None;
-                    }
-                    let r = reg_text(h, "", v);
-                    let _ = RegCloseKey(h);
-                    r
-                }
+            // (Opened through the right view for 32-bit programs.)
+            let mut h = HKEY::default();
+            let opened = unsafe {
+                RegOpenKeyExW(root, &HSTRING::from(key.as_str()), Some(0), KEY_READ | access, &mut h)
+                    == windows::Win32::Foundation::ERROR_SUCCESS
             };
-            let Some(name) = read("DisplayName").filter(|n| !n.trim().is_empty()) else { continue };
-            // Parts of other programs, updates and Windows' own components aren't listed by Windows either.
-            if read("ParentKeyName").is_some() || read("ReleaseType").is_some_and(|t| t.contains("Update")) {
+            if !opened {
                 continue;
             }
-            if reg_dword(root, &key, "SystemComponent") == Some(1) && access == REG_SAM_FLAGS(0) {
+            let read = |v: &str| reg_text(h, "", v).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            let name = read("DisplayName");
+            let cmd = read("UninstallString");
+            let publisher = read("Publisher");
+            let release = read("ReleaseType");
+            let parent = read("ParentKeyName");
+            let system = reg_dword(h, "", "SystemComponent") == Some(1);
+            let no_remove = reg_dword(h, "", "NoRemove") == Some(1);
+            let kb = reg_dword(h, "", "EstimatedSize").unwrap_or(0);
+            unsafe {
+                let _ = RegCloseKey(h);
+            }
+            let (Some(name), Some(cmd)) = (name, cmd) else { continue };
+            // Parts of other programs, updates and Windows' own components aren't listed by Windows either,
+            // nor are the ones that say they can't be removed.
+            if parent.is_some() || release.is_some_and(|t| t.contains("Update")) || no_remove {
                 continue;
             }
-            let Some(cmd) = read("UninstallString").filter(|c| !c.trim().is_empty()) else { continue };
+            if system && root == HKEY_CURRENT_USER {
+                continue;
+            }
             if out.iter().any(|o| o.name == name) {
                 continue;
             }
-            out.push(Installed { name, how: Remove::Command(cmd) });
+            let hint = [publisher, (kb > 0).then(|| size_text(kb as u64 * 1024))]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("  \u{b7}  ");
+            out.push(Installed { name, hint, how: Remove::Command(cmd, root, key, access) });
         }
     }
     out
@@ -87,11 +102,51 @@ fn packages() -> Vec<Installed> {
             if name.is_empty() || name.starts_with("ms-resource:") {
                 continue;
             }
-            out.push(Installed { name, how: Remove::Package(p.Id()?.FullName()?.to_string()) });
+            out.push(Installed {
+                name,
+                hint: "Store app".into(),
+                how: Remove::Package(p.Id()?.FullName()?.to_string()),
+            });
         }
         Ok(out)
     };
     get().unwrap_or_default()
+}
+
+/// "1.4 GB", "230 MB".
+fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else if mb >= 1.0 {
+        format!("{} MB", mb.round() as u64)
+    } else {
+        format!("{} KB", (bytes / 1024).max(1))
+    }
+}
+
+/// Whether the registry key still exists.
+fn key_exists(root: HKEY, key: &str, access: REG_SAM_FLAGS) -> bool {
+    unsafe {
+        let mut h = HKEY::default();
+        let ok = RegOpenKeyExW(root, &HSTRING::from(key), Some(0), KEY_READ | access, &mut h)
+            == windows::Win32::Foundation::ERROR_SUCCESS;
+        if ok {
+            let _ = RegCloseKey(h);
+        }
+        ok
+    }
+}
+
+/// Windows lists an installer's command as "install" (`MsiExec /I{...}`); removing is `/X`.
+fn removal_command(cmd: &str) -> String {
+    let lower = cmd.to_lowercase();
+    if lower.contains("msiexec") {
+        if let Some(i) = lower.find("/i{") {
+            return format!("{}/X{}", &cmd[..i], &cmd[i + 2..]);
+        }
+    }
+    cmd.to_string()
 }
 
 pub fn pick_uninstall(owner: HWND) {
@@ -99,19 +154,54 @@ pub fn pick_uninstall(owner: HWND) {
     all.extend(packages());
     all.sort_by_key(|a| a.name.to_lowercase());
     all.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
-    let names: Vec<String> = all.iter().map(|a| a.name.clone()).collect();
-    let Some(i) = super::pick(owner, &names, None) else { return };
+    if all.is_empty() {
+        super::tell("No apps to uninstall were found.".into());
+        return;
+    }
+    // Their names with who made them and how big they are on the right; type to filter.
+    let entries = all
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            crate::menu::Entry::Item(crate::menu::Item {
+                id: i + 1,
+                text: a.name.clone(),
+                hint: a.hint.clone(),
+                enabled: true,
+                ..Default::default()
+            })
+        })
+        .collect();
+    let Some(i) = crate::menu::show(owner, entries, crate::menu::Place::Cursor).checked_sub(1) else { return };
     let app = all.swap_remove(i);
-    if !confirm(owner, &format!("Uninstall {}?", app.name)) {
+    let detail = if app.hint.is_empty() { String::new() } else { format!("\n\n{}", app.hint) };
+    if !confirm(owner, &format!("Uninstall {}?{detail}", app.name)) {
         return;
     }
     match app.how {
-        Remove::Command(cmd) => {
+        Remove::Command(cmd, root, key, access) => {
             let is_file = |p: &str| Path::new(p).is_file();
+            let cmd = removal_command(&cmd);
             let (exe, args) = crate::shellmode::split_command(&crate::shellmode::expand_env(&cmd), &is_file);
             // Uninstallers mostly need admin rights: Windows asks.
             crate::shell::launch_admin(&exe, &args);
             config::log(&format!("apps: uninstalling {} with {exe} {args}", app.name));
+            // The program's entry goes when it's gone: tell the user then.
+            let name = app.name.clone();
+            let (root, access) = (root.0 as isize, access.0);
+            std::thread::spawn(move || {
+                let root = HKEY(root as *mut core::ffi::c_void);
+                let access = REG_SAM_FLAGS(access);
+                // Give the uninstaller a moment to start (the entry is there while it asks).
+                for _ in 0..300 {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    if !key_exists(root, &key, access) {
+                        config::log(&format!("apps: {name} is gone"));
+                        msg::note(format!("{name} was uninstalled"));
+                        return;
+                    }
+                }
+            });
         }
         Remove::Package(full) => {
             let name = app.name.clone();
@@ -181,23 +271,29 @@ pub fn pick_startup(owner: HWND) {
         super::tell("Nothing is set to start with Windows.".into());
         return;
     }
-    // Ticked: starts with Windows. Picking one flips it.
+    // Ticked: starts with Windows. Picking one flips it, and the list stays so several can be changed.
+    let mut at = windows::Win32::Foundation::POINT::default();
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::*;
-        let Ok(menu) = CreatePopupMenu() else { return };
-        for (i, (name, list, _)) in apps.iter().enumerate() {
-            let on = !crate::shellmode::startup_disabled(list, name);
-            let flags = if on { MF_STRING | MF_CHECKED } else { MF_STRING };
-            let label = name.trim_end_matches(".lnk");
-            let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(label));
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut at);
+    }
+    let mut place = crate::menu::Place::Cursor;
+    loop {
+        let entries = apps
+            .iter()
+            .enumerate()
+            .map(|(i, (name, list, _))| {
+                let on = !crate::shellmode::startup_disabled(list, name);
+                crate::menu::check(i + 1, name.trim_end_matches(".lnk"), on)
+            })
+            .collect();
+        let id = crate::menu::show(owner, entries, place);
+        if id == 0 {
+            break;
         }
-        let id = crate::menu::track(owner, menu, crate::menu::Place::Cursor);
-        let _ = DestroyMenu(menu);
-        if id > 0 {
-            let (name, list, root) = &apps[id - 1];
-            let on = !crate::shellmode::startup_disabled(list, name);
-            set_startup(name, list, *root, !on);
-            super::changed();
-        }
+        let (name, list, root) = &apps[id - 1];
+        let on = !crate::shellmode::startup_disabled(list, name);
+        set_startup(name, list, *root, !on);
+        super::changed();
+        place = crate::menu::Place::Centre(at);
     }
 }
