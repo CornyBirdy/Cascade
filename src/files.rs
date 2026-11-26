@@ -70,14 +70,14 @@ const DEFAULT_VIEW: FolderView = FolderView { view: View::Details, sort: (0, tru
 /// What Files remembers between runs, in `files_view.ini` beside the config:
 /// each folder's view, sorting and grouping (as Explorer keeps them per
 /// folder), and, for every folder, hidden items and the columns' widths.
-/// Lines: `hidden=1`, `cols=170,170,100`, `name=300` (0 = takes the rest) and
+/// Lines: `hidden=1`, `colfrac=0.4,0.2,0.2,0.2` (each column's share of the width) and
 /// `f|<folder, lower case>|details|<sort column>|<ascending>|<group>`.
 #[derive(Default)]
 struct ViewStore {
     folders: HashMap<String, FolderView>,
     hidden: bool,
-    cols: Option<[f32; 3]>,
-    name: Option<f32>,
+    /// Each column's share of the width (Name, Date modified, Type, Size).
+    cols: Option<[f32; 4]>,
     /// How big icons are drawn in Icons view (1 = medium).
     scale: Option<f32>,
     /// The folders pinned in the sidebar (None: the usual six).
@@ -89,6 +89,46 @@ struct ViewStore {
     details: bool,
     compact: bool,
     exts: u8,
+}
+
+/// The narrowest each column goes (Name, Date modified, Type, Size).
+const COL_MIN: [f32; 4] = [120.0, 80.0, 70.0, 90.0];
+
+/// The columns' usual shares of the width.
+const COL_SHARES: [f32; 4] = [0.40, 0.22, 0.18, 0.20];
+
+/// `shares` scaled to add up to 1, or nothing if they aren't sensible.
+fn normalised(shares: [f32; 4]) -> Option<[f32; 4]> {
+    let sum: f32 = shares.iter().sum();
+    (shares.iter().all(|s| s.is_finite() && *s > 0.0) && sum > 0.0).then(|| shares.map(|s| s / sum))
+}
+
+/// Widths for `shares` over `total` px: each its share, none under its
+/// minimum, the rest of them giving way for that so they still add up to
+/// `total` (as far as the minimums allow).
+fn fit_columns(shares: [f32; 4], total: f32) -> [f32; 4] {
+    let mut w = shares.map(|s| s * total);
+    for _ in 0..4 {
+        let mut short = 0.0;
+        for (x, m) in w.iter_mut().zip(COL_MIN) {
+            if *x < m {
+                short += m - *x;
+                *x = m;
+            }
+        }
+        if short <= 0.01 {
+            break;
+        }
+        // Those with room to spare pay for it, in proportion to the room.
+        let room: f32 = w.iter().zip(COL_MIN).map(|(x, m)| x - m).sum();
+        if room <= 0.0 {
+            break;
+        }
+        for (x, m) in w.iter_mut().zip(COL_MIN) {
+            *x -= short * (*x - m) / room;
+        }
+    }
+    w
 }
 
 fn store_path() -> std::path::PathBuf {
@@ -112,13 +152,11 @@ impl ViewStore {
             let line = line.trim();
             if let Some(v) = line.strip_prefix("hidden=") {
                 s.hidden = v.trim() == "1";
-            } else if let Some(v) = line.strip_prefix("cols=") {
+            } else if let Some(v) = line.strip_prefix("colfrac=") {
                 let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                if let [a, b, c] = n[..] {
-                    s.cols = Some([a.clamp(60.0, 600.0), b.clamp(60.0, 600.0), c.clamp(60.0, 600.0)]);
+                if let [a, b, c, d] = n[..] {
+                    s.cols = normalised([a, b, c, d]);
                 }
-            } else if let Some(v) = line.strip_prefix("name=") {
-                s.name = v.trim().parse::<f32>().ok().filter(|n| *n >= 120.0).map(|n| n.min(1400.0));
             } else if let Some(v) = line.strip_prefix("scale=") {
                 s.scale =
                     v.trim().parse::<f32>().ok().map(|n| n.clamp(ICON_STEPS[0], ICON_STEPS[ICON_STEPS.len() - 1]));
@@ -155,9 +193,8 @@ impl ViewStore {
         let mut out = String::from("# Files: how each folder is shown. Written by Cascade.\n");
         out.push_str(&format!("hidden={}\n", self.hidden as u8));
         if let Some(c) = self.cols {
-            out.push_str(&format!("cols={},{},{}\n", c[0], c[1], c[2]));
+            out.push_str(&format!("colfrac={},{},{},{}\n", c[0], c[1], c[2], c[3]));
         }
-        out.push_str(&format!("name={}\n", self.name.unwrap_or(0.0)));
         out.push_str(&format!("nav={}\n", !self.hide_nav as u8));
         out.push_str(&format!("details={}\n", self.details as u8));
         out.push_str(&format!("compact={}\n", self.compact as u8));
@@ -378,12 +415,10 @@ struct State {
     side: Vec<(char, String, Loc)>,
     typed: (String, Instant),
     gfx_generation: u32,
-    /// The Date modified, Type and Size columns' widths (Name takes the rest),
-    /// and a column edge being dragged: (column, where the drag began, its width then).
-    col_w: [f32; 3],
-    col_drag: Option<(usize, f32, f32)>,
-    /// The Name column's width once its edge has been dragged (else it takes what's left).
-    name_fixed: Option<f32>,
+    /// Each column's share of the width (Name, Date modified, Type, Size), and
+    /// an edge being dragged: (column, where the drag began, the widths then).
+    col_share: [f32; 4],
+    col_drag: Option<(usize, f32, [f32; 4])>,
     /// The address box is being typed in (else the path shows as parts to click).
     editing_addr: bool,
     /// Group by: 0 none, 1 type, 2 date modified, 3 size.
@@ -663,13 +698,15 @@ impl State {
         self.t().heads.partition_point(|h| h.0 <= pos)
     }
 
-    /// Column `i`'s width (Name, 0, takes what the others leave).
+    /// Column `i`'s width.
     fn col_width(&self, i: usize, cw: f32) -> f32 {
-        if i == 0 {
-            self.name_w(cw)
-        } else {
-            self.col_w[i - 1]
-        }
+        self.col_widths(cw)[i]
+    }
+
+    /// The four columns' widths: they always fill the row, whatever the
+    /// window's width, each keeping its share (and its minimum).
+    fn col_widths(&self, cw: f32) -> [f32; 4] {
+        fit_columns(self.col_share, (cw - 24.0).max(COL_MIN.iter().sum()))
     }
 
     fn max_scroll(&self) -> f32 {
@@ -710,9 +747,8 @@ impl State {
             }
         }
         self.store.hidden = self.show_hidden;
-        self.store.cols = Some(self.col_w);
+        self.store.cols = Some(self.col_share);
         self.store.scale = Some(self.icon_scale);
-        self.store.name = self.name_fixed;
         self.store.hide_nav = !self.nav;
         self.store.details = self.details;
         self.store.compact = self.compact;
@@ -1787,7 +1823,8 @@ impl State {
             for i in 0..COLS.len() {
                 let cwid = self.col_width(i, cw);
                 // The edge after a column: drag it to make the column wider or narrower.
-                if (x - (cx + cwid)).abs() < 5.0 {
+                // (The last column's edge is the row's end: nothing to drag there.)
+                if i + 1 < COLS.len() && (x - (cx + cwid)).abs() < 5.0 {
                     return Some(Hit::HeaderEdge(i));
                 }
                 if x < cx + cwid {
@@ -1801,7 +1838,7 @@ impl State {
         for pos in self.visible() {
             let (ix, iy, iw, ih) = self.item_rect(pos);
             let iy = iy - scroll;
-            let iw = if self.view == View::Details { self.name_w(cw) + 440.0 } else { iw };
+            let iw = if self.view == View::Details { cw - 24.0 } else { iw };
             if x >= ix && x < ix + iw && y >= iy && y < iy + ih {
                 return Some(Hit::Item(pos));
             }
@@ -1809,9 +1846,9 @@ impl State {
         Some(Hit::Empty)
     }
 
-    /// The Name column's width: as dragged, or what the other columns leave.
+    /// The Name column's width.
     fn name_w(&self, cw: f32) -> f32 {
-        self.name_fixed.unwrap_or_else(|| (cw - 24.0 - self.col_w.iter().sum::<f32>()).max(160.0))
+        self.col_widths(cw)[0]
     }
 
     fn tab_w(&self, w: f32) -> f32 {
@@ -2169,7 +2206,8 @@ impl State {
                     if let Some(b) = bmp {
                         p.image(b, ix + 8.0, iy + (ih - 18.0) / 2.0, 18.0, 18.0, alpha);
                     }
-                    let nw = self.name_w(cw);
+                    let widths = self.col_widths(cw);
+                    let nw = widths[0];
                     p.text(&item.name, &f.body, ix + 34.0, iy, nw - 40.0, ih, Align::Left, Color::white(0.95 * alpha));
                     let mut cx = ix + nw;
                     let size = match (item.size, item.space) {
@@ -2178,7 +2216,7 @@ impl State {
                         _ => String::new(),
                     };
                     for (k, text) in [&item.date, &item.kind, &size].iter().enumerate() {
-                        let cwid = self.col_w[k];
+                        let cwid = widths[k + 1];
                         if k == 2 {
                             // TreeSize's bars: a folder's share of the biggest here; a drive's fill.
                             let (bx, bw) = (cx + 8.0, cwid - 14.0);
@@ -2462,7 +2500,7 @@ impl State {
             }
             Some(Hit::HeaderEdge(i)) => {
                 let (_, _, cw, _) = self.content();
-                self.col_drag = Some((i, x, self.col_width(i, cw)));
+                self.col_drag = Some((i, x, self.col_widths(cw)));
                 unsafe {
                     SetCapture(self.hwnd);
                 }
@@ -2527,11 +2565,17 @@ impl State {
     }
 
     fn on_move(&mut self, x: f32, y: f32) {
-        if let Some((i, from, width)) = self.col_drag {
-            if i == 0 {
-                self.name_fixed = Some((width + x - from).clamp(120.0, 1400.0));
-            } else {
-                self.col_w[i - 1] = (width + x - from).clamp(60.0, 600.0);
+        if let Some((i, from, start)) = self.col_drag {
+            // The column and the one after it share what they had between
+            // them: widening one narrows the other, and the rest stay put.
+            if i + 1 < start.len() {
+                let pair = start[i] + start[i + 1];
+                let mut w = start;
+                w[i] = (start[i] + x - from).clamp(COL_MIN[i], (pair - COL_MIN[i + 1]).max(COL_MIN[i]));
+                w[i + 1] = pair - w[i];
+                if let Some(shares) = normalised(w) {
+                    self.col_share = shares;
+                }
             }
             appwin::redraw(self.hwnd);
             return;
@@ -3371,9 +3415,8 @@ pub fn run(start: Option<String>) {
                 last_click: None,
                 side: sidebar(&pins),
                 typed: (String::new(), Instant::now()),
-                col_w: store.cols.unwrap_or([COLS[1].1, COLS[2].1, COLS[3].1]),
+                col_share: store.cols.unwrap_or(COL_SHARES),
                 col_drag: None,
-                name_fixed: store.name,
                 editing_addr: false,
                 group: 0,
                 measure: crate::gfx::Measure::new().ok(),
@@ -3415,8 +3458,7 @@ mod tests {
     fn remembers_how_folders_are_shown() {
         let mut store = ViewStore::default();
         store.hidden = true;
-        store.cols = Some([150.0, 160.0, 90.0]);
-        store.name = Some(320.0);
+        store.cols = Some([0.4, 0.2, 0.2, 0.2]);
         store.hide_nav = true;
         store.details = true;
         store.compact = true;
@@ -3426,8 +3468,7 @@ mod tests {
         store.folders.insert(key.clone(), FolderView { view: View::Icons, sort: (1, false), group: 2 });
         let back = ViewStore::parse(&store.text());
         assert!(back.hidden);
-        assert_eq!(back.cols, Some([150.0, 160.0, 90.0]));
-        assert_eq!(back.name, Some(320.0));
+        assert_eq!(back.cols, Some([0.4, 0.2, 0.2, 0.2]));
         assert!(back.hide_nav && back.details && back.compact);
         assert_eq!(back.exts, 1);
         // Nothing saved: the navigation pane shows, the rest is off.
@@ -3437,6 +3478,24 @@ mod tests {
         // Search results aren't remembered; nonsense lines are skipped.
         assert!(folder_key(&Loc::Search("C:\\".into(), "x".into())).is_none());
         assert!(ViewStore::parse("f|c:\\x|details|9|1|0\nf|c:\\y|icons|1|1|7\n").folders.is_empty());
+    }
+
+    #[test]
+    fn columns_always_fill_the_row() {
+        for total in [400.0f32, 700.0, 1100.0, 2400.0] {
+            let w = fit_columns(COL_SHARES, total);
+            assert!((w.iter().sum::<f32>() - total).abs() < 0.5, "{total}: {w:?}");
+            assert!(w.iter().zip(COL_MIN).all(|(x, m)| *x >= m - 0.01), "{total}: {w:?}");
+        }
+        // Widening one column by taking from the next leaves the rest alone.
+        let before = fit_columns(COL_SHARES, 1000.0);
+        let mut moved = before;
+        moved[1] += 40.0;
+        moved[2] -= 40.0;
+        let shares = normalised(moved).unwrap();
+        let after = fit_columns(shares, 1000.0);
+        assert!((after[1] - before[1] - 40.0).abs() < 0.5 && (after[0] - before[0]).abs() < 0.5);
+        assert!(normalised([1.0, 0.0, 1.0, 1.0]).is_none());
     }
 
     #[test]

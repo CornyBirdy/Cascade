@@ -208,17 +208,28 @@ fn send_keys(vks: &[u16], down: bool) {
             if extended {
                 flags |= KEYEVENTF_EXTENDEDKEY;
             }
+            // The key's scan code too, as a real keyboard's report has: apps and
+            // drawing programs that read it (or take their shortcuts from it) ignore
+            // a key that has only a virtual-key code.
+            let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 },
                 },
             }
         })
         .collect();
     if !inputs.is_empty() {
-        unsafe {
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        // 0 is Windows refusing it (an app with more rights than Cascade has in front).
+        if sent as usize != inputs.len() {
+            let err = unsafe { GetLastError() };
+            crate::config::log(&format!(
+                "tablet: keys {vks:?} {}: Windows took {sent} of {} ({err:?})",
+                if down { "down" } else { "up" },
+                inputs.len()
+            ));
         }
     }
 }
@@ -660,6 +671,11 @@ impl Out {
 
 fn mouse(flags: MOUSE_EVENT_FLAGS, at: Option<POINT>) {
     unsafe {
+        let sent_log = |n: u32| {
+            if n != 1 {
+                crate::config::log(&format!("tablet: a mouse button wasn't taken by Windows ({:?})", GetLastError()));
+            }
+        };
         let (mut dx, mut dy) = (0, 0);
         let mut flags = flags;
         if let Some(p) = at {
@@ -673,12 +689,15 @@ fn mouse(flags: MOUSE_EVENT_FLAGS, at: Option<POINT>) {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
         };
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        sent_log(SendInput(&[input], std::mem::size_of::<INPUT>() as i32));
     }
 }
 
 /// Presses or lets go of what a button stands for (the eraser's handled with the pen).
 fn button(b: &Button, down: bool, at: Option<POINT>) {
+    if down {
+        crate::config::log(&format!("tablet: button pressed, doing {b:?}"));
+    }
     if let Button::Keys(k) = b {
         send_keys(k, down);
         return;

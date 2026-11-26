@@ -135,17 +135,17 @@ pub const THEMES: [Theme; 2] = [
         // a bright wallpaper without it going grey and flat (the Tint slider
         // sets how much).
         tint: (0.16, 0.19, 0.28),
-        tint_scale: 0.42,
+        tint_scale: 0.30,
         solid: (0.17, 0.19, 0.25),
-        film: (white(0.04), white(0.012)),
+        film: (white(0.025), white(0.012)),
         // The rim: a fine bright edge where the light catches the curve (the
         // top left and the bottom right), a faint glow inside it, and a
         // whisper of an outline all round so the shape reads on dark pages.
-        rim: Rim::Shine { lit: 0.8, back: 0.5, hairline: 0.12 },
+        rim: Rim::Shine { lit: 0.95, back: 0.6, hairline: 0.30 },
         // Light gathered in the curved edge, its colours split a little, a
         // soft highlight from the top left, and the glass's thickness as a
         // faint shade along the bottom inside.
-        light: Light { lens: (9.0, 0.08), dispersion: 0.05, sheen: 0.11, depth: 0.08 },
+        light: Light { lens: (9.0, 0.08), dispersion: 0.05, sheen: 0.06, depth: 0.06 },
         // 28 px of curved edge (all of a taskbar's height), bent up to 39 px,
         // with what's bent in softened first, colours split a little.
         refract: Some(crate::lens::Lens { band: 28.0, bend: 1.4, split: 0.08, soften: 5.0 }),

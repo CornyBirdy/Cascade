@@ -257,6 +257,9 @@ pub fn start(instance: HINSTANCE, record: bool) {
     open(instance, record, Mode::Rect);
 }
 
+/// When the snip last opened (`GetTickCount64`), so its first moments can be told apart.
+static OPENED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
     // A snip left over whose window is gone (it ended without tidying up)
     // mustn't stop every snip after it.
@@ -344,6 +347,8 @@ fn open(instance: HINSTANCE, record: bool, start_mode: Mode) {
         layout_bar(&mut s);
         *snip() = Some(s);
         SetTimer(Some(window), TIMER_OPEN, 15, None);
+        OPENED_AT
+            .store(windows::Win32::System::SystemInformation::GetTickCount64(), std::sync::atomic::Ordering::Relaxed);
         let _ = ShowWindow(window, SW_SHOW);
         crate::launcher::force_foreground(window);
         let _ = SetFocus(Some(window));
@@ -1156,7 +1161,20 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_ACTIVATE if wp.0 & 0xFFFF == 0 => {
             if snip().as_ref().is_some_and(|s| s.window == hwnd) {
-                finish();
+                // Another window taking the front as the snip opens (an app that
+                // grabs the focus back, as Cascade's own app windows can) mustn't
+                // end it before it's been seen: take the front again.
+                let age = windows::Win32::System::SystemInformation::GetTickCount64()
+                    .wrapping_sub(OPENED_AT.load(std::sync::atomic::Ordering::Relaxed));
+                if age < 700 {
+                    config::log(&format!("snip: lost the front {age} ms after opening; taking it back"));
+                    crate::launcher::force_foreground(hwnd);
+                } else {
+                    let mut class = [0u16; 64];
+                    let n = GetClassNameW(GetForegroundWindow(), &mut class).max(0) as usize;
+                    config::log(&format!("snip: closed, \"{}\" took the front", String::from_utf16_lossy(&class[..n])));
+                    finish();
+                }
             }
             LRESULT(0)
         }

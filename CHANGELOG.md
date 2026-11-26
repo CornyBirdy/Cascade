@@ -8,6 +8,10 @@ Settings > Updates > What's new opens the list.
 
 **Fixed**
 - **Restoring a maximised window from the taskbar**: it showed for a moment at the top right, small, before growing to fill the screen. It now comes back out of sight like the others and is maximised as its picture lands, and the animation's picture stays hidden until its first frame is placed.
+- **Files, columns**: they always fill the row. Dragging an edge makes the column wider and the next one narrower (the others stay put) instead of pushing everything to the right off the window, and shrinking the window shrinks the columns in proportion, each down to a minimum, so Size is never cut off. (Widths are kept as shares of the row, so earlier saved widths are reset.)
+- **Snip over Cascade's own apps** (Files and the like): if the snip loses the front in its first moments it takes it back instead of closing, and `cascade.log` says when and to whom it lost it.
+- **Tablet buttons**: keys the pen's and the pad's buttons press are now sent with their scan codes as well, as a real keyboard's, which apps and drawing programs that read them need. `cascade.log` now has a line for each button press ("tablet: button pressed, doing ...") and for any key or click Windows refuses, to find out what's left if they still don't act.
+- **Liquid Glass, closer to Apple's** (as in liqui.design's tab bar): a lighter wash (it was a grey slab), a fine rim that outlines the whole panel and is brightest at the two curved corners, and a fainter sheen.
 - **Liquid Glass, the rim**: it was a thick white outline all the way round, which made the panels read as bordered slabs. It's now a fine edge that is bright only where the glass curves into the light (the top left and bottom right) with a faint outline between, and the grey wash and sheen are lighter, so the page shows through.
 
 ## 2026-11-26
