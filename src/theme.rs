@@ -129,7 +129,7 @@ pub const THEMES: [Theme; 2] = [
     Theme {
         key: "liquid_glass",
         name: "Liquid Glass",
-        about: "Apple's liquid glass: a light blur you can still see the page through, smeared and bent round its edge like a lens, with a thick lit rim.",
+        about: "Apple's liquid glass: a light blur you can still see the page through, smeared and bent round its edge like a lens, with a fine lit rim.",
         glass: Glass::Blur,
         // A cool, light wash over the blur: enough that white text reads over
         // a bright wallpaper without it going grey and flat (the Tint slider
@@ -137,15 +137,15 @@ pub const THEMES: [Theme; 2] = [
         tint: (0.16, 0.19, 0.28),
         tint_scale: 0.42,
         solid: (0.17, 0.19, 0.25),
-        film: (white(0.07), white(0.015)),
-        // The rim: a thick bright edge lit at the top left and again at the
-        // bottom right, as the light catches a curved edge, with a softer glow
-        // inside it, and a whisper of an outline where it isn't lit.
-        rim: Rim::Shine { lit: 0.95, back: 0.6, hairline: 0.06 },
+        film: (white(0.04), white(0.012)),
+        // The rim: a fine bright edge where the light catches the curve (the
+        // top left and the bottom right), a faint glow inside it, and a
+        // whisper of an outline all round so the shape reads on dark pages.
+        rim: Rim::Shine { lit: 0.8, back: 0.5, hairline: 0.12 },
         // Light gathered in the curved edge, its colours split a little, a
         // soft highlight from the top left, and the glass's thickness as a
         // faint shade along the bottom inside.
-        light: Light { lens: (9.0, 0.10), dispersion: 0.05, sheen: 0.20, depth: 0.08 },
+        light: Light { lens: (9.0, 0.08), dispersion: 0.05, sheen: 0.11, depth: 0.08 },
         // 28 px of curved edge (all of a taskbar's height), bent up to 39 px,
         // with what's bent in softened first, colours split a little.
         refract: Some(crate::lens::Lens { band: 28.0, bend: 1.4, split: 0.08, soften: 5.0 }),
@@ -502,12 +502,15 @@ fn shine_rim(p: &Painter, x: f32, y: f32, w: f32, h: f32, r: f32, lit: f32, back
         p.stroke_rrect(x + line / 2.0, y + line / 2.0, w - line, h - line, r, white(hairline.min(1.0)), line);
     }
     let run = w.min(h * 6.0);
+    // Bright at two opposite corners, where the edge curves into the light, and
+    // gone along the straight run between them (the hairline keeps the shape).
     let stops = |k: f32| {
-        [(0.0, white((lit * k).min(1.0))), (0.42, white(0.0)), (0.58, white(0.0)), (1.0, white((back * k).min(1.0)))]
+        [(0.0, white((lit * k).min(1.0))), (0.26, white(0.0)), (0.74, white(0.0)), (1.0, white((back * k).min(1.0)))]
     };
     // From the top-left corner to the bottom-right one, over `run`.
     let (x0, y0, x1, y1) = (x + w / 2.0 - run / 2.0, y, x + w / 2.0 + run / 2.0, y + h);
-    for (inset, k, width) in [(line * 1.8, 1.0, line * 2.2), (line * 4.2, 0.4, line * 3.2)] {
+    // A fine, crisp line on the edge, and a faint, softer one just inside it.
+    for (inset, k, width) in [(line * 0.75, 1.0, line * 1.3), (line * 2.2, 0.28, line * 2.0)] {
         if w <= 2.0 * inset || h <= 2.0 * inset {
             break;
         }

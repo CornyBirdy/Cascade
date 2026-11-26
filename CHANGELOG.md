@@ -4,6 +4,12 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-27
+
+**Fixed**
+- **Restoring a maximised window from the taskbar**: it showed for a moment at the top right, small, before growing to fill the screen. It now comes back out of sight like the others and is maximised as its picture lands, and the animation's picture stays hidden until its first frame is placed.
+- **Liquid Glass, the rim**: it was a thick white outline all the way round, which made the panels read as bordered slabs. It's now a fine edge that is bright only where the glass curves into the light (the top left and bottom right) with a faint outline between, and the grey wash and sheen are lighter, so the page shows through.
+
 ## 2026-11-26
 
 **New**

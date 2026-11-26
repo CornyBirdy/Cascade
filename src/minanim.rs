@@ -56,22 +56,25 @@ static PARKED: Mutex<Vec<(isize, WINDOWPLACEMENT, RECT)>> = Mutex::new(Vec::new(
 /// restored window shows in its place for a frame before the animation takes
 /// it off the screen to grow it out of its button (the flicker). The animation
 /// (`play`) puts it back where it belongs when it lands, and if nothing plays
-/// one within a moment the window is put back anyway. Windows that come back
-/// maximised aren't parked: they have no place to hide in.
+/// one within a moment the window is put back anyway. A window that comes back
+/// maximised is parked as a normal window and maximised again when it's put
+/// back (it would otherwise show for a moment before it was taken away).
 pub fn park_for_restore(window: HWND) {
     if !ON.load(Ordering::Relaxed) {
         return;
     }
     unsafe {
-        if !IsIconic(window).as_bool() || IsZoomed(window).as_bool() {
+        if !IsIconic(window).as_bool() {
             return;
         }
         let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        if GetWindowPlacement(window, &mut wp).is_err() || wp.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0 {
+        if GetWindowPlacement(window, &mut wp).is_err() {
             return;
         }
         let Some(place) = normal_rect(window) else { return };
         let original = wp;
+        // Not to come back maximised: it's maximised again once it's put back.
+        wp.flags = WINDOWPLACEMENT_FLAGS(wp.flags.0 & !WPF_RESTORETOMAXIMIZED.0);
         wp.rcNormalPosition.right -= wp.rcNormalPosition.left + 32000;
         wp.rcNormalPosition.bottom -= wp.rcNormalPosition.top + 32000;
         wp.rcNormalPosition.left = -32000;
@@ -99,9 +102,27 @@ pub fn unpark(window: HWND) {
         if IsIconic(window).as_bool() {
             let _ = SetWindowPlacement(window, &original);
         } else {
-            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-            let _ = SetWindowPos(window, None, place.left, place.top, 0, 0, flags);
+            land(window, &original, place);
         }
+    }
+}
+
+/// Whether the window was to come back maximised.
+fn comes_back_maximised(original: &WINDOWPLACEMENT) -> bool {
+    original.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0
+}
+
+/// A parked window, restored, to where it belongs: moved back, or (it came
+/// back maximised) maximised again with its normal place as it had it.
+unsafe fn land(window: HWND, original: &WINDOWPLACEMENT, place: RECT) {
+    if comes_back_maximised(original) {
+        let mut wp = *original;
+        wp.showCmd = SW_SHOWMAXIMIZED.0 as u32;
+        wp.flags = WINDOWPLACEMENT_FLAGS(wp.flags.0 & !WPF_RESTORETOMAXIMIZED.0);
+        let _ = SetWindowPlacement(window, &wp);
+    } else {
+        let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        let _ = SetWindowPos(window, None, place.left, place.top, 0, 0, flags);
     }
 }
 
@@ -168,6 +189,8 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
         // it's there the moment the picture lands, not before.
         let mut place = place;
         let mut hidden_at: Option<RECT> = None;
+        // How a parked window is put back (it may have to be maximised again).
+        let mut parked_from: Option<WINDOWPLACEMENT> = None;
         if !into {
             for _ in 0..25 {
                 if !IsIconic(window).as_bool() {
@@ -176,11 +199,12 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
                 std::thread::sleep(Duration::from_millis(4));
             }
             let mut r = RECT::default();
-            if let Some((_, _, parked)) = take_parked(window) {
+            if let Some((_, original, parked)) = take_parked(window) {
                 // Restored out of sight already (`park_for_restore`): nothing
                 // to move away, only to put back at the end.
                 place = parked;
                 hidden_at = Some(parked);
+                parked_from = Some(original);
             } else if !IsIconic(window).as_bool() && GetWindowRect(window, &mut r).is_ok() && r.left > -10000 {
                 place = r;
                 let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
@@ -191,8 +215,13 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
         }
         let put_back = || {
             if let Some(r) = hidden_at {
-                let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-                let _ = SetWindowPos(window, None, r.left, r.top, 0, 0, flags);
+                match &parked_from {
+                    Some(original) => land(window, original, r),
+                    None => {
+                        let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+                        let _ = SetWindowPos(window, None, r.left, r.top, 0, 0, flags);
+                    }
+                }
             }
         };
         let Ok(module) = GetModuleHandleW(None) else { return };
@@ -234,6 +263,16 @@ pub fn play(window: HWND, place: RECT, button: RECT, into: bool) {
             let _ = DestroyWindow(over);
             return;
         };
+        // Nothing drawn until the first frame is placed: a thumbnail not told
+        // where to go shows the window at its own size in the overlay's corner.
+        let first = DWM_THUMBNAIL_PROPERTIES {
+            dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE,
+            rcDestination: RECT { left: 0, top: 0, right: 1, bottom: 1 },
+            opacity: 0,
+            fVisible: BOOL(0),
+            ..Default::default()
+        };
+        let _ = DwmUpdateThumbnailProperties(thumb, &first);
         let _ = ShowWindow(over, SW_SHOWNOACTIVATE);
         let dur = Duration::from_millis(if into { 240 } else { 220 });
         let began = Instant::now();
