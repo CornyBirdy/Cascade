@@ -55,6 +55,9 @@ struct Surface {
     dc: HDC,
     bitmap: HBITMAP,
     old: HGDIOBJ,
+    /// The pixels (premultiplied BGRA, rows `width` pixels apart), handed to
+    /// the GPU glass when the window is presented (see `glass::presented`).
+    bits: *const u8,
     width: i32,
     height: i32,
 }
@@ -101,7 +104,7 @@ impl Layer {
             let mut bits: *mut c_void = std::ptr::null_mut();
             let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
             let old = SelectObject(dc, bitmap.into());
-            self.surface = Some(Surface { dc, bitmap, old, width, height });
+            self.surface = Some(Surface { dc, bitmap, old, bits: bits as *const u8, width, height });
             Ok(dc)
         }
     }
@@ -405,7 +408,7 @@ impl Gfx {
             SourceConstantAlpha: alpha,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        unsafe {
+        let shown = unsafe {
             UpdateLayeredWindow(
                 hwnd,
                 None,
@@ -417,7 +420,12 @@ impl Gfx {
                 Some(&blend),
                 ULW_ALPHA,
             )
+        };
+        if shown.is_ok() {
+            let stride = surface.width as usize * 4;
+            crate::glass::presented(hwnd, pos, width, height, surface.bits, stride, alpha, None);
         }
+        shown
     }
 
     /// Ends a `begin_part` frame and hands the compositor only that `part`
@@ -455,8 +463,9 @@ impl Gfx {
             dwFlags: ULW_ALPHA,
             prcDirty: &part,
         };
-        unsafe {
-            let _ = UpdateLayeredWindowIndirect(hwnd, &info);
+        if unsafe { UpdateLayeredWindowIndirect(hwnd, &info) }.as_bool() {
+            let stride = surface.width as usize * 4;
+            crate::glass::presented(hwnd, pos, width, height, surface.bits, stride, alpha, Some(part));
         }
         Ok(())
     }

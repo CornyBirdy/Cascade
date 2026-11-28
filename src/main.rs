@@ -32,6 +32,8 @@ mod fileindex;
 mod files;
 mod filesio;
 mod gfx;
+mod glass;
+mod glassmath;
 mod helper;
 mod http;
 mod icons;

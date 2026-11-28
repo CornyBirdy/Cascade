@@ -518,6 +518,8 @@ struct App {
     /// Whether the theme bends light, and whether its refresh timer runs.
     lens_wanted: bool,
     lens_on: bool,
+    /// The timer runs at frame rate, for the GPU glass (see `glass`).
+    lens_fast: bool,
     /// The USB device the notch is announcing.
     device: Option<DeviceNote>,
     /// Files being dragged over a taskbar app: (taskbar, app, since when,
@@ -1455,6 +1457,7 @@ impl App {
             outputs_open: false,
             lens_wanted: false,
             lens_on: false,
+            lens_fast: false,
             update_available: None,
             updating: false,
             power: battery(),
@@ -3476,7 +3479,13 @@ impl App {
             }
             TIMER_LENS => {
                 // Nothing left to refresh (taskbar hidden for a game, notch off...): stop.
-                if !crate::lens::refresh() {
+                let ring = crate::lens::refresh();
+                let glass = crate::glass::tick();
+                if crate::glass::fell_back() {
+                    // Placed again, the panels find the GPU glass gone and take DWM's blur.
+                    self.restyle();
+                }
+                if !ring && !glass {
                     self.lens_on = false;
                     unsafe {
                         let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
@@ -3920,17 +3929,20 @@ impl App {
         }
     }
 
-    /// Keeps Liquid Glass's bent edges up to date with what's behind them, a
-    /// few times a second, while refraction is on and a ring is on screen
-    /// (`frame` starts it again when one comes back).
+    /// Keeps Liquid Glass's bent edges up to date with what's behind them
+    /// while refraction is on and glass is on screen: the GPU glass about
+    /// every frame, the rings a few times a second (`frame` starts it again
+    /// when one comes back).
     fn arm_lens(&mut self) {
         self.lens_wanted = theme::refracts(self.cfg.acrylic);
-        let on = self.lens_wanted && crate::lens::active();
-        if on != self.lens_on {
+        let fast = crate::glass::active();
+        let on = self.lens_wanted && (crate::lens::active() || fast);
+        if on != self.lens_on || (on && fast != self.lens_fast) {
             self.lens_on = on;
+            self.lens_fast = fast;
             unsafe {
                 if on {
-                    SetTimer(Some(self.hwnd), TIMER_LENS, 50, None);
+                    SetTimer(Some(self.hwnd), TIMER_LENS, if fast { 15 } else { 50 }, None);
                 } else {
                     let _ = KillTimer(Some(self.hwnd), TIMER_LENS);
                 }
@@ -5852,9 +5864,12 @@ impl App {
             self.perf.end(Surface::Launcher, t);
         }
         self.perf.flush();
-        // A ring of bent light came on screen (or went): refresh it, or stop.
-        if self.lens_wanted && crate::lens::active() != self.lens_on {
-            self.arm_lens();
+        // A ring of bent light or GPU glass came on screen (or went): refresh it, or stop.
+        if self.lens_wanted {
+            let fast = crate::glass::active();
+            if (crate::lens::active() || fast) != self.lens_on || (self.lens_on && fast != self.lens_fast) {
+                self.arm_lens();
+            }
         }
 
         // Full rate while shapes morph or a level moves; the visualizer and
