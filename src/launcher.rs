@@ -3,7 +3,8 @@
 //! files in the middle, and every app A to Z on the right. Typing searches.
 //!
 //! The app list comes from the shell's AppsFolder, the same source the
-//! Windows Start menu uses, so Store apps are included.
+//! Windows Start menu uses, so Store apps are included, plus the shortcuts
+//! in both Start Menu\Programs folders read directly (AppsFolder lags).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -170,10 +171,47 @@ unsafe fn scan() -> Result<Vec<AppEntry>> {
         }
         out.push(AppEntry { name, target: format!("shell:AppsFolder\\{id}") });
     }
+    // The shell's AppsFolder lags behind the Start Menu folders (a freshly
+    // installed app can be missing for a long while), so read the shortcuts
+    // there directly too. They come after the AppsFolder entries, which win
+    // when both list the same name.
+    for (name, path) in start_folder_shortcuts() {
+        out.push(AppEntry { name, target: path });
+    }
     out.push(AppEntry { name: "Cascade Settings".into(), target: SETTINGS_TARGET.into() });
     out.sort_by_key(|a| a.name.to_lowercase());
     out.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     Ok(out)
+}
+
+/// Every shortcut under the per-user and all-users Start Menu\Programs
+/// folders: (display name, path of the .lnk).
+fn start_folder_shortcuts() -> Vec<(String, String)> {
+    let mut roots = Vec::new();
+    for var in ["APPDATA", "ProgramData"] {
+        if let Some(base) = std::env::var_os(var) {
+            roots.push(std::path::PathBuf::from(base).join(r"Microsoft\Windows\Start Menu\Programs"));
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack = roots;
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let is_lnk = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk"));
+            let Some(name) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            if is_lnk && !name.to_lowercase().starts_with("uninstall") && !name.eq_ignore_ascii_case("cascade settings")
+            {
+                out.push((name, path.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    out
 }
 
 /// What a Start-menu answer opens to show a page of Cascade's settings: this, then the page's number.

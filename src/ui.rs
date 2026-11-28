@@ -1858,10 +1858,12 @@ impl App {
         }
     }
 
-    /// Shell mode: the desktop icons' window, just above the desktop (it
-    /// belongs to it, so it stays with it under every app).
+    /// Shell mode: the desktop icons' window, just above the desktop, under
+    /// every app.
     fn make_desk_icons(&mut self) {
-        let Some(desktop) = shellmode::desktop() else { return };
+        if shellmode::desktop().is_none() {
+            return;
+        }
         // It takes the focus (for the desktop's keys) but never comes over apps (see `deskicons::keep_low`).
         let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
         let made = unsafe {
@@ -1874,7 +1876,10 @@ impl App {
                 0,
                 1,
                 1,
-                Some(desktop),
+                // Not owned by the desktop: Windows keeps an owned window
+                // above its owner by its own rules, which could put it
+                // over apps. It's kept low by hand (see `deskicons::keep_low`).
+                None,
                 None,
                 Some(self.instance),
                 None,

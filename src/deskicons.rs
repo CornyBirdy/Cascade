@@ -843,6 +843,12 @@ impl DeskIcons {
 /// Keeps the icons' window just above the desktop window, below every app,
 /// whatever asks it to move up (being shown, clicked, given the focus). For
 /// its `WM_WINDOWPOSCHANGING`.
+///
+/// It's only ever put at the very bottom (and the desktop then under it, see
+/// `ensure_low`), never "under such a window": a window can be placed under
+/// another only as Windows allows, and under an always-on-top one (some sit
+/// low in the order, like a console's hidden window) it goes to the top of
+/// the ordinary windows instead, over every app, where it took their clicks.
 pub fn keep_low(hwnd: HWND, pos: &mut WINDOWPOS) {
     // Being shown counts even when it says "leave the order alone": a new
     // window starts at the top, so shown where it is, it would come up over
@@ -852,28 +858,16 @@ pub fn keep_low(hwnd: HWND, pos: &mut WINDOWPOS) {
         return;
     }
     let Some(desktop) = crate::shellmode::desktop() else { return };
+    if unsafe { GetWindow(desktop, GW_HWNDPREV) }.ok() == Some(hwnd) {
+        // Right above the desktop already: it stays there.
+        pos.flags |= SWP_NOZORDER;
+        return;
+    }
+    // To the bottom, under the desktop for a moment; the desktop goes under
+    // it once the moves in progress are done.
     pos.flags &= !SWP_NOZORDER;
-    match low_slot(hwnd, desktop) {
-        None => pos.flags |= SWP_NOZORDER,
-        Some(after) => pos.hwndInsertAfter = after,
-    }
-}
-
-/// Where to put the icons' window to sit right above the desktop: the window
-/// to go under (None: it's there already).
-fn low_slot(hwnd: HWND, desktop: HWND) -> Option<HWND> {
-    unsafe {
-        match GetWindow(desktop, GW_HWNDPREV) {
-            // Already right above it.
-            Ok(above) if above == hwnd => None,
-            // An always-on-top window just above it (no app open): the top of the
-            // ordinary windows is right above the desktop then.
-            Ok(above) if GetWindowLongW(above, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 => Some(HWND_TOP),
-            // Under the window that's above the desktop: right above the desktop.
-            Ok(above) if !above.is_invalid() => Some(above),
-            _ => Some(HWND_BOTTOM),
-        }
-    }
+    pos.hwndInsertAfter = HWND_BOTTOM;
+    lower_soon();
 }
 
 /// The icons' window, for the window procedure to know it without asking
@@ -905,6 +899,11 @@ pub fn lower_soon() {
 fn seen(h: HWND) -> bool {
     unsafe {
         if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+        // Shown but with no size (a console's hidden window is).
+        let mut r = RECT::default();
+        if GetWindowRect(h, &mut r).is_err() || r.right - r.left < 2 || r.bottom - r.top < 2 {
             return false;
         }
         let mut cloaked = 0u32;
@@ -955,25 +954,40 @@ pub fn ensure_low(hwnd: HWND) {
         if !IsWindowVisible(hwnd).as_bool() || GetWindow(hwnd, GW_HWNDNEXT).ok() == Some(desktop) {
             return;
         }
+        let app = covered(hwnd, desktop);
+        // Both to the very bottom, the icons first and then the desktop under
+        // them, which leaves the icons right above the desktop whatever else
+        // is about (see `keep_low`). The desktop never moves anywhere but the
+        // bottom (see `shellmode::desktop_proc`).
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
+        let _ = SetWindowPos(desktop, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
         // Over an app (rather than over hidden or minimised windows only,
-        // which are harmless): said in the log, at most every few seconds.
-        if let Some(app) = covered(hwnd, desktop) {
+        // which are harmless): said in the log, at most every few seconds,
+        // with whether it worked.
+        if let Some(app) = app {
             static SAID: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
             let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
             if said.is_none_or(|t| t.elapsed().as_secs() >= 5) {
                 *said = Some(Instant::now());
                 let fg = GetForegroundWindow();
+                let now_under = covered(hwnd, desktop);
                 config::log(&format!(
-                    "desktop: the icons' window was over an app ({}; in front: {}); put back under it",
+                    "desktop: the icons' window was over an app ({}; in front: {}); put back at the bottom: {}",
                     class_of(app),
-                    class_of(fg)
+                    class_of(fg),
+                    match now_under {
+                        None => "done".to_string(),
+                        Some(w) => format!("still over {} (always on top: {})", class_of(w), topmost(w)),
+                    }
                 ));
             }
         }
-        let Some(after) = low_slot(hwnd, desktop) else { return };
-        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-        let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, flags);
     }
+}
+
+fn topmost(h: HWND) -> bool {
+    unsafe { GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 }
 }
 
 /// For a click on the icons: if their window had come up over an app, it's
