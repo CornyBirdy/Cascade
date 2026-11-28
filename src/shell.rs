@@ -1001,9 +1001,40 @@ pub fn signal_running_instance() {
 }
 
 pub fn open(target: &str) {
+    open_from(None, target);
+}
+
+/// `open`, for a window that asked: a file nothing is set to open gets
+/// Windows' "Open with" list over it, not in a corner of the screen.
+pub fn open_from(owner: Option<HWND>, target: &str) {
     // One of Cascade's own apps, as the taskbar knows it.
     if let Some((_, flag, _)) = target.strip_prefix("cascade-app:").and_then(crate::appwin::own_app) {
         crate::appwin::launch(&[flag]);
+        return;
+    }
+    // A file from a window of ours: opened on a thread of its own with that
+    // window as its owner, so a file nothing is set to open gets "Open with"
+    // over it (shell mode would open it ownerless).
+    if let Some(o) = owner.filter(|_| std::path::Path::new(target).is_file()) {
+        if crate::shellmode::open_in_cascade(target) {
+            return;
+        }
+        let (target, o) = (target.to_string(), o.0 as isize);
+        std::thread::spawn(move || unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+            let _ = ShellExecuteW(
+                Some(HWND(o as *mut _)),
+                w!("open"),
+                &HSTRING::from(target.as_str()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
         return;
     }
     if crate::shellmode::active() {
@@ -1018,7 +1049,9 @@ pub fn open(target: &str) {
     if crate::shellmode::open_in_cascade(target) {
         return;
     }
-    open_direct(target);
+    unsafe {
+        let _ = ShellExecuteW(owner, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
+    }
 }
 
 /// Opens `target` here and now (`open` hands it to shell mode first, when that's on).
@@ -1156,8 +1189,15 @@ pub fn win_combo(vk: u16) {
 }
 
 pub fn open_file(path: &std::path::Path) {
+    open_file_from(None, path);
+}
+
+/// Opens a file from `owner`'s window: for a file nothing is set to open,
+/// Windows' "How do you want to open this file?" then comes up over that
+/// window (with no owner it ends up in a corner of the screen).
+pub fn open_file_from(owner: Option<HWND>, path: &std::path::Path) {
     unsafe {
-        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL);
+        let _ = ShellExecuteW(owner, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL);
     }
 }
 

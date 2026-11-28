@@ -155,6 +155,8 @@ struct State {
     fullscreen: Option<(WINDOW_STYLE, RECT)>,
     bytes: u64,
     generation: u32,
+    /// When the file in view was last written (to show it again once edited).
+    modified: Option<std::time::SystemTime>,
 }
 
 thread_local! {
@@ -217,7 +219,9 @@ impl State {
         self.failed = false;
         self.generation = self.generation.wrapping_add(1);
         let Some(path) = self.path().cloned() else { return };
-        self.bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let meta = std::fs::metadata(&path).ok();
+        self.bytes = meta.as_ref().map_or(0, |m| m.len());
+        self.modified = meta.and_then(|m| m.modified().ok());
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         unsafe {
             let _ = SetWindowTextW(self.hwnd, &HSTRING::from(format!("{name} \u{2014} Photos")));
@@ -310,6 +314,51 @@ impl State {
         }
     }
 
+    /// Opens the picture (turned as it's shown) in the editor: pen,
+    /// highlighter, eraser, crop and turning; Save writes over the file.
+    fn edit(&self) {
+        let (Some(p), Some(path)) = (&self.pic, self.path()) else { return };
+        if p.full.0.max(p.full.1) > MAX_SIDE {
+            crate::winset::tell("This picture is too big to edit here without shrinking it.".into());
+            return;
+        }
+        let straight: Vec<u32> = p
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| {
+                let a = c[3] as u32;
+                let un = |v: u8| (v as u32 * 255 + a / 2).checked_div(a).unwrap_or(0).min(255);
+                (a << 24) | (un(c[2]) << 16) | (un(c[1]) << 8) | un(c[0])
+            })
+            .collect();
+        let (w, h) = (p.w as usize, p.h as usize);
+        let (mut px, mut nw, mut nh) = (straight, w, h);
+        for _ in 0..self.turns % 4 {
+            // A quarter clockwise: (x, y) goes to (h - 1 - y, x).
+            let mut out = vec![0u32; nw * nh];
+            for y in 0..nh {
+                for x in 0..nw {
+                    out[x * nh + (nh - 1 - y)] = px[y * nw + x];
+                }
+            }
+            px = out;
+            std::mem::swap(&mut nw, &mut nh);
+        }
+        crate::snipedit::open_photo(px, nw as i32, nh as i32, path.clone());
+    }
+
+    /// The file was written (by the editor, or another program): show it again.
+    fn reload_if_changed(&mut self) {
+        let Some(path) = self.path().cloned() else { return };
+        let now = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        if now.is_some() && now != self.modified {
+            let at = self.at;
+            self.show(at);
+        }
+    }
+
     fn toggle_fullscreen(&mut self) {
         unsafe {
             match self.fullscreen.take() {
@@ -376,6 +425,7 @@ impl State {
             item(1, "Open with\u{2026}"),
             item(2, "Show in Files"),
             Entry::Separator,
+            item(11, "Edit\u{2026}"),
             item(3, "Rotate left"),
             item(4, "Rotate right"),
             item(5, "Save rotation"),
@@ -388,16 +438,13 @@ impl State {
             item(10, "Properties"),
         ];
         match show(self.hwnd, entries, Place::Cursor) {
-            1 => unsafe {
-                let _ = windows::Win32::UI::Shell::ShellExecuteW(
-                    Some(self.hwnd),
-                    w!("openas"),
-                    &HSTRING::from(p.as_str()),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
-            },
+            // Windows' "How do you want to open this file?" list, through the
+            // shell's own entry point (the "openas" verb does nothing from here).
+            1 => {
+                let ok = crate::shell::launch("rundll32.exe", &format!("shell32.dll,OpenAs_RunDLL {p}"), false);
+                crate::config::log(&format!("photos: open with {p}: {ok}"));
+            }
+            11 => self.edit(),
             2 => {
                 let dir = path.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
                 appwin::launch(&["--files", &dir]);
@@ -560,6 +607,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_RBUTTONUP => {
             with(|s| s.menu());
         }
+        WM_ACTIVATE if wp.0 & 0xFFFF != 0 => {
+            with(|s| s.reload_if_changed());
+        }
         WM_XBUTTONUP => {
             let back = (wp.0 >> 16) & 0xFFFF == 1;
             with(|s| s.step(if back { -1 } else { 1 }));
@@ -595,6 +645,7 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     s.zoom = Some(1.0);
                     s.pan = (0.0, 0.0);
                 }
+                k if k.0 == b'E' as u16 => s.edit(),
                 k if k.0 == b'R' as u16 => s.turns = (s.turns + if shift { 3 } else { 1 }) % 4,
                 k if k.0 == b'F' as u16 => s.toggle_fullscreen(),
                 k if k.0 == b'C' as u16 && ctrl => s.copy(),
@@ -636,6 +687,7 @@ pub fn run(path: Option<String>) {
             fullscreen: None,
             bytes: 0,
             generation: 0,
+            modified: None,
         })
     });
     with(|s| s.show(at));

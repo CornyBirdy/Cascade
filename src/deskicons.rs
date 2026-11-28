@@ -1112,7 +1112,7 @@ fn item_menu_(owner: HWND, paths: &[String]) {
                 let _ = c.HandleMenuMsg(WM_INITMENUPOPUP, WPARAM(sub.0 as usize), LPARAM(i as isize));
             }
         });
-        let id = ask_ui(entries) as u32;
+        let id = ask_ui(crate::menu::compact(entries)) as u32;
         let mut buf = [0u8; 64];
         let verb_ok = id >= FIRST
             && cm

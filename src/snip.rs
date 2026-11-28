@@ -618,36 +618,44 @@ fn screenshots_path() -> Option<PathBuf> {
     )))
 }
 
-/// Puts a picture on the clipboard (see-through parts become white, as
-/// most programs pasting a picture expect).
+/// Puts a picture on the clipboard as a plain 24-bit DIB, the form every
+/// program pastes (Paint included; a 32-bit one with an alpha byte can come
+/// out blank or black there). See-through parts are laid over white.
 pub(crate) unsafe fn copy_image(owner: Option<HWND>, pixels: &[u32], w: i32, h: i32) -> bool {
+    if w <= 0 || h <= 0 || pixels.len() < (w as usize) * (h as usize) {
+        return false;
+    }
+    let stride = (w as usize * 3).div_ceil(4) * 4;
     let header = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
         biHeight: h,
         biPlanes: 1,
-        biBitCount: 32,
+        biBitCount: 24,
         biCompression: BI_RGB.0,
-        biSizeImage: (w * h * 4) as u32,
+        biSizeImage: (stride * h as usize) as u32,
         ..Default::default()
     };
-    let size = std::mem::size_of::<BITMAPINFOHEADER>() + pixels.len() * 4;
-    let Ok(global) = GlobalAlloc(GMEM_MOVEABLE, size) else { return false };
+    let head = std::mem::size_of::<BITMAPINFOHEADER>();
+    let Ok(global) = GlobalAlloc(GMEM_MOVEABLE, head + stride * h as usize) else { return false };
     let at = GlobalLock(global) as *mut u8;
     if at.is_null() {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(global));
         return false;
     }
-    std::ptr::copy_nonoverlapping(
-        &header as *const BITMAPINFOHEADER as *const u8,
-        at,
-        std::mem::size_of::<BITMAPINFOHEADER>(),
-    );
-    let rows = at.add(std::mem::size_of::<BITMAPINFOHEADER>()) as *mut u32;
+    std::ptr::copy_nonoverlapping(&header as *const BITMAPINFOHEADER as *const u8, at, head);
+    let body = std::slice::from_raw_parts_mut(at.add(head), stride * h as usize);
+    body.fill(0);
     for y in 0..h as usize {
+        // Bottom-up, as a DIB with a positive height is.
+        let row = &mut body[(h as usize - 1 - y) * stride..][..w as usize * 3];
         for x in 0..w as usize {
             let p = pixels[y * w as usize + x];
-            let p = if p >> 24 == 0 { 0xFFFF_FFFF } else { p };
-            *rows.add((h as usize - 1 - y) * w as usize + x) = p;
+            let a = p >> 24;
+            let over = |v: u32| ((v * a + 255 * (255 - a) + 127) / 255) as u8;
+            row[x * 3] = over(p & 0xFF);
+            row[x * 3 + 1] = over((p >> 8) & 0xFF);
+            row[x * 3 + 2] = over((p >> 16) & 0xFF);
         }
     }
     let _ = GlobalUnlock(global);

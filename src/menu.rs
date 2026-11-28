@@ -1111,6 +1111,61 @@ pub fn from_hmenu(menu: HMENU, init: &mut dyn FnMut(HMENU, u32)) -> Vec<Entry> {
     out
 }
 
+/// A file's menu, shortened as Windows 11's is: the everyday commands stay,
+/// and what other apps added (7-Zip, WinRAR, Resize, Share...) goes under
+/// "More options". Ids are kept, so a pick is carried out as before.
+pub fn compact(entries: Vec<Entry>) -> Vec<Entry> {
+    const KEEP: [&str; 14] = [
+        "open",
+        "open with",
+        "open with\u{2026}",
+        "edit with photos",
+        "set as desktop background",
+        "send to",
+        "cut",
+        "copy",
+        "paste",
+        "copy as path",
+        "create shortcut",
+        "rename",
+        "delete",
+        "properties",
+    ];
+    let keeps = |e: &Entry| match e {
+        Entry::Item(i) => KEEP.contains(&i.text.to_lowercase().as_str()),
+        _ => false,
+    };
+    let extra: Vec<Entry> = entries.iter().filter(|e| matches!(e, Entry::Item(_)) && !keeps(e)).cloned().collect();
+    if extra.len() < 3 || !entries.iter().any(keeps) {
+        return entries;
+    }
+    let mut out: Vec<Entry> = Vec::new();
+    for e in entries {
+        match e {
+            Entry::Item(_) if keeps(&e) => out.push(e),
+            Entry::Separator if !matches!(out.last(), None | Some(Entry::Separator)) => out.push(e),
+            _ => {}
+        }
+    }
+    while matches!(out.last(), Some(Entry::Separator)) {
+        out.pop();
+    }
+    // Between the commands and Properties, so it's where the eye lands.
+    let at = out
+        .iter()
+        .rposition(|e| matches!(e, Entry::Item(i) if i.text.eq_ignore_ascii_case("properties")))
+        .unwrap_or(out.len());
+    let more = Entry::Item(Item {
+        id: 0x7FFF_FFF0,
+        text: "More options".into(),
+        enabled: true,
+        sub: extra,
+        ..Default::default()
+    });
+    out.splice(at..at, [more, Entry::Separator]);
+    out
+}
+
 /// Shows a menu made with Windows' functions as one of Cascade's, and
 /// returns the picked item's id (0 for none).
 pub fn track(owner: HWND, menu: HMENU, place: Place) -> usize {

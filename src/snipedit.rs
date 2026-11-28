@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_SHIFT};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{FileSaveDialog, IFileSaveDialog, SIGDN_FILESYSPATH};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -72,6 +72,9 @@ enum Button {
     Text,
     Copy,
     Save,
+    /// A photo's editor: turn the picture a quarter, and save it as a copy.
+    Rotate,
+    SaveAs,
 }
 
 struct Editor {
@@ -89,6 +92,8 @@ struct Editor {
     crop: Option<((f32, f32), (f32, f32))>,
     hot: Option<Button>,
     saved: Option<PathBuf>,
+    /// Editing a photo from Photos (Save writes over the file) rather than a snip.
+    photo: bool,
     /// Changed since it was last saved.
     dirty: bool,
     status: String,
@@ -122,6 +127,16 @@ unsafe fn bitmap_of(img: &Image) -> HBITMAP {
 
 /// Opens `pixels` (w×h, top-down BGRA; `saved` where it was saved) in a new editor.
 pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
+    open_with(pixels, w, h, saved, false);
+}
+
+/// Opens a photo to edit from Photos: the same pen, highlighter, eraser and
+/// crop, plus turning it, and Save writes over `path`.
+pub fn open_photo(pixels: Vec<u32>, w: i32, h: i32, path: PathBuf) {
+    open_with(pixels, w, h, Some(path), true);
+}
+
+fn open_with(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>, photo: bool) {
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let Ok(module) = GetModuleHandleW(None) else { return };
@@ -140,14 +155,14 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
         // Big enough for the snip, within most of the screen.
         let work = crate::shell::work_area();
         let (ww, wh) = (work.right - work.left, work.bottom - work.top);
-        let width = (w + 80).clamp(720, ww * 9 / 10);
+        let width = (w + 80).clamp(if photo { 1080 } else { 720 }, ww * 9 / 10);
         let height = (h + 160).clamp(480, wh * 9 / 10);
         let x = work.left + (ww - width) / 2;
         let y = work.top + (wh - height) / 2;
         let Ok(hwnd) = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("CascadeSnipEditor"),
-            w!("Snip \u{2014} Cascade"),
+            if photo { w!("Edit photo \u{2014} Cascade") } else { w!("Snip \u{2014} Cascade") },
             WS_OVERLAPPEDWINDOW,
             x,
             y,
@@ -165,6 +180,9 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
         let image = Rc::new(Image { w, h, pixels });
         let bitmap = bitmap_of(&image);
         let status = match &saved {
+            Some(p) if photo => {
+                format!("Editing {}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+            }
             Some(_) => "Copied, and saved in Screenshots".to_string(),
             None => "Copied".to_string(),
         };
@@ -183,6 +201,7 @@ pub fn open(pixels: Vec<u32>, w: i32, h: i32, saved: Option<PathBuf>) {
                 crop: None,
                 hot: None,
                 saved,
+                photo,
                 dirty: false,
                 status,
                 gfx: crate::gfx::Gfx::new().ok(),
@@ -230,13 +249,24 @@ impl Editor {
             left.push((Button::Colour(i), 30.0, "", if i + 1 == COLOURS.len() { 10.0 } else { 2.0 }));
         }
         left.push((Button::Size, 64.0, "", 0.0));
-        let right: Vec<(Button, f32, &'static str, f32)> = vec![
-            (Button::Undo, 36.0, "", 2.0),
-            (Button::Redo, 36.0, "", 14.0),
-            (Button::Text, 108.0, "Copy text", 4.0),
-            (Button::Copy, 78.0, "Copy", 4.0),
-            (Button::Save, 100.0, "Save as\u{2026}", 0.0),
-        ];
+        let right: Vec<(Button, f32, &'static str, f32)> = if self.photo {
+            vec![
+                (Button::Undo, 36.0, "", 2.0),
+                (Button::Redo, 36.0, "", 2.0),
+                (Button::Rotate, 36.0, "", 14.0),
+                (Button::Copy, 78.0, "Copy", 4.0),
+                (Button::SaveAs, 100.0, "Save copy", 4.0),
+                (Button::Save, 78.0, "Save", 0.0),
+            ]
+        } else {
+            vec![
+                (Button::Undo, 36.0, "", 2.0),
+                (Button::Redo, 36.0, "", 14.0),
+                (Button::Text, 108.0, "Copy text", 4.0),
+                (Button::Copy, 78.0, "Copy", 4.0),
+                (Button::Save, 100.0, "Save as\u{2026}", 0.0),
+            ]
+        };
         let rect = |x: f32, w: f32| RECT {
             left: (x * k) as i32,
             top: (10.0 * k) as i32,
@@ -380,6 +410,23 @@ impl Editor {
         self.set_image(Rc::new(Image { w: r - l, h: bt - t, pixels }));
     }
 
+    /// Turns the picture (with its marks drawn in) a quarter clockwise.
+    fn rotate(&mut self) {
+        let img = self.compose();
+        let (w, h) = (img.w as usize, img.h as usize);
+        let mut pixels = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                // (x, y) goes to (h - 1 - y, x) in an image h wide and w tall.
+                pixels[x * h + (h - 1 - y)] = img.pixels[y * w + x];
+            }
+        }
+        self.snapshot();
+        self.strokes.clear();
+        self.crop = None;
+        self.set_image(Rc::new(Image { w: img.h, h: img.w, pixels }));
+    }
+
     fn undo(&mut self) {
         if let Some((img, strokes)) = self.undo.pop() {
             self.redo.push((self.image.clone(), std::mem::replace(&mut self.strokes, strokes)));
@@ -446,6 +493,8 @@ fn glyph_of(b: Button) -> Option<u32> {
         Button::Text => 0xE8D2,
         Button::Copy => 0xE8C8,
         Button::Save => 0xE74E,
+        Button::SaveAs => 0xE792,
+        Button::Rotate => 0xE7AD,
         _ => return None,
     })
 }
@@ -709,9 +758,49 @@ unsafe fn press(hwnd: HWND, b: Button) {
                 with(|e| e.status = if ok { "Copied".into() } else { "Couldn't copy".into() });
             }
         }
-        Button::Save => save_as(hwnd),
+        Button::Save => {
+            if with(|e| e.photo).unwrap_or(false) {
+                save_over(hwnd);
+            } else {
+                save_as(hwnd);
+            }
+        }
+        Button::SaveAs => save_as(hwnd),
+        Button::Rotate => {
+            with(|e| e.rotate());
+        }
     }
     let _ = InvalidateRect(Some(hwnd), None, false);
+}
+
+/// A photo's Save: over the file it came from (a PNG instead, beside it,
+/// for a format that can't be written back, such as WebP or HEIC).
+unsafe fn save_over(hwnd: HWND) -> bool {
+    let Some((img, path)) = with(|e| (e.compose(), e.saved.clone())) else { return false };
+    let Some(path) = path else {
+        save_as(hwnd);
+        return true;
+    };
+    let writable = path.extension().is_some_and(|x| ["png", "jpg", "jpeg"].iter().any(|k| x.eq_ignore_ascii_case(k)));
+    let target = if writable { path.clone() } else { path.with_extension("png") };
+    let ok = crate::snip::save_image(&target, &img.pixels, img.w, img.h);
+    config::log(&format!("photo editor: saved {} ({ok})", target.display()));
+    with(|e| {
+        e.status = if ok {
+            if writable {
+                "Saved".to_string()
+            } else {
+                format!("Saved as {}", target.display())
+            }
+        } else {
+            "Couldn't save it".into()
+        };
+        if ok {
+            e.dirty = false;
+            e.saved = Some(target);
+        }
+    });
+    ok
 }
 
 unsafe fn save_as(hwnd: HWND) {
@@ -855,7 +944,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                 (true, b'Z') => Some(Button::Undo),
                 (true, b'Y') => Some(Button::Redo),
                 (true, b'C') => Some(Button::Copy),
+                (true, b'S') if GetKeyState(VK_SHIFT.0 as i32) < 0 => Some(Button::SaveAs),
                 (true, b'S') => Some(Button::Save),
+                (_, b'R') if with(|e| e.photo).unwrap_or(false) => Some(Button::Rotate),
                 _ => None,
             };
             if let Some(b) = b {
@@ -880,7 +971,17 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_CLOSE => {
             // Changes since it was saved: keep them?
             let ask = with(|e| e.dirty).unwrap_or(false);
-            if ask {
+            if ask && with(|e| e.photo).unwrap_or(false) {
+                let r = MessageBoxW(
+                    Some(hwnd),
+                    w!("Save your changes to the photo?\n\nYes saves over the original file."),
+                    w!("Cascade"),
+                    MB_YESNOCANCEL | MB_ICONQUESTION,
+                );
+                if r == IDCANCEL || (r == IDYES && !save_over(hwnd)) {
+                    return LRESULT(0);
+                }
+            } else if ask {
                 let r = MessageBoxW(
                     Some(hwnd),
                     w!("Save your changes to the snip?\n\nYes saves over the copy in Screenshots (and copies it)."),

@@ -149,6 +149,29 @@ fn removal_command(cmd: &str) -> String {
     cmd.to_string()
 }
 
+/// A glyph (of Windows' icon font) for what kind of thing `a` is: a Store
+/// app, a driver, a runtime or library, or a desktop program.
+fn glyph_of(a: &Installed) -> u32 {
+    let n = a.name.to_lowercase();
+    if matches!(a.how, Remove::Package(_)) {
+        0xE719
+    } else if ["driver", "nvidia", "geforce", "radeon", "chipset", "firmware", "realtek", "bluetooth"]
+        .iter()
+        .any(|k| n.contains(k))
+    {
+        0xE950
+    } else if ["redistributable", "runtime", ".net", "vc++", "visual c++", "sdk", "java", "python", "node.js"]
+        .iter()
+        .any(|k| n.contains(k))
+    {
+        0xE943
+    } else if ["game", "steam", "epic games", "xbox", "launcher"].iter().any(|k| n.contains(k)) {
+        0xE7FC
+    } else {
+        0xE71D
+    }
+}
+
 pub fn pick_uninstall(owner: HWND) {
     let mut all = programs();
     all.extend(packages());
@@ -168,6 +191,7 @@ pub fn pick_uninstall(owner: HWND) {
                 text: a.name.clone(),
                 hint: a.hint.clone(),
                 enabled: true,
+                icon: glyph_of(a),
                 ..Default::default()
             })
         })

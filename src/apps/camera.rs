@@ -185,6 +185,8 @@ struct Camera {
     list: Vec<String>,
     index: usize,
     stop: Option<Arc<AtomicBool>>,
+    /// The thread reading the camera, so the next one waits for it to let go.
+    worker: Option<std::thread::JoinHandle<()>>,
     error: Option<String>,
     bmp: Option<ID2D1Bitmap>,
     shown: u64,
@@ -219,14 +221,24 @@ impl Camera {
         let stop = Arc::new(AtomicBool::new(false));
         let (s, idx, hwnd, res) = (stop.clone(), self.index, self.hwnd.0 as isize, self.res);
         self.error = None;
-        std::thread::spawn(move || {
+        // The camera can be opened once: a restart (another picture size)
+        // waits for the old reader to shut it down, or the new one can't
+        // start and the picture freezes.
+        let prev = self.worker.take();
+        self.worker = Some(std::thread::spawn(move || {
+            if let Some(p) = prev {
+                let _ = p.join();
+            }
+            if s.load(Ordering::Acquire) {
+                return;
+            }
             if let Err(e) = capture(idx, res, s, hwnd) {
                 crate::config::log(&format!("camera: {e}"));
                 *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 ERROR.lock().map(|mut m| *m = Some(e)).ok();
                 let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), FRAME, WPARAM(1), LPARAM(0)) };
             }
-        });
+        }));
         self.stop = Some(stop);
     }
 
@@ -654,6 +666,7 @@ pub fn run() {
             list,
             index: 0,
             stop: None,
+            worker: None,
             bmp: None,
             shown: 0,
             size: (0, 0),

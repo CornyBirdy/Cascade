@@ -677,7 +677,36 @@ impl State {
             View::Icons => {
                 let c = self.cols();
                 let (tw, th) = (self.tile_w(), self.tile_h());
-                (x0 + 8.0 + (pos % c) as f32 * tw, top + (pos / c) as f32 * th, tw - 6.0, th - 6.0)
+                let (col, y) = self.icon_cell(pos, c);
+                (x0 + 8.0 + col as f32 * tw, top + y, tw - 6.0, th - 6.0)
+            }
+        }
+    }
+
+    /// Icons view: item `pos`'s column and its distance below the first row,
+    /// with `c` tiles to a row. Each group (Group by) starts on a row of its
+    /// own, under its heading.
+    fn icon_cell(&self, pos: usize, c: usize) -> (usize, f32) {
+        let th = self.tile_h();
+        let heads = &self.t().heads;
+        if heads.is_empty() {
+            return (pos % c, (pos / c) as f32 * th);
+        }
+        let k = heads.partition_point(|h| h.0 <= pos).saturating_sub(1);
+        let within = pos - heads[k].0;
+        let rows_before: usize = heads[..k].iter().map(|h| h.2.div_ceil(c)).sum();
+        (within % c, (k + 1) as f32 * GROUP_H + (rows_before + within / c) as f32 * th)
+    }
+
+    /// Where group `k`'s heading is, below the first row (either view).
+    fn head_y(&self, k: usize) -> f32 {
+        let heads = &self.t().heads;
+        match self.view {
+            View::Details => heads[k].0 as f32 * self.row_h() + k as f32 * GROUP_H,
+            View::Icons => {
+                let c = self.cols();
+                let rows: usize = heads[..k].iter().map(|h| h.2.div_ceil(c)).sum();
+                k as f32 * GROUP_H + rows as f32 * self.tile_h()
             }
         }
     }
@@ -686,8 +715,33 @@ impl State {
         let n = self.t().order.len();
         match self.view {
             View::Details => n as f32 * self.row_h() + self.t().heads.len() as f32 * GROUP_H + 8.0,
-            View::Icons => (n.div_ceil(self.cols())) as f32 * self.tile_h() + 8.0,
+            View::Icons => {
+                let c = self.cols();
+                let heads = &self.t().heads;
+                let rows = if heads.is_empty() { n.div_ceil(c) } else { heads.iter().map(|h| h.2.div_ceil(c)).sum() };
+                rows as f32 * self.tile_h() + heads.len() as f32 * GROUP_H + 8.0
+            }
         }
+    }
+
+    /// The tile above or below `pos` in Icons view with groups: the one in the
+    /// same column in the next row, which may be in the next group (or the
+    /// group's last tile if its last row is shorter).
+    fn tile_beside(&self, pos: usize, down: bool) -> usize {
+        let c = self.cols();
+        let (col, y) = self.icon_cell(pos, c);
+        let n = self.t().order.len();
+        let mut best: Option<(f32, usize)> = None;
+        for p in 0..n {
+            let (pc, py) = self.icon_cell(p, c);
+            if (down && py > y) || (!down && py < y) {
+                let key = (py - y).abs() * 100.0 + (pc as f32 - col as f32).abs();
+                if best.is_none_or(|b| key < b.0) {
+                    best = Some((key, p));
+                }
+            }
+        }
+        best.map_or(pos, |b| b.1)
     }
 
     /// Group headings at or before item `pos` (Details only).
@@ -739,6 +793,13 @@ impl State {
     /// items, column widths), for next time.
     fn remember(&mut self) {
         let here = FolderView { view: self.view, sort: self.sort, group: self.group };
+        // Other Files windows (or one from before an update) write this file
+        // too: start from what's on disk so theirs aren't written over.
+        let pins = self.store.pins.take();
+        self.store = ViewStore::load();
+        if pins.is_some() {
+            self.store.pins = pins;
+        }
         if let Some(key) = folder_key(&self.t().loc) {
             if here == DEFAULT_VIEW {
                 self.store.folders.remove(&key);
@@ -1250,7 +1311,7 @@ impl State {
             // A shortcut to a folder opens it here.
             self.go(Loc::Path(dir));
         } else {
-            open_file(&item.path);
+            open_file(self.hwnd, &item.path);
         }
     }
 
@@ -1262,7 +1323,7 @@ impl State {
             for i in sel {
                 let item = self.t().items[i].clone();
                 if !item.folder {
-                    open_file(&item.path);
+                    open_file(self.hwnd, &item.path);
                 }
             }
         }
@@ -1862,6 +1923,24 @@ impl State {
         let top = self.rows_top();
         let scroll = self.t().scroll;
         let n = self.t().order.len();
+        let view_h = ch - (top - y0);
+        if self.view == View::Icons && !self.t().heads.is_empty() {
+            // Grouped tiles: each group's rows that show, from the first to the last.
+            let (c, th) = (self.cols(), self.tile_h());
+            let (mut lo, mut hi) = (n, 0);
+            for (k, h) in self.t().heads.iter().enumerate() {
+                let rows = h.2.div_ceil(c);
+                let y = self.head_y(k) + GROUP_H;
+                if y + rows as f32 * th < scroll - th || y > scroll + view_h + th {
+                    continue;
+                }
+                let first = (((scroll - th - y) / th).floor().max(0.0) as usize).min(rows);
+                let last = (((scroll + view_h + th - y) / th).ceil().max(0.0) as usize).min(rows);
+                lo = lo.min(h.0 + first * c);
+                hi = hi.max((h.0 + last * c).min(h.0 + h.2));
+            }
+            return lo.min(n)..hi.max(lo.min(n));
+        }
         let (row, per) = match self.view {
             View::Details => (self.row_h(), 1),
             View::Icons => (self.tile_h(), self.cols()),
@@ -2170,24 +2249,22 @@ impl State {
         p.clip(x0, top, cw, chh - (top - cy0));
         let biggest = t.items.iter().filter(|i| i.folder).filter_map(|i| i.size).max().unwrap_or(0);
         // Group headings (Group by), above each group's first row.
-        if self.view == View::Details {
-            for (k, (pos, name, count)) in t.heads.iter().enumerate() {
-                let hy = top + *pos as f32 * self.row_h() + k as f32 * GROUP_H - scroll;
-                if hy + GROUP_H < top || hy > cy0 + chh {
-                    continue;
-                }
-                let label = format!("{name} ({count})");
-                p.text(&label, &f.label, x0 + 16.0, hy + 4.0, cw - 40.0, GROUP_H - 4.0, Align::Left, accent);
-                let lw = p.measure(&label, &f.label);
-                p.line(
-                    x0 + 24.0 + lw,
-                    hy + GROUP_H / 2.0 + 2.0,
-                    x0 + cw - 24.0,
-                    hy + GROUP_H / 2.0 + 2.0,
-                    Color::white(0.08),
-                    1.0,
-                );
+        for (k, (_, name, count)) in t.heads.iter().enumerate() {
+            let hy = top + self.head_y(k) - scroll;
+            if hy + GROUP_H < top || hy > cy0 + chh {
+                continue;
             }
+            let label = format!("{name} ({count})");
+            p.text(&label, &f.label, x0 + 16.0, hy + 4.0, cw - 40.0, GROUP_H - 4.0, Align::Left, accent);
+            let lw = p.measure(&label, &f.label);
+            p.line(
+                x0 + 24.0 + lw,
+                hy + GROUP_H / 2.0 + 2.0,
+                x0 + cw - 24.0,
+                hy + GROUP_H / 2.0 + 2.0,
+                Color::white(0.08),
+                1.0,
+            );
         }
         for (pos, bmp) in icons {
             let i = t.order[*pos];
@@ -2775,7 +2852,10 @@ impl State {
                 if self.view == View::Details && matches!(k, VK_LEFT | VK_RIGHT) {
                     return true;
                 }
-                let next = if at < 0 { 0 } else { (at + step).clamp(0, n as isize - 1) } as usize;
+                let mut next = if at < 0 { 0 } else { (at + step).clamp(0, n as isize - 1) } as usize;
+                if at >= 0 && self.view == View::Icons && !self.t().heads.is_empty() && matches!(k, VK_UP | VK_DOWN) {
+                    next = self.tile_beside(at as usize, k == VK_DOWN);
+                }
                 self.select_only(Some(next));
             }
             _ if ctrl => match vk as u8 {
@@ -2873,7 +2953,7 @@ impl State {
                         Some(loc) => self.go(loc),
                         None => {
                             // Not a place: maybe a program or a web address.
-                            open_file(text.trim());
+                            open_file(self.hwnd, text.trim());
                         }
                     }
                 } else {
@@ -2950,12 +3030,12 @@ fn natural(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Opens a file with its app. Pictures open in Cascade's viewer when their
 /// app can't open without Explorer (the Photos app is a Store app).
-fn open_file(path: &str) {
+fn open_file(owner: HWND, path: &str) {
     if crate::viewer::should_handle(path) {
         appwin::launch(&["--view", path]);
         return;
     }
-    crate::shell::open(path);
+    crate::shell::open_from(Some(owner), path);
 }
 
 /// The folder a shortcut (.lnk) points to, if it points to one.

@@ -4,6 +4,21 @@ What changed in Cascade, newest first. Every push to the main branch is built an
 published as a release (`build-N`), and its notes are the top section of this file.
 Settings > Updates > What's new opens the list.
 
+## 2026-11-28
+
+**New**
+- **Photos can edit**: right-click > *Edit...* (or press **E**) opens the picture in an editor with a pen, highlighter, eraser, **crop** and **rotate** (R); *Save* writes over the file, *Save copy* makes a new one, and closing asks about unsaved changes. The picture in Photos shows the edited version when you come back to it.
+- **Files, Group by in icon views**: groups now show their headings (and counts) over the tiles in Extra large to Small icons, as in Details, and the arrow keys move between groups.
+- **A file's menu is shorter**: the everyday commands (Open, Open with, Cut, Copy, Rename, Delete, Properties...) stay, and what other apps add (7-Zip, WinRAR, Resize, Share...) is under **More options**.
+- **Uninstall an app** has an icon beside each entry: Store apps, drivers, runtimes, games and everything else each have their own.
+
+**Fixed**
+- **Pasting a picture into Paint**: pictures are put on the clipboard as a plain 24-bit picture (as most programs expect) instead of a 32-bit one with an alpha channel, which Paint can show blank.
+- **Photos, Open with**: right-click > Open with... did nothing; it now opens Windows' list of apps.
+- **Open with for an unknown file type** (Files): the "How do you want to open this file?" box comes up over the Files window instead of in a corner of the screen.
+- **Camera**: choosing another Quality could freeze the preview, because the new reader started before the old one had let go of the camera. It now waits for it.
+- **Files, view settings lost** (such as Downloads grouped by Date modified): Files windows overwrote each other's saved settings with their own old copy. Each now changes only its own entry in the file.
+
 ## 2026-11-27
 
 **Fixed**
