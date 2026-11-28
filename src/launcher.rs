@@ -205,7 +205,8 @@ fn start_folder_shortcuts() -> Vec<(String, String)> {
             }
             let is_lnk = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk"));
             let Some(name) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else { continue };
-            if is_lnk && !name.to_lowercase().starts_with("uninstall") && !name.eq_ignore_ascii_case("cascade settings") {
+            if is_lnk && !name.to_lowercase().starts_with("uninstall") && !name.eq_ignore_ascii_case("cascade settings")
+            {
                 out.push((name, path.to_string_lossy().into_owned()));
             }
         }
