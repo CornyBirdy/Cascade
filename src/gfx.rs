@@ -695,10 +695,20 @@ impl Painter<'_> {
             return;
         }
         // Whole-pixel origin: grayscale text drawn between pixel rows is smeared.
-        let (x, y) = (self.snap(x), self.snap(y));
+        let (mut x, mut y, mut w, mut h) = (self.snap(x), self.snap(y), w, h);
+        // The icon font's glyphs are drawn at the font's size however small the
+        // box they're asked to sit in (a round button's is smaller than the
+        // glyph), so a clip to that box cuts their edges off. Give them room
+        // round the box instead, and no clip.
+        let is_icon = self.gfx.fonts.icons.as_ref().is_some_and(|i| i.as_raw() == font.as_raw());
+        if is_icon && matches!(align, Align::Center) {
+            let room = 16.0;
+            (x, y, w, h) = (x - room, y - room, w + 2.0 * room, h + 2.0 * room);
+        }
         let Some(layout) = self.layout(s, font, w, h, align) else { return };
+        let options = if is_icon { D2D1_DRAW_TEXT_OPTIONS_NONE } else { D2D1_DRAW_TEXT_OPTIONS_CLIP };
         unsafe {
-            self.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            self.rt.DrawTextLayout(pt(x, y), &layout, self.brush(c), options);
         }
     }
 
