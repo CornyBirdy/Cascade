@@ -12,6 +12,7 @@
 //! the shell's own menus (a file's Open with, Send to...) come out the same.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 use std::time::Instant;
 
@@ -120,6 +121,20 @@ static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// highlight that glides. Off, they open at once and the highlight jumps.
 pub fn configure(on: bool) {
     ANIMATE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Menus drawn light, as Windows draws them in light mode (Files sets it
+/// to follow Windows' app mode, as Explorer's menus do; each of Cascade's
+/// apps is its own process, so it changes only that app's menus).
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_light(on: bool) {
+    LIGHT.store(on, Ordering::Relaxed);
+}
+
+/// A colour for what `style_of` gives on a light menu: the same hue, darker.
+fn on_light(c: Color) -> Color {
+    Color(c.0 * 0.62, c.1 * 0.62, c.2 * 0.62, c.3)
 }
 
 fn animate() -> bool {
@@ -813,25 +828,22 @@ impl State {
                     Color(0.0, 0.0, 0.0, 0.035),
                 );
             }
-            d.rrect(x0, y0, p.w, p.h, RADIUS, Color(0.165, 0.165, 0.172, 0.985));
-            d.stroke_rrect(x0 + 0.5, y0 + 0.5, p.w - 1.0, p.h - 1.0, RADIUS, Color::white(0.09), 1.0);
+            let light = LIGHT.load(Ordering::Relaxed);
+            // Ink: white on the dark panel, near-black on the light one.
+            let ink = |a: f32| if light { Color(0.0, 0.0, 0.0, (a * 0.95).min(0.9)) } else { Color::white(a) };
+            let panel = if light { Color(0.976, 0.976, 0.976, 0.99) } else { Color(0.165, 0.165, 0.172, 0.985) };
+            d.rrect(x0, y0, p.w, p.h, RADIUS, panel);
+            d.stroke_rrect(x0 + 0.5, y0 + 0.5, p.w - 1.0, p.h - 1.0, RADIUS, ink(0.09), 1.0);
             if p.filtering {
                 let (fx, fy, fw, fh) = (x0 + 6.0, y0 + 6.0, p.w - 12.0, FILTER_H - 10.0);
-                d.rrect(fx, fy, fw, fh, 5.0, Color::white(0.06));
-                d.rrect(
-                    fx,
-                    fy + fh - 2.0,
-                    fw,
-                    2.0,
-                    1.0,
-                    if p.filter.is_empty() { Color::white(0.2) } else { theme::accent() },
-                );
-                d.stroke_circle(fx + 15.0, fy + fh / 2.0 - 1.0, 4.5, Color::white(0.55), 1.3);
-                d.line(fx + 18.2, fy + fh / 2.0 + 2.2, fx + 21.5, fy + fh / 2.0 + 5.5, Color::white(0.55), 1.3);
+                d.rrect(fx, fy, fw, fh, 5.0, ink(0.06));
+                d.rrect(fx, fy + fh - 2.0, fw, 2.0, 1.0, if p.filter.is_empty() { ink(0.2) } else { theme::accent() });
+                d.stroke_circle(fx + 15.0, fy + fh / 2.0 - 1.0, 4.5, ink(0.55), 1.3);
+                d.line(fx + 18.2, fy + fh / 2.0 + 2.2, fx + 21.5, fy + fh / 2.0 + 5.5, ink(0.55), 1.3);
                 let (text, c) = if p.filter.is_empty() {
-                    ("Type to filter".to_string(), Color::white(0.4))
+                    ("Type to filter".to_string(), ink(0.4))
                 } else {
-                    (format!("{}\u{2502}", p.filter), Color::white(0.92))
+                    (format!("{}\u{2502}", p.filter), ink(0.92))
                 };
                 d.text(&text, &f.body, fx + 30.0, fy, fw - 36.0, fh - 2.0, Align::Left, c);
             }
@@ -841,7 +853,7 @@ impl State {
                 let gy = y0 + g - p.scroll;
                 let hot = p.hover.and_then(|h| p.shown.iter().position(|&s| s == h)).map_or(0, |n| p.col_of(n));
                 let gx = x0 + hot as f32 * p.col_w;
-                d.rrect(gx + PAD, gy + 2.0, p.col_w - PAD * 2.0, ROW - 4.0, 4.0, Color::white(0.075));
+                d.rrect(gx + PAD, gy + 2.0, p.col_w - PAD * 2.0, ROW - 4.0, 4.0, ink(0.075));
             }
             let checks = p.entries.iter().any(|e| matches!(e, Entry::Item(it) if it.checked));
             let lead = if checks { 34.0 } else { 14.0 };
@@ -855,19 +867,10 @@ impl State {
                 let (cx0, cwid) = (x0 + p.col_of(row) as f32 * p.col_w, p.col_w);
                 match &p.entries[i] {
                     Entry::Separator => {
-                        d.rrect(cx0 + PAD + 8.0, ry + SEP / 2.0, cwid - PAD * 2.0 - 16.0, 1.0, 0.0, Color::white(0.09));
+                        d.rrect(cx0 + PAD + 8.0, ry + SEP / 2.0, cwid - PAD * 2.0 - 16.0, 1.0, 0.0, ink(0.09));
                     }
                     Entry::Header(text) => {
-                        d.text(
-                            text,
-                            &f.small,
-                            cx0 + 14.0,
-                            ry + 6.0,
-                            cwid - 28.0,
-                            rh - 6.0,
-                            Align::Left,
-                            Color::white(0.5),
-                        );
+                        d.text(text, &f.small, cx0 + 14.0, ry + 6.0, cwid - 28.0, rh - 6.0, Align::Left, ink(0.5));
                     }
                     Entry::Item(it) => {
                         let a = if it.enabled { 0.93 } else { 0.38 };
@@ -884,19 +887,20 @@ impl State {
                         // Its icon, in the colour that goes with what it does.
                         if let (Some((glyph, tint)), Some(font), true) = (item_style(it), &f.icons, p.icons) {
                             if let Some(ch) = char::from_u32(glyph) {
+                                let tint = if light { on_light(tint) } else { tint };
                                 let c = tint.alpha(if it.enabled { 0.95 } else { 0.35 });
                                 d.text(&ch.to_string(), font, cx0 + lead, ry, 16.0, rh, Align::Center, c);
                             }
                         }
-                        d.text(&it.text, font, cx0 + lead + icon_w, ry, tw, rh, Align::Left, Color::white(a));
+                        d.text(&it.text, font, cx0 + lead + icon_w, ry, tw, rh, Align::Left, ink(a));
                         if !it.hint.is_empty() {
                             let hx = cx0 + cwid - right - hint_w;
-                            d.text(&it.hint, &f.small, hx, ry, hint_w, rh, Align::Right, Color::white(a * 0.55));
+                            d.text(&it.hint, &f.small, hx, ry, hint_w, rh, Align::Right, ink(a * 0.55));
                         }
                         if !it.sub.is_empty() {
                             let (ax, ay) = (cx0 + cwid - 18.0, ry + rh / 2.0);
-                            d.line(ax - 2.0, ay - 4.0, ax + 2.0, ay, Color::white(a * 0.8), 1.4);
-                            d.line(ax + 2.0, ay, ax - 2.0, ay + 4.0, Color::white(a * 0.8), 1.4);
+                            d.line(ax - 2.0, ay - 4.0, ax + 2.0, ay, ink(a * 0.8), 1.4);
+                            d.line(ax + 2.0, ay, ax - 2.0, ay + 4.0, ink(a * 0.8), 1.4);
                         }
                     }
                 }
@@ -908,10 +912,10 @@ impl State {
                 let track = p.h - top - PAD * 2.0;
                 let bar = (track * (p.h - top) / (p.h - top + max)).max(24.0);
                 let by = y0 + top + PAD + (track - bar) * (p.scroll / max);
-                d.rrect(x0 + p.w - 6.0, by, 3.0, bar, 1.5, Color::white(0.3));
+                d.rrect(x0 + p.w - 6.0, by, 3.0, bar, 1.5, ink(0.3));
             }
             if p.filtering && p.shown.is_empty() {
-                d.text("Nothing matches", &f.body, x0, y0 + top + 4.0, p.w, ROW, Align::Center, Color::white(0.45));
+                d.text("Nothing matches", &f.body, x0, y0 + top + 4.0, p.w, ROW, Align::Center, ink(0.45));
             }
         }
         let alpha = (t * 255.0) as u8;

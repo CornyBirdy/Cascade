@@ -188,7 +188,8 @@ pub fn init() {
 // the minimise, maximise and close buttons drawn beside it, as Explorer
 // does: `frameless` removes the caption (keeping the resize edges, the
 // shadow and the rounded corners), `edge_hit` gives back the top resize
-// edge, and `caption_buttons` draws the three buttons.
+// edge, and the app draws the three buttons itself (`caption_at` finds
+// which is under the pointer, `caption_press` presses it).
 
 /// The width of each caption button (as Windows 11's).
 pub const CAPTION_W: f32 = 46.0;
@@ -264,23 +265,6 @@ pub fn caption_at(x: f32, y: f32, w: f32, h: f32) -> Option<u8> {
         return None;
     }
     Some(((x - (w - 3.0 * CAPTION_W)) / CAPTION_W).floor().clamp(0.0, 2.0) as u8)
-}
-
-/// Draws the three caption buttons at the top right, `lit` the one under the pointer.
-pub fn caption_buttons(p: &Painter, f: &Fonts, hwnd: HWND, w: f32, h: f32, lit: Option<u8>) {
-    let glyphs = [0xE921u32, if maximized(hwnd) { 0xE923 } else { 0xE922 }, 0xE8BB];
-    for (i, g) in glyphs.iter().enumerate() {
-        let x = w - (3 - i) as f32 * CAPTION_W;
-        let on = lit == Some(i as u8);
-        if on {
-            let c = if i == 2 { Color(0.77, 0.11, 0.14, 1.0) } else { Color::white(0.08) };
-            p.rrect(x, 0.0, CAPTION_W, h, 0.0, c);
-        }
-        if let (Some(font), Some(ch)) = (&f.icons, char::from_u32(*g)) {
-            let c = Color::white(if on { 1.0 } else { 0.8 });
-            p.text(&ch.to_string(), font, x, 0.0, CAPTION_W, h, crate::gfx::Align::Center, c);
-        }
-    }
 }
 
 /// Presses caption button `b` (as `caption_at` numbers them).

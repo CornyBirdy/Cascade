@@ -300,6 +300,18 @@ impl Gfx {
         }
     }
 
+    /// Cascade's font (Segoe UI Variable) at `size` px, for a surface that
+    /// wants sizes other than `fonts`' own (Files, as Explorer sets it).
+    pub fn font(&self, size: f32, semibold: bool) -> Option<IDWriteTextFormat> {
+        let weight = if semibold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
+        text_format(&self.dw, size, weight).ok()
+    }
+
+    /// Windows' icon font at `size` px, centred (none if it isn't there).
+    pub fn icon_font(&self, size: f32) -> Option<IDWriteTextFormat> {
+        icon_format(&self.dw, size)
+    }
+
     fn create_target(factory: &ID2D1Factory) -> Result<ID2D1DCRenderTarget> {
         // Software rendering: the surfaces are small, and it avoids a GPU
         // readback every frame plus keeps the GPU asleep.
@@ -851,6 +863,36 @@ impl Painter<'_> {
             }
             s.EndFigure(D2D1_FIGURE_END_CLOSED);
         })
+    }
+
+    /// A tab as Windows 11 draws the one in front: `w` wide from `x`, from
+    /// `y` down to `bottom`, its top corners rounded by `r` and its foot
+    /// curving out by `r` on each side into what's below it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tab(&self, x: f32, y: f32, w: f32, bottom: f32, r: f32, c: Color) {
+        let arc = |s: &ID2D1GeometrySink, px: f32, py: f32, dir: D2D1_SWEEP_DIRECTION| unsafe {
+            s.AddArc(&D2D1_ARC_SEGMENT {
+                point: pt(px, py),
+                size: D2D_SIZE_F { width: r, height: r },
+                rotationAngle: 0.0,
+                sweepDirection: dir,
+                arcSize: D2D1_ARC_SIZE_SMALL,
+            });
+        };
+        let (cw, ccw) = (D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE);
+        if let Some(g) = self.path(|s| unsafe {
+            s.BeginFigure(pt(x - r, bottom), D2D1_FIGURE_BEGIN_FILLED);
+            arc(s, x, bottom - r, ccw);
+            s.AddLine(pt(x, y + r));
+            arc(s, x + r, y, cw);
+            s.AddLine(pt(x + w - r, y));
+            arc(s, x + w, y + r, cw);
+            s.AddLine(pt(x + w, bottom - r));
+            arc(s, x + w + r, bottom, ccw);
+            s.EndFigure(D2D1_FIGURE_END_CLOSED);
+        }) {
+            self.fill_geometry(&g, c);
+        }
     }
 
     pub fn polygon(&self, pts: &[(f32, f32)], c: Color) {
