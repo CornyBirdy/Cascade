@@ -795,8 +795,11 @@ impl Launcher {
         self.list_anim.set(1.0);
         self.hovered = None;
         self.open = true;
-        // Pick up newly installed apps now and then.
-        if self.scanned.is_none_or(|t| t.elapsed().as_secs() > 300) {
+        // Re-read the Start folders every time Start opens (the scan runs off
+        // the UI thread; the 3 s guard stops a rapid open/close from piling
+        // them up), so added and removed shortcuts show straight away.
+        if self.scanned.is_none_or(|t| t.elapsed().as_secs() >= 3) {
+            self.scanned = Some(Instant::now());
             spawn_scan();
         }
         if !self.window_visible {

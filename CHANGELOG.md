@@ -13,6 +13,7 @@ Settings > Updates > What's new opens the list.
 - **Uninstall an app** has an icon beside each entry: Store apps, drivers, runtimes, games and everything else each have their own.
 
 **Fixed**
+- **Clicks going to the desktop instead of an app** (shell mode): the desktop icons' see-through window could end up over other windows, so clicking an app drew a selection box on the desktop and the app never got the focus. The icons now go back under every app as soon as the desktop or they move in the order, or the pointer passes over an app they cover, and a click that lands on them that way brings the app to the front instead. `cascade.log` names the app they were over.
 - **Pasting a picture into Paint**: pictures are put on the clipboard as a plain 24-bit picture (as most programs expect) instead of a 32-bit one with an alpha channel, which Paint can show blank.
 - **Photos, Open with**: right-click > Open with... did nothing; it now opens Windows' list of apps.
 - **Open with for an unknown file type** (Files): the "How do you want to open this file?" box comes up over the Files window instead of in a corner of the screen.

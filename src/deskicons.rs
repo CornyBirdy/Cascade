@@ -884,18 +884,110 @@ pub fn is_icons(hwnd: HWND) -> bool {
     hwnd.0 as isize != 0 && ICONS.load(std::sync::atomic::Ordering::Relaxed) == hwnd.0 as isize
 }
 
+/// Sent to the icons' window (posted, so it runs once Windows has finished
+/// moving windows about) to put it back just above the desktop. Only the
+/// icons' window reads it (see `is_icons`).
+pub const LOWER: u32 = WM_APP + 0x200;
+
+/// Asks for `ensure_low` once the window moves in progress are done: when
+/// the desktop or the icons' window has just moved in the order.
+pub fn lower_soon() {
+    let h = ICONS.load(std::sync::atomic::Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), LOWER, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Whether a window is one you can see (shown, not minimised, not hidden
+/// by Windows on another virtual desktop).
+fn seen(h: HWND) -> bool {
+    unsafe {
+        if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+        let mut cloaked = 0u32;
+        let _ = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            h,
+            windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut std::ffi::c_void,
+            4,
+        );
+        cloaked == 0
+    }
+}
+
+/// The first window you can see that's between the icons' window and the
+/// desktop, so under the icons: an app whose clicks the icons take (their
+/// window catches the pointer everywhere). None: the icons are where they
+/// should be, or only hidden and minimised windows are under them.
+fn covered(hwnd: HWND, desktop: HWND) -> Option<HWND> {
+    unsafe {
+        let mut h = GetWindow(hwnd, GW_HWNDNEXT).ok()?;
+        // (Bounded, in case the order changes under the walk.)
+        for _ in 0..4096 {
+            if h.is_invalid() || h == desktop {
+                return None;
+            }
+            if seen(h) {
+                return Some(h);
+            }
+            h = GetWindow(h, GW_HWNDNEXT).ok()?;
+        }
+        None
+    }
+}
+
+fn class_of(h: HWND) -> String {
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetClassNameW(h, &mut buf) }.max(0) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
 /// Puts the icons' window back just above the desktop if anything lifted
-/// it (asked every couple of seconds, and once it's first shown).
+/// it, or let a window in under it. Asked whenever the desktop or the icons
+/// move in the order, when the pointer moves over the icons, on a click,
+/// and every couple of seconds. Quick when nothing needs doing.
 pub fn ensure_low(hwnd: HWND) {
     let Some(desktop) = crate::shellmode::desktop() else { return };
     unsafe {
-        if !IsWindowVisible(hwnd).as_bool() || GetWindow(desktop, GW_HWNDPREV).ok() == Some(hwnd) {
+        if !IsWindowVisible(hwnd).as_bool() || GetWindow(hwnd, GW_HWNDNEXT).ok() == Some(desktop) {
             return;
+        }
+        // Over an app (rather than over hidden or minimised windows only,
+        // which are harmless): said in the log, at most every few seconds.
+        if let Some(app) = covered(hwnd, desktop) {
+            static SAID: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+            let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+            if said.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+                *said = Some(Instant::now());
+                let fg = GetForegroundWindow();
+                config::log(&format!(
+                    "desktop: the icons' window was over an app ({}; in front: {}); put back under it",
+                    class_of(app),
+                    class_of(fg)
+                ));
+            }
         }
         let Some(after) = low_slot(hwnd, desktop) else { return };
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
         let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, flags);
-        config::log("desktop: the icons' window had come up over apps; put back under them");
+    }
+}
+
+/// For a click on the icons: if their window had come up over an app, it's
+/// put back under it, and the app now under the pointer is answered (the
+/// click was meant for it). None: the click is the desktop's.
+pub fn app_under_pointer(hwnd: HWND) -> Option<HWND> {
+    let desktop = crate::shellmode::desktop()?;
+    covered(hwnd, desktop)?;
+    ensure_low(hwnd);
+    unsafe {
+        let mut p = POINT::default();
+        GetCursorPos(&mut p).ok()?;
+        let root = GetAncestor(WindowFromPoint(p), GA_ROOT);
+        (!root.is_invalid() && root != hwnd && root != desktop).then_some(root)
     }
 }
 

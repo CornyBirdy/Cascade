@@ -751,6 +751,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
             crate::deskicons::keep_low(hwnd, &mut *(lp.0 as *mut WINDOWPOS));
             return DefWindowProcW(hwnd, m, wp, lp);
         }
+        // Moved in the order all the same (Windows moves a window's owned
+        // windows its own way): checked again once the moves are done.
+        WM_WINDOWPOSCHANGED if crate::deskicons::is_icons(hwnd) => {
+            if !(*(lp.0 as *const WINDOWPOS)).flags.contains(SWP_NOZORDER) {
+                crate::deskicons::lower_soon();
+            }
+            return DefWindowProcW(hwnd, m, wp, lp);
+        }
+        crate::deskicons::LOWER if crate::deskicons::is_icons(hwnd) => {
+            crate::deskicons::ensure_low(hwnd);
+            return LRESULT(0);
+        }
+        // A click on the icons when their window had come up over an app
+        // (it catches the pointer everywhere): the app's, not the desktop's.
+        // The app comes to the front, and the click isn't taken as the
+        // start of a rubber band.
+        WM_MOUSEACTIVATE if crate::deskicons::is_icons(hwnd) => {
+            if let Some(app) = crate::deskicons::app_under_pointer(hwnd) {
+                let _ = SetForegroundWindow(app);
+                return LRESULT(MA_NOACTIVATEANDEAT as isize);
+            }
+        }
         WM_MOUSEACTIVATE => {
             // Only the notch, dock and previews refuse focus.
             if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0 {
@@ -1880,8 +1902,22 @@ impl App {
 
     fn handle_deskicons(&mut self, m: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         let d = self.deskicons.as_mut()?;
+        // A click meant for an app the icons' window had come up over, with
+        // that window already active (else `WM_MOUSEACTIVATE` saw to it).
+        if matches!(m, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN) {
+            if let Some(app) = crate::deskicons::app_under_pointer(d.hwnd) {
+                unsafe {
+                    let _ = SetForegroundWindow(app);
+                }
+                return Some(LRESULT(0));
+            }
+        }
         match m {
             WM_MOUSEMOVE => {
+                // The pointer only reaches the icons over an app if their
+                // window came up over it: put back at once, so the click
+                // that follows goes to the app.
+                crate::deskicons::ensure_low(d.hwnd);
                 let (x, y) = lparam_xy(lp);
                 d.on_move(x, y);
             }

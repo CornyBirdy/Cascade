@@ -880,6 +880,13 @@ unsafe extern "system" fn desktop_proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARA
             pos.flags &= !SWP_NOZORDER;
             LRESULT(0)
         }
+        // Gone to the bottom, maybe under windows that were there before
+        // it (minimised ones, or one put back without coming to the front):
+        // the icons go back right above it, under every one of those.
+        WM_WINDOWPOSCHANGED => {
+            crate::deskicons::lower_soon();
+            DefWindowProcW(hwnd, m, wp, lp)
+        }
         WM_ACTIVATE => {
             if wp.0 & 0xFFFF != 0 {
                 msg::post(msg::DESKTOP, 0, 0);
