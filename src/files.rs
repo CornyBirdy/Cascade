@@ -191,7 +191,7 @@ fn mica(base: Color, strength: f32) -> Color {
     let Some(px) = crate::wallpaper::thumbnail(8, 8) else { return base };
     let n = (px.len() / 4).max(1) as f32;
     let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0 {
         b += p[0] as f32;
         g += p[1] as f32;
         r += p[2] as f32;
