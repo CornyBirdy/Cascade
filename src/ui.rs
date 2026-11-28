@@ -1321,7 +1321,8 @@ impl App {
         }
         shell::register_appbar(hwnd);
         let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-        let size = Spring::new(0.0, 420.0, 32.0);
+        // Sizes and the corner are in pixels (see `Spring::pixels`).
+        let size = Spring::new(0.0, 420.0, 32.0).pixels();
         let mut start_w = size;
         start_w.value = cfg.idle_width * 0.4;
         Ok(Self {
@@ -1340,7 +1341,7 @@ impl App {
             // Start small and flat so the notch grows in on launch.
             w: start_w,
             h: size,
-            r: Spring::new(0.0, 420.0, 34.0),
+            r: Spring::new(0.0, 420.0, 34.0).pixels(),
             fade: Spring::new(0.0, 260.0, 30.0),
             cal_in: Spring::new(1.0, 110.0, 21.0),
             tab: Spring::new(0.0, 520.0, 42.0),
@@ -2723,6 +2724,7 @@ impl App {
                 }
             }
             WM_DEVICECHANGE => {
+                crate::tablet::devices_changed();
                 if let Some(c) = unsafe { devices::parse(wp, lp) } {
                     self.on_device(c);
                 }
@@ -3544,6 +3546,9 @@ impl App {
         }
         if event == EVENT_SYSTEM_FOREGROUND || event == EVENT_SYSTEM_MOVESIZEEND || event == EVENT_SYSTEM_MINIMIZEEND {
             self.sync_fullscreen();
+        }
+        if event == EVENT_SYSTEM_FOREGROUND {
+            crate::superdrag::foreground(hwnd);
         }
         // A window began moving: in shell mode, it can be snapped by dragging it to an edge.
         if event == EVENT_SYSTEM_MOVESIZESTART {

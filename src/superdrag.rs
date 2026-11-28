@@ -8,6 +8,13 @@
 //! The moves are posted to the window rather than waited for, so one that has
 //! stopped answering can't hold up the mouse.
 //!
+//! The hook is only in while Win is held (the key hook says when it goes down
+//! and up), so the rest of the time no mouse movement anywhere on the PC
+//! passes through Cascade. A mouse polling at 1000 Hz or more would otherwise
+//! wake it that many times a second, and every move would wait on it. While
+//! an admin window is in front the key hook can't see Win at all, so then
+//! the mouse hook stays in.
+//!
 //! The Win key itself is left alone: one mask key tap (see `keyhook`) makes
 //! Windows treat it as part of a combination, so letting go of it doesn't open
 //! its Start menu. A maximised window comes out of it under the pointer, as
@@ -16,7 +23,7 @@
 //! when it runs (Windows doesn't let Cascade move them itself); the desktop
 //! and the taskbar are left to the click.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
@@ -37,6 +44,62 @@ static FROM: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
 static HELD: AtomicBool = AtomicBool::new(false);
 /// The window being dragged has admin rights: the helper moves it.
 static VIA_HELPER: AtomicBool = AtomicBool::new(false);
+/// The hook thread's id while it runs (0: super drag is off).
+static TID: AtomicU32 = AtomicU32::new(0);
+/// Which Win keys are held, as the key hook saw them (bit 0 left, bit 1 right).
+static WIN_KEYS: AtomicU8 = AtomicU8::new(0);
+/// The window in front has admin rights, so the key hook can't see Win.
+static ADMIN_FRONT: AtomicBool = AtomicBool::new(false);
+/// Thread messages: put the mouse hook in, or take it out if it isn't needed.
+const ARM: u32 = WM_APP + 1;
+const DISARM: u32 = WM_APP + 2;
+
+/// Whether the mouse hook is needed now: Win is held, a drag is going on, or
+/// an admin window has the keyboard (Win can't be seen then).
+fn wanted() -> bool {
+    WIN_KEYS.load(Ordering::Relaxed) != 0 || HELD.load(Ordering::Relaxed) || ADMIN_FRONT.load(Ordering::Relaxed)
+}
+
+/// Tells the hook thread to put the hook in or take it out, to match `wanted`.
+fn sync() {
+    let tid = TID.load(Ordering::Relaxed);
+    if tid != 0 {
+        let m = if wanted() { ARM } else { DISARM };
+        unsafe {
+            let _ = PostThreadMessageW(tid, m, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// A Win key went down or up (from the key hook, so it must be quick).
+pub fn win_key(right: bool, down: bool) {
+    let bit = if right { 2 } else { 1 };
+    let before =
+        if down { WIN_KEYS.fetch_or(bit, Ordering::Relaxed) } else { WIN_KEYS.fetch_and(!bit, Ordering::Relaxed) };
+    // Only when it changes (a held key repeats its press).
+    if (before != 0) != (WIN_KEYS.load(Ordering::Relaxed) != 0) {
+        sync();
+    }
+}
+
+/// A window came to the front: with admin rights, the hook stays in while
+/// it's there (the key hook can't see Win then). UI thread.
+pub fn foreground(h: HWND) {
+    if TID.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let admin = crate::helper::window_above_us(h);
+    let mut changed = ADMIN_FRONT.swap(admin, Ordering::Relaxed) != admin;
+    // A Win release the key hook never saw (an admin window had the keyboard)
+    // would leave the hook in for good.
+    if WIN_KEYS.load(Ordering::Relaxed) != 0 && !down(VK_LWIN) && !down(VK_RWIN) {
+        WIN_KEYS.store(0, Ordering::Relaxed);
+        changed = true;
+    }
+    if changed {
+        sync();
+    }
+}
 
 fn down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
@@ -156,6 +219,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if !down(VK_LBUTTON) {
                     WINDOW.store(0, Ordering::Relaxed);
                     HELD.store(false, Ordering::Relaxed);
+                    sync();
                 } else {
                     let h = HWND(WINDOW.load(Ordering::Relaxed) as *mut _);
                     let f = |i: usize| FROM[i].load(Ordering::Relaxed);
@@ -178,6 +242,8 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_LBUTTONUP if HELD.swap(false, Ordering::Relaxed) => {
                 WINDOW.store(0, Ordering::Relaxed);
                 crate::wobble::release();
+                // Win let go during the drag: the hook comes out now.
+                sync();
                 return LRESULT(1);
             }
             _ => {}
@@ -194,6 +260,7 @@ pub fn configure(on: bool) {
         *thread = start();
     } else if !on {
         if let Some((id, handle)) = thread.take() {
+            TID.store(0, Ordering::Relaxed);
             unsafe {
                 let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -204,8 +271,10 @@ pub fn configure(on: bool) {
     }
 }
 
-/// Starts the hook's thread: it installs the hook, then only waits for the
-/// mouse (and the word to stop). None if the hook couldn't be installed.
+/// Starts the hook's thread: it tries the hook once (to say whether it can be
+/// had), then waits to be told to put it in (Win held) or take it out, for the
+/// mouse while it's in, and for the word to stop. None if the hook couldn't be
+/// installed.
 fn start() -> Option<(u32, JoinHandle<()>)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || unsafe {
@@ -213,13 +282,41 @@ fn start() -> Option<(u32, JoinHandle<()>)> {
         let mut m = MSG::default();
         // Makes its message queue, so it can be told to stop.
         let _ = PeekMessageW(&mut m, None, 0, 0, PM_NOREMOVE);
-        let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(proc), None, 0).ok();
-        let _ = tx.send(hook.is_some().then(|| GetCurrentThreadId()));
-        let Some(hook) = hook else { return };
-        while GetMessageW(&mut m, None, 0, 0).0 > 0 {
-            DispatchMessageW(&m);
+        let mut hook = SetWindowsHookExW(WH_MOUSE_LL, Some(proc), None, 0).ok();
+        if hook.is_none() {
+            let _ = tx.send(None);
+            return;
         }
-        let _ = UnhookWindowsHookEx(hook);
+        TID.store(GetCurrentThreadId(), Ordering::Relaxed);
+        let _ = tx.send(Some(GetCurrentThreadId()));
+        // Out again until it's wanted (anything wanted meanwhile has posted an ARM).
+        if !wanted() {
+            if let Some(h) = hook.take() {
+                let _ = UnhookWindowsHookEx(h);
+            }
+        }
+        while GetMessageW(&mut m, None, 0, 0).0 > 0 {
+            match m.message {
+                ARM if hook.is_none() => {
+                    hook = SetWindowsHookExW(WH_MOUSE_LL, Some(proc), None, 0).ok();
+                    if hook.is_none() {
+                        crate::config::log("super drag: the mouse hook could not be put back in");
+                    }
+                }
+                DISARM if !wanted() => {
+                    if let Some(h) = hook.take() {
+                        let _ = UnhookWindowsHookEx(h);
+                    }
+                }
+                ARM | DISARM => {}
+                _ => {
+                    DispatchMessageW(&m);
+                }
+            }
+        }
+        if let Some(h) = hook {
+            let _ = UnhookWindowsHookEx(h);
+        }
     });
     match rx.recv() {
         Ok(Some(id)) => Some((id, handle)),

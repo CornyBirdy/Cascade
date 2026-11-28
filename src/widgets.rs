@@ -942,7 +942,11 @@ impl Widgets {
                         s.1.snap(cx);
                         s.2.snap(cy);
                     }
-                    None => self.slots.push((card, Spring::new(cx, 600.0, 44.0), Spring::new(cy, 600.0, 44.0))),
+                    None => self.slots.push((
+                        card,
+                        Spring::new(cx, 600.0, 44.0).pixels(),
+                        Spring::new(cy, 600.0, 44.0).pixels(),
+                    )),
                 }
             }
             self.slots.retain(|s| cards.iter().any(|c| c.0 == s.0));

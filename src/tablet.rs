@@ -16,9 +16,13 @@
 //! keeping the tablet's proportions, left-handed, how firm the pressure is,
 //! and what the pen's two buttons do. A tablet Windows already drives as a
 //! pen (Wacom and the like) is left alone.
+//!
+//! With no tablet plugged in, the driver waits for Windows to say a device
+//! arrived (`devices_changed`) instead of reading every HID device on the PC
+//! every few seconds, which was most of what Cascade did at idle.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
@@ -274,6 +278,32 @@ pub struct Setup {
 static SETUP: Mutex<Option<Setup>> = Mutex::new(None);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STATUS: Mutex<String> = Mutex::new(String::new());
+/// Set (and the driver woken) when a device came or the settings changed.
+static KICK: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// With no tablet there: how long to wait between looks when nothing says a
+/// device came, and how long to keep looking every two seconds after one did (a
+/// tablet's HID side shows up a moment after its USB device does).
+const IDLE_LOOK: Duration = Duration::from_secs(60);
+const AFTER_DEVICE: Duration = Duration::from_secs(10);
+
+/// A device came or went (`WM_DEVICECHANGE`): look for a tablet now.
+pub fn devices_changed() {
+    if RUNNING.load(Ordering::Acquire) {
+        kick();
+    }
+}
+
+fn kick() {
+    *KICK.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    KICK.1.notify_all();
+}
+
+/// Waits up to `most` for a kick; true if one came.
+fn wait_kick(most: Duration) -> bool {
+    let guard = KICK.0.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut kicked, _) = KICK.1.wait_timeout_while(guard, most, |k| !*k).unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *kicked)
+}
 
 fn setup() -> Option<Setup> {
     SETUP.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -315,6 +345,9 @@ pub fn configure(cfg: &crate::config::Config) {
     *SETUP.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
     if on && !RUNNING.swap(true, Ordering::AcqRel) {
         std::thread::spawn(run);
+    } else {
+        // Waiting for a tablet: look again with the new settings (or stop).
+        kick();
     }
 }
 
@@ -865,6 +898,8 @@ fn vendor_driver() -> Option<&'static str> {
 
 fn run() {
     crate::config::log("tablet: driver started");
+    // Until when to look every two seconds (a device just came, or the driver just started).
+    let mut eager = Instant::now() + AFTER_DEVICE;
     while setup().is_some_and(|s| s.on) {
         let list = interfaces();
         let found = MODELS.iter().find_map(|m| {
@@ -874,7 +909,10 @@ fn run() {
         });
         let Some((m, path)) = found else {
             set_status("No tablet it knows is plugged in (10moon, Vinsa and their relatives).");
-            std::thread::sleep(Duration::from_secs(3));
+            let wait = if Instant::now() < eager { Duration::from_secs(2) } else { IDLE_LOOK };
+            if wait_kick(wait) {
+                eager = Instant::now() + AFTER_DEVICE;
+            }
             continue;
         };
         if let Some(other) = vendor_driver() {

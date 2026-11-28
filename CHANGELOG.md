@@ -12,6 +12,11 @@ Settings > Updates > What's new opens the list.
 - **A file's menu is shorter**: the everyday commands (Open, Open with, Cut, Copy, Rename, Delete, Properties...) stay, and what other apps add (7-Zip, WinRAR, Resize, Share...) is under **More options**.
 - **Uninstall an app** has an icon beside each entry: Store apps, drivers, runtimes, games and everything else each have their own.
 
+**Lighter**
+- **Pen tablet driver at rest**: with *Pen tablet* on and no tablet plugged in, Cascade opened every HID device on the PC every 3 seconds to look for one, which was most of the CPU it used at idle (about 0.6% of a core, all day). It now waits for Windows to say a device was plugged in, and looks once a minute besides.
+- **Super drag no longer watches every mouse move**: its mouse hook was in all the time, so every movement of the mouse anywhere (a thousand or more a second with a gaming mouse) went through Cascade first. The hook now goes in only while the Win key is held, and stays in while an admin window is in front (Cascade can't see Win then). Dragging works as before.
+- **Animations stop drawing sooner**: the notch's size and corners, the Alt+Tab ring and the widget cards kept drawing frames until they were within a few thousandths of a pixel of where they were going, about a third of every move's frames with nothing visibly changing. They now stop within a tenth of a pixel, so opening and closing the notch draws roughly 35% fewer frames; fades and slides stop a little sooner too.
+
 **Fixed**
 - **Start, newly added apps missing**: the app list came only from Windows' Apps folder, which can lag well behind the Start Menu folders, even after a restart. Start now also reads the shortcuts in both Start Menu\Programs folders (yours and `C:\ProgramData\Microsoft\Windows\Start Menu\Programs`) directly, and the list is read again every time Start opens instead of at most every 5 minutes.
 - **Screen recording countdown**: the ring around the countdown jumped about instead of shrinking (it was drawn in degrees where radians were expected). It now runs down smoothly from twelve o'clock.

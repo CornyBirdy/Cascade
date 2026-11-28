@@ -337,6 +337,10 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             track(&WIN_LAST_DOWN, down, up);
             WIN_EVENT_AT.store(k.time, Ordering::Relaxed);
+            // Super drag's mouse hook is only in while Win is held.
+            if down || up {
+                crate::superdrag::win_key(vk == VK_RWIN.0, down);
+            }
             // Whatever happened while it was held (a mask tap, a swallowed
             // shortcut, a window taking the keyboard), look again shortly
             // after it's let go that Windows let go too.
