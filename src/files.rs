@@ -5,6 +5,11 @@
 //! folder below (instantly with the file index on); a sidebar with your
 //! folders and drives; details or icons (pictures and videos as thumbnails).
 //!
+//! It looks like Windows 11's File Explorer, down to the pixel where it can
+//! be: Explorer's colours (measured from it) in its dark and light modes,
+//! following Windows' app mode; its sizes at 100%; Segoe UI Variable at its
+//! sizes; Windows' own icon font and the shell's icons (see `Pal`, `Type`).
+//!
 //! As in Explorer: click, Ctrl+click, Shift+click and drag a box to select;
 //! double-click or Enter to open; F2 renames; Delete recycles (Shift for
 //! good); Ctrl+C, X, V, A; Ctrl+T, W, Tab for tabs; Alt+Left, Right, Up,
@@ -23,31 +28,202 @@ use std::time::Instant;
 use windows::core::{implement, w, Ref, Result as WinResult, BOOL, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
+use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::appwin::{self, size_text, LINE, PANEL};
+use crate::appwin::{self, size_text};
 use crate::filesio::{self, Item, Loc};
 use crate::gfx::{Align, Color, Gfx, Painter};
 use crate::{msg, theme};
 
-const TABS_H: f32 = 38.0;
-const BAR_H: f32 = 44.0;
-const CMD_H: f32 = 40.0;
-const SIDE_W: f32 = 214.0;
+// Sizes as Windows 11's File Explorer has them (measured from it at 100%).
+const TABS_H: f32 = 40.0;
+/// The tab in front: from here down to the address row.
+const TAB_TOP: f32 = 8.0;
+const BAR_H: f32 = 48.0;
+const CMD_H: f32 = 48.0;
+const SIDE_W: f32 = 230.0;
+/// The navigation pane's rows.
+const SIDE_ROW: f32 = 32.0;
 /// The details pane on the right.
 const PANE_W: f32 = 290.0;
 const HEAD_H: f32 = 30.0;
-const ROW_H: f32 = 30.0;
+const ROW_H: f32 = 28.0;
 /// Rows in compact view.
-const ROW_COMPACT: f32 = 24.0;
+const ROW_COMPACT: f32 = 22.0;
 const STATUS_H: f32 = 26.0;
-const TAB_W: f32 = 200.0;
+const TAB_W: f32 = 240.0;
+/// The minimise, maximise and close buttons' height.
+const CAP_H: f32 = 30.0;
+/// The buttons in the address row and the command bar: their height, and
+/// the width of one with only an icon.
+const BTN_H: f32 = 32.0;
+const BTN_W: f32 = 40.0;
+/// The arrow after each part of the path in the address bar.
+const CHEV: f32 = 26.0;
+
+/// `0xRRGGBB` as a colour.
+const fn rgb(c: u32) -> Color {
+    Color(((c >> 16) & 0xFF) as f32 / 255.0, ((c >> 8) & 0xFF) as f32 / 255.0, (c & 0xFF) as f32 / 255.0, 1.0)
+}
+
+/// Explorer's colours, dark or light as Windows' app mode is (Settings >
+/// Personalisation > Colours), measured from Explorer itself.
+#[derive(Clone, Copy)]
+struct Pal {
+    dark: bool,
+    /// The tab row (Mica: tinted by the wallpaper while the window's active).
+    strip: Color,
+    /// The tab in front and the address row under it.
+    layer: Color,
+    /// The address and search boxes.
+    field: Color,
+    field_edge: Color,
+    /// The command bar, the navigation pane, the list and the status bar.
+    base: Color,
+    /// The lines under the address row and the command bar.
+    line: Color,
+    /// The lines between groups of commands, of tabs and in the navigation pane.
+    sep: Color,
+    /// The lines between the columns' titles.
+    head_sep: Color,
+    text: Color,
+    /// Dates, types, sizes, the columns' titles.
+    text2: Color,
+    /// Greyed (a button that can't be used now).
+    text_off: Color,
+    /// Over a button.
+    hover: Color,
+    /// Rows and navigation pane entries: under the pointer, selected, both,
+    /// and selected in a window that isn't in front.
+    row_hover: Color,
+    row_sel: Color,
+    row_sel_hover: Color,
+    row_sel_idle: Color,
+    /// An edge round a selected row (light mode's blue outline), if any.
+    row_edge: Option<Color>,
+    /// Group by's headings.
+    group: Color,
+    scroll: Color,
+}
+
+const DARK: Pal = Pal {
+    dark: true,
+    strip: rgb(0x202020),
+    layer: rgb(0x2C2C2C),
+    field: rgb(0x383838),
+    field_edge: Color(1.0, 1.0, 1.0, 0.03),
+    base: rgb(0x191919),
+    line: rgb(0x3A3A3A),
+    sep: rgb(0x2E2E2E),
+    head_sep: rgb(0x5A5A5A),
+    text: rgb(0xFFFFFF),
+    text2: rgb(0xD0D0D0),
+    text_off: rgb(0x858585),
+    hover: Color(1.0, 1.0, 1.0, 0.06),
+    row_hover: rgb(0x2A2A2A),
+    row_sel: rgb(0x333333),
+    row_sel_hover: rgb(0x3D3D3D),
+    row_sel_idle: rgb(0x2D2D2D),
+    row_edge: None,
+    group: rgb(0xFFFFFF),
+    scroll: Color(1.0, 1.0, 1.0, 0.4),
+};
+
+const LIGHT: Pal = Pal {
+    dark: false,
+    strip: rgb(0xEEEEEE),
+    layer: rgb(0xF9F9F9),
+    field: rgb(0xFFFFFF),
+    field_edge: rgb(0xE5E5E5),
+    base: rgb(0xFFFFFF),
+    line: rgb(0xE5E5E5),
+    sep: rgb(0xE5E5E5),
+    head_sep: rgb(0xE5E5E5),
+    text: rgb(0x1A1A1A),
+    text2: rgb(0x5D5D5D),
+    text_off: rgb(0xA0A0A0),
+    hover: Color(0.0, 0.0, 0.0, 0.04),
+    row_hover: rgb(0xE5F3FF),
+    row_sel: rgb(0xCCE8FF),
+    row_sel_hover: rgb(0xCCE8FF),
+    row_sel_idle: rgb(0xD9D9D9),
+    row_edge: Some(rgb(0x99D1FF)),
+    group: rgb(0x1E3287),
+    scroll: Color(0.0, 0.0, 0.0, 0.45),
+};
+
+impl Pal {
+    /// Windows' app mode now (light unless apps are set to dark).
+    fn current() -> Self {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let light = crate::winset::reg_dword(
+            HKEY_CURRENT_USER,
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            "AppsUseLightTheme",
+        );
+        if light == Some(0) {
+            DARK
+        } else {
+            LIGHT
+        }
+    }
+
+    fn colorref(c: Color) -> COLORREF {
+        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        COLORREF(b(c.0) | (b(c.1) << 8) | (b(c.2) << 16))
+    }
+}
+
+/// Mica, as Windows draws it behind Explorer's tabs: the plain colour with a
+/// hint of the wallpaper's colour (its hue, not its brightness). Mica is
+/// blurred so far that it's all but one colour, so one colour, the
+/// wallpaper's average, stands in for it.
+fn mica(base: Color, strength: f32) -> Color {
+    let Some(px) = crate::wallpaper::thumbnail(8, 8) else { return base };
+    let n = (px.len() / 4).max(1) as f32;
+    let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+    for p in px.chunks_exact(4) {
+        b += p[0] as f32;
+        g += p[1] as f32;
+        r += p[2] as f32;
+    }
+    let (r, g, b) = (r / n / 255.0, g / n / 255.0, b / n / 255.0);
+    let l = 0.299 * r + 0.587 * g + 0.114 * b;
+    let tint = |base: f32, c: f32| (base + (c - l) * strength).clamp(0.0, 1.0);
+    Color(tint(base.0, r), tint(base.1, g), tint(base.2, b), 1.0)
+}
+
+/// The type Files draws with, at Explorer's sizes: 12 px for almost
+/// everything, 14 px for the path and the search box; Windows' icon font at
+/// the sizes Explorer's buttons use.
+struct Type {
+    t12: IDWriteTextFormat,
+    t14: IDWriteTextFormat,
+    i10: Option<IDWriteTextFormat>,
+    i12: Option<IDWriteTextFormat>,
+    i16: Option<IDWriteTextFormat>,
+}
+
+impl Type {
+    fn new(gfx: &Gfx) -> Self {
+        Type {
+            t12: gfx.font(12.0, false).unwrap_or_else(|| gfx.fonts.body.clone()),
+            t14: gfx.font(14.0, false).unwrap_or_else(|| gfx.fonts.body.clone()),
+            i10: gfx.icon_font(10.0),
+            i12: gfx.icon_font(12.0),
+            i16: gfx.icon_font(16.0).or_else(|| gfx.fonts.icons.clone()),
+        }
+    }
+}
 
 const LOADED: u32 = WM_APP + 101;
 const ICONS: u32 = WM_APP + 102;
@@ -264,6 +440,15 @@ enum Hit {
     Crumb(usize),
     /// The arrow after a part of the path: what's inside it, to jump to.
     CrumbMenu(usize),
+    /// The arrow after the place's icon at the start of the path: the places
+    /// in the navigation pane, to jump to.
+    CrumbRoot,
+    /// The "..." standing for the first parts of a path too long to show.
+    CrumbMore,
+    /// The arrow before This PC in the navigation pane: folds its drives away.
+    SideFold,
+    /// The status bar's view buttons: Details, Large icons.
+    ViewButton(u8),
     Address,
     Item(usize),
     /// The details pane.
@@ -273,6 +458,23 @@ enum Hit {
 
 /// How far a group heading takes (Group by).
 const GROUP_H: f32 = 34.0;
+
+/// The pictures a frame draws, looked up before drawing starts: each shown
+/// item's icon (by position), the navigation pane's, each tab's, the
+/// address bar's first, and the details pane's.
+struct Pics {
+    items: Vec<(usize, Option<ID2D1Bitmap>)>,
+    side: Vec<Option<ID2D1Bitmap>>,
+    tabs: Vec<Option<ID2D1Bitmap>>,
+    root: Option<ID2D1Bitmap>,
+    pane: Option<ID2D1Bitmap>,
+}
+
+/// Where the status bar's view button `k` (0 Details, 1 Large icons) is,
+/// at the right as Explorer has them.
+fn status_view_x(w: f32, k: u8) -> f32 {
+    w - 10.0 - (2 - k) as f32 * 26.0
+}
 
 /// The path as the address bar shows it: each folder on the way, to click.
 fn crumbs(loc: &Loc) -> Vec<(String, Loc)> {
@@ -441,6 +643,13 @@ struct State {
     /// What can be undone and redone (renames and new items).
     undo: Vec<Undo>,
     redo: Vec<Undo>,
+    /// Explorer's colours (light or dark, as Windows' app mode is) and type.
+    pal: Pal,
+    ty: Type,
+    /// The window's in front (its tab row shows Mica, its selection is bright).
+    active: bool,
+    /// This PC's drives are shown in the navigation pane (its arrow folds them).
+    side_open: bool,
 }
 
 /// A change Ctrl+Z can take back.
@@ -467,6 +676,10 @@ static SIZES: Mutex<Vec<(u32, String, u64)>> = Mutex::new(Vec::new());
 /// The listing whose folders are being sized (an older sizing stops).
 static SIZING: AtomicU32 = AtomicU32::new(0);
 const SIZED: u32 = WM_APP + 105;
+/// The tab row's Mica colour has been worked out (see `mica`).
+const MICA: u32 = WM_APP + 106;
+/// The tab row's Mica colour, once worked out: (for dark mode, the colour).
+static MICA_TINT: Mutex<Option<(bool, Color)>> = Mutex::new(None);
 static NEXT_GEN: AtomicU32 = AtomicU32::new(1);
 /// The folder being watched for changes (its generation; a newer one stops the old watcher).
 static WATCH_GEN: AtomicU32 = AtomicU32::new(0);
@@ -554,9 +767,9 @@ fn sidebar(pins: &[String]) -> Vec<(char, String, Loc)> {
     out
 }
 
-/// The command bar: (glyph, label).
-const CMDS: [(u32, &str); 10] = [
-    (0xE710, "New"),
+/// The command bar, as Explorer's: (glyph, label).
+const CMDS: [(u32, &str); 11] = [
+    (0xECC8, "New"),
     (0xE8C6, "Cut"),
     (0xE8C8, "Copy"),
     (0xE77F, "Paste"),
@@ -566,34 +779,22 @@ const CMDS: [(u32, &str); 10] = [
     (0xE8CB, "Sort"),
     (0xE8FD, "View"),
     (0xE712, "More"),
+    (0xE89F, "Details"),
 ];
-
-/// The command bar as Explorer's: New with its label, then Cut, Copy,
-/// Paste, Rename, Share (with Quick Share) and Delete as icons, Sort and
-/// View with labels, and More, in groups with a line between them. (x,
-/// width) of command `i`.
-fn cmd_rect(i: usize) -> (f32, f32) {
-    const W: [f32; 10] = [84.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 84.0, 84.0, 40.0];
-    let mut x = 12.0;
-    for (j, w) in W.iter().enumerate() {
-        if starts_group(j) {
-            x += 14.0;
-        }
-        if j == i {
-            return (x, *w);
-        }
-        x += w + 2.0;
-    }
-    (x, 40.0)
-}
 
 /// Where a new group of commands starts (a line before it).
 fn starts_group(i: usize) -> bool {
     matches!(i, 1 | 7 | 9)
 }
 
-/// Commands that show their label (and a chevron: they open a menu, or New).
+/// Commands that show their label: New, Sort and View (with an arrow, as
+/// they open a menu) and Details.
 fn labelled(i: usize) -> bool {
+    matches!(i, 0 | 7 | 8 | 10)
+}
+
+/// Commands with an arrow after their label.
+fn dropdown(i: usize) -> bool {
     matches!(i, 0 | 7 | 8)
 }
 
@@ -669,9 +870,9 @@ impl State {
         let top = self.rows_top();
         match self.view {
             View::Details => (
-                x0 + 8.0,
+                x0 + 4.0,
                 top + pos as f32 * self.row_h() + self.heads_before(pos) as f32 * GROUP_H,
-                cw - 24.0,
+                cw - 20.0,
                 self.row_h(),
             ),
             View::Icons => {
@@ -760,7 +961,7 @@ impl State {
     /// The four columns' widths: they always fill the row, whatever the
     /// window's width, each keeping its share (and its minimum).
     fn col_widths(&self, cw: f32) -> [f32; 4] {
-        fit_columns(self.col_share, (cw - 24.0).max(COL_MIN.iter().sum()))
+        fit_columns(self.col_share, (cw - 20.0).max(COL_MIN.iter().sum()))
     }
 
     fn max_scroll(&self) -> f32 {
@@ -774,6 +975,9 @@ impl State {
         unsafe {
             let _ = SetWindowTextW(self.hwnd, &HSTRING::from(t));
             let _ = SetWindowTextW(self.addr, &HSTRING::from(self.t().loc.address()));
+            // EM_SETCUEBANNER: "Search Downloads" in the empty search box, as Explorer says it.
+            let cue = HSTRING::from(format!("Search {}", self.t().loc.title()));
+            SendMessageW(self.search, 0x1501, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
         }
     }
 
@@ -1060,6 +1264,32 @@ impl State {
         }
     }
 
+    /// The arrow after the place's icon in the address bar: the places in
+    /// the navigation pane, to jump to one.
+    fn root_menu(&mut self) {
+        use crate::menu::{item, show, Place};
+        let places: Vec<(String, Loc)> = self.side.iter().map(|s| (s.1.clone(), s.2.clone())).collect();
+        let entries = places.iter().enumerate().map(|(n, (name, _))| item(n + 1, name.as_str())).collect();
+        if let Some(n) = show(self.hwnd, entries, Place::Cursor).checked_sub(1) {
+            self.go(places[n].1.clone());
+        }
+    }
+
+    /// The "..." in a long path: the parts left out, nearest first.
+    fn hidden_crumbs_menu(&mut self) {
+        use crate::menu::{item, show, Place};
+        let (w, _) = appwin::client(self.hwnd);
+        let hidden = self.crumb_layout(w).1;
+        let parts: Vec<(String, Loc)> = crumbs(&self.t().loc).into_iter().take(hidden).rev().collect();
+        if parts.is_empty() {
+            return;
+        }
+        let entries = parts.iter().enumerate().map(|(n, (name, _))| item(n + 1, name.as_str())).collect();
+        if let Some(n) = show(self.hwnd, entries, Place::Cursor).checked_sub(1) {
+            self.go(parts[n].1.clone());
+        }
+    }
+
     /// Right-click on Back or Forward: where they'd go, nearest first, to jump
     /// straight to one (as Explorer's list of recent places).
     fn history_menu(&mut self, back: bool) {
@@ -1239,20 +1469,8 @@ impl State {
 
     /// The icon of sidebar entry `i` (Windows' own, in colour).
     fn side_icon(&mut self, i: usize) -> Option<ID2D1Bitmap> {
-        let target = match &self.side[i].2 {
-            Loc::Home => "::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}".to_string(),
-            Loc::Path(p) => p.clone(),
-            Loc::Shell(name, _) => name.clone(),
-            Loc::Search(..) => return None,
-        };
-        let key = format!("side:{target}");
-        if let Some(b) = self.icons.get(&key) {
-            return b.clone();
-        }
-        if self.asked.insert(key.clone()) {
-            let _ = self.icon_tx.send((key, target, false));
-        }
-        None
+        let loc = self.side[i].2.clone();
+        self.loc_icon(&loc)
     }
 
     fn resort(&mut self) {
@@ -1770,6 +1988,11 @@ impl State {
             7 => self.sort_menu(),
             8 => self.view_menu(),
             9 => self.more_menu(),
+            10 => {
+                self.details = !self.details;
+                self.remember();
+                appwin::redraw(self.hwnd);
+            }
             _ => {}
         }
     }
@@ -1825,37 +2048,48 @@ impl State {
     // ------------------------------------------------------- hit testing --
 
     fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        let (w, _) = appwin::client(self.hwnd);
+        let (w, h) = appwin::client(self.hwnd);
         if y < TABS_H {
-            if let Some(b) = appwin::caption_at(x, y, w, TABS_H) {
+            if let Some(b) = appwin::caption_at(x, y, w, CAP_H) {
                 return Some(Hit::Caption(b));
             }
             let tw = self.tab_w(w);
             for i in 0..self.tabs.len() {
-                let tx = 8.0 + i as f32 * (tw + 4.0);
-                if x >= tx && x < tx + tw {
-                    return Some(if x > tx + tw - 28.0 { Hit::TabClose(i) } else { Hit::Tab(i) });
+                let tx = 8.0 + i as f32 * tw;
+                if x >= tx && x < tx + tw && y >= TAB_TOP {
+                    return Some(if x >= tx + tw - 36.0 { Hit::TabClose(i) } else { Hit::Tab(i) });
                 }
             }
-            let px = 8.0 + self.tabs.len() as f32 * (tw + 4.0);
-            return (x >= px && x < px + 32.0).then_some(Hit::NewTab);
+            let px = 8.0 + self.tabs.len() as f32 * tw + 4.0;
+            return (x >= px && x < px + 40.0 && y >= TAB_TOP).then_some(Hit::NewTab);
         }
         if y < TABS_H + BAR_H {
             let (ax, aw, _) = self.box_layout(w);
             if x >= ax && x < ax + aw {
                 if !self.editing_addr {
-                    for (cx, cw, i) in self.crumb_layout(w) {
+                    if (ax + 39.0..ax + 65.0).contains(&x) {
+                        return Some(Hit::CrumbRoot);
+                    }
+                    let (layout, hidden) = self.crumb_layout(w);
+                    if hidden > 0 && (ax + 65.0..ax + 97.0).contains(&x) {
+                        return Some(Hit::CrumbMore);
+                    }
+                    for (cx, cw, i) in layout {
                         if x >= cx && x < cx + cw {
                             return Some(Hit::Crumb(i));
                         }
-                        if x >= cx + cw && x < cx + cw + 14.0 {
+                        if x >= cx + cw && x < cx + cw + CHEV {
                             return Some(Hit::CrumbMenu(i));
                         }
                     }
                 }
                 return Some(Hit::Address);
             }
-            return match ((x - 8.0) / 36.0).floor() as i32 {
+            let k = ((x - 8.0) / 48.0).floor();
+            if k < 0.0 || x - 8.0 - k * 48.0 >= BTN_W {
+                return None;
+            }
+            return match k as i32 {
                 0 => Some(Hit::Back),
                 1 => Some(Hit::Forward),
                 2 => Some(Hit::Up),
@@ -1864,23 +2098,36 @@ impl State {
             };
         }
         if y < TABS_H + BAR_H + CMD_H {
+            let layout = self.cmd_layout(w);
             return (0..CMDS.len())
                 .find(|&i| {
-                    let (cx, cw) = cmd_rect(i);
+                    let (cx, cw) = layout[i];
                     x >= cx && x < cx + cw
                 })
                 .map(Hit::Cmd);
+        }
+        if y >= h - STATUS_H {
+            return (0..2u8)
+                .find(|&k| (status_view_x(w, k)..status_view_x(w, k) + 24.0).contains(&x))
+                .map(Hit::ViewButton);
         }
         if self.details && x >= w - PANE_W {
             return Some(Hit::Pane);
         }
         if self.nav && x < SIDE_W {
-            let i = ((y - TABS_H - BAR_H - CMD_H - 8.0) / 32.0).floor();
-            return (i >= 0.0 && (i as usize) < self.side.len()).then_some(Hit::Side(i as usize));
+            for (i, ry) in self.side_layout() {
+                if y >= ry && y < ry + SIDE_ROW {
+                    if self.side[i].2 == filesio::this_pc() && x < 28.0 {
+                        return Some(Hit::SideFold);
+                    }
+                    return Some(Hit::Side(i));
+                }
+            }
+            return None;
         }
         let (x0, y0, cw, _) = self.content();
         if self.view == View::Details && y < y0 + HEAD_H {
-            let mut cx = x0 + 8.0;
+            let mut cx = x0 + 4.0;
             for i in 0..COLS.len() {
                 let cwid = self.col_width(i, cw);
                 // The edge after a column: drag it to make the column wider or narrower.
@@ -1899,7 +2146,6 @@ impl State {
         for pos in self.visible() {
             let (ix, iy, iw, ih) = self.item_rect(pos);
             let iy = iy - scroll;
-            let iw = if self.view == View::Details { cw - 24.0 } else { iw };
             if x >= ix && x < ix + iw && y >= iy && y < iy + ih {
                 return Some(Hit::Item(pos));
             }
@@ -1912,9 +2158,136 @@ impl State {
         self.col_widths(cw)[0]
     }
 
+    /// Each tab's width: as wide as Explorer's (240) while they fit, all the
+    /// same, narrower as more are opened.
     fn tab_w(&self, w: f32) -> f32 {
         // Room kept for the new-tab button, somewhere to drag the window by, and its buttons.
-        ((w - 60.0 - 48.0 - 3.0 * appwin::CAPTION_W) / self.tabs.len() as f32 - 4.0).clamp(80.0, TAB_W)
+        ((w - 8.0 - 48.0 - 60.0 - 3.0 * appwin::CAPTION_W) / self.tabs.len() as f32).clamp(100.0, TAB_W)
+    }
+
+    /// Where each command is in a window `w` wide: (x, width). They go from
+    /// the left in groups with a line between them, as Explorer's do, the
+    /// buttons with a label as wide as it, and Details at the far right.
+    fn cmd_layout(&self, w: f32) -> [(f32, f32); 11] {
+        let label = |s: &str| self.measure.as_ref().map_or(s.len() as f32 * 7.0, |m| m.width(s, &self.ty.t12));
+        let mut out = [(0.0, 0.0); 11];
+        let mut x = 8.0;
+        for (i, slot) in out.iter_mut().enumerate().take(10) {
+            if starts_group(i) {
+                x += 5.0;
+            }
+            let bw = if labelled(i) { 57.0 + label(CMDS[i].1) } else { BTN_W };
+            *slot = (x, bw);
+            x += bw + 8.0;
+        }
+        let dw = 46.0 + label(CMDS[10].1);
+        out[10] = ((w - 8.0 - dw).max(x), dw);
+        out
+    }
+
+    /// Whether command `i` can be used now (Explorer greys the rest): Cut,
+    /// Copy, Rename, Share and Delete want something selected, Paste files
+    /// on the clipboard.
+    fn cmd_enabled(&self, i: usize) -> bool {
+        match i {
+            1 | 2 | 4 | 5 | 6 => self.t().sel.iter().any(|s| *s),
+            3 => unsafe { IsClipboardFormatAvailable(15).is_ok() },
+            _ => true,
+        }
+    }
+
+    /// The navigation pane's rows as shown: (entry, y). The drives and
+    /// devices under This PC are left out while it's folded, and a little
+    /// room is kept for the lines after Home and after your pinned folders.
+    fn side_layout(&self) -> Vec<(usize, f32)> {
+        let (_, y0, _, _) = self.content();
+        let mut y = y0 + 4.0;
+        let mut out = Vec::new();
+        for i in 0..self.side.len() {
+            if !self.side_open && self.side_child(i) {
+                continue;
+            }
+            out.push((i, y));
+            y += SIDE_ROW;
+            if self.side_divider(i) {
+                y += 9.0;
+            }
+        }
+        out
+    }
+
+    /// Whether side entry `i` sits under This PC (a drive, a phone...).
+    fn side_child(&self, i: usize) -> bool {
+        matches!(self.side[i].0, '\u{EDA2}' | '\u{E8EA}')
+    }
+
+    /// Whether a line goes after side entry `i`: after Home and after the
+    /// last pinned folder, as Explorer's pane has them.
+    fn side_divider(&self, i: usize) -> bool {
+        i + 1 < self.side.len() && (i == 0 || i == self.pin_n)
+    }
+
+    /// The icon of a place (a tab's, the address bar's, the pane's).
+    fn loc_icon(&mut self, loc: &Loc) -> Option<ID2D1Bitmap> {
+        let target = match loc {
+            Loc::Home => "::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}".to_string(),
+            Loc::Path(p) => p.clone(),
+            Loc::Shell(name, _) => name.clone(),
+            Loc::Search(..) => return None,
+        };
+        let key = format!("side:{target}");
+        if let Some(b) = self.icons.get(&key) {
+            return b.clone();
+        }
+        if self.asked.insert(key.clone()) {
+            let _ = self.icon_tx.send((key, target, false));
+        }
+        None
+    }
+
+    /// Windows' app mode changed (or the window's just made): Explorer's
+    /// light or dark colours, the window's frame and menus to match.
+    fn apply_theme(&mut self) {
+        self.pal = Pal::current();
+        crate::menu::set_light(!self.pal.dark);
+        // Mica's tint comes from the wallpaper, which takes a moment to read:
+        // the plain colour until then.
+        let dark = self.pal.dark;
+        let hwnd = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let base = if dark { DARK.strip } else { LIGHT.strip };
+            let tint = mica(base, if dark { 0.22 } else { 0.30 });
+            *MICA_TINT.lock().unwrap_or_else(|e| e.into_inner()) = Some((dark, tint));
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd as *mut _)), MICA, WPARAM(0), LPARAM(0));
+            }
+        });
+        unsafe {
+            let dark = BOOL(self.pal.dark as i32);
+            let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
+            let old = std::mem::replace(&mut self.brush, CreateSolidBrush(Pal::colorref(self.pal.field)));
+            if !old.is_invalid() {
+                let _ = DeleteObject(old.into());
+            }
+            for e in [self.addr, self.search] {
+                let _ = InvalidateRect(Some(e), None, true);
+            }
+        }
+        self.mica_arrived();
+    }
+
+    /// The tab row's Mica colour is ready (for the mode it was made for).
+    fn mica_arrived(&mut self) {
+        if let Some((dark, tint)) = *MICA_TINT.lock().unwrap_or_else(|e| e.into_inner()) {
+            if dark == self.pal.dark {
+                self.pal.strip = tint;
+            }
+        }
+        let caption = Pal::colorref(self.pal.strip);
+        unsafe {
+            let _ = DwmSetWindowAttribute(self.hwnd, DWMWINDOWATTRIBUTE(35), &caption as *const _ as *const _, 4);
+        }
+        appwin::redraw(self.hwnd);
     }
 
     /// The display positions on screen now.
@@ -1994,7 +2367,7 @@ impl State {
         }
         let vis = self.visible();
         let big = self.view == View::Icons;
-        let icons: Vec<(usize, Option<ID2D1Bitmap>)> = vis
+        let items: Vec<(usize, Option<ID2D1Bitmap>)> = vis
             .clone()
             .map(|pos| {
                 let i = self.tabs[self.cur].order[pos];
@@ -2002,252 +2375,276 @@ impl State {
             })
             .collect();
         let side: Vec<Option<ID2D1Bitmap>> = (0..self.side.len()).map(|i| self.side_icon(i)).collect();
+        let tab_locs: Vec<Loc> = self.tabs.iter().map(|t| t.loc.clone()).collect();
+        let tabs: Vec<Option<ID2D1Bitmap>> = tab_locs.iter().map(|l| self.loc_icon(l)).collect();
+        // The address bar starts with This PC's icon for a folder on a drive, else the place's own.
+        let root = match &self.t().loc {
+            Loc::Path(p) if !p.starts_with("\\\\") => self.loc_icon(&filesio::this_pc()),
+            other => {
+                let other = other.clone();
+                self.loc_icon(&other)
+            }
+        };
         // The details pane's big picture of the one thing selected.
         let one = match self.t().selected()[..] {
             [i] if self.details => Some(i),
             _ => None,
         };
-        let pane_icon = one.and_then(|i| self.icon_for(i, true));
+        let pane = one.and_then(|i| self.icon_for(i, true));
+        let pics = Pics { items, side, tabs, root, pane };
         let hwnd = self.hwnd;
         let Some(mut gfx) = self.gfx.take() else { return };
-        appwin::paint(hwnd, &mut gfx, |p, f, w, h| self.draw(p, f, w, h, &icons, &side, &pane_icon));
+        appwin::paint(hwnd, &mut gfx, |p, _, w, h| self.draw(p, w, h, &pics));
         self.gfx = Some(gfx);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn draw(
-        &self,
-        p: &Painter,
-        f: &crate::gfx::Fonts,
-        w: f32,
-        h: f32,
-        icons: &[(usize, Option<ID2D1Bitmap>)],
-        side: &[Option<ID2D1Bitmap>],
-        pane_icon: &Option<ID2D1Bitmap>,
-    ) {
+    /// Fills a row (a file, a navigation pane entry) as selected, under the
+    /// pointer, or both, in Explorer's colours.
+    fn row_fill(&self, p: &Painter, x: f32, y: f32, w: f32, h: f32, selected: bool, lit: bool) {
+        let pal = &self.pal;
+        let c = match (selected, lit) {
+            (true, true) => pal.row_sel_hover,
+            (true, false) if self.active => pal.row_sel,
+            (true, false) => pal.row_sel_idle,
+            (false, true) => pal.row_hover,
+            (false, false) => return,
+        };
+        p.rrect(x, y, w, h, 4.0, c);
+        if let (true, Some(edge)) = (selected && self.active, pal.row_edge) {
+            p.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, 4.0, edge, 1.0);
+        }
+    }
+
+    fn draw(&self, p: &Painter, w: f32, h: f32, pics: &Pics) {
+        let pal = &self.pal;
+        let ty = &self.ty;
         let accent = theme::accent();
         let hov = self.hovered;
-        let ic = f.icons.as_ref();
-        let glyph_at = |code: u32, x: f32, y: f32, size: f32, c: Color| {
-            if let Some(ic) = ic {
-                p.text(&glyph(code), ic, x, y, size, size, Align::Center, c);
-            }
-        };
-        // Tabs.
-        let tw = self.tab_w(w);
-        for (i, t) in self.tabs.iter().enumerate() {
-            let tx = 8.0 + i as f32 * (tw + 4.0);
-            let on = i == self.cur;
-            let lit = hov == Some(Hit::Tab(i)) || hov == Some(Hit::TabClose(i));
-            p.rrect(
-                tx,
-                6.0,
-                tw,
-                TABS_H - 6.0,
-                6.0,
-                if on { PANEL } else { Color::white(if lit { 0.06 } else { 0.0 }) },
-            );
-            p.text(
-                &t.loc.title(),
-                &f.body,
-                tx + 12.0,
-                6.0,
-                tw - 44.0,
-                TABS_H - 6.0,
-                Align::Left,
-                Color::white(if on { 0.95 } else { 0.7 }),
-            );
-            if on || lit {
-                if hov == Some(Hit::TabClose(i)) {
-                    p.rrect(tx + tw - 26.0, 13.0, 20.0, 20.0, 4.0, Color::white(0.1));
-                }
-                glyph_at(0xE711, tx + tw - 26.0, 13.0, 20.0, Color::white(0.7));
-            }
-        }
-        let px = 8.0 + self.tabs.len() as f32 * (tw + 4.0);
-        if hov == Some(Hit::NewTab) {
-            p.rrect(px, 9.0, 30.0, 26.0, 5.0, Color::white(0.08));
-        }
-        glyph_at(0xE710, px + 5.0, 12.0, 20.0, Color::white(0.8));
-        let lit = match hov {
-            Some(Hit::Caption(b)) => Some(b),
-            _ => None,
-        };
-        appwin::caption_buttons(p, f, self.hwnd, w, TABS_H, lit);
-        // The bar: back, forward, up, refresh (the address and search boxes are text boxes over it).
-        p.rrect(0.0, TABS_H, w, BAR_H + CMD_H, 0.0, PANEL);
         let t = self.t();
+        let icon = |code: u32, font: &Option<IDWriteTextFormat>, x: f32, y: f32, bw: f32, bh: f32, c: Color| {
+            if let Some(f) = font {
+                p.text(&glyph(code), f, x, y, bw, bh, Align::Center, c);
+            }
+        };
+        // Mica behind the tabs while the window's in front; plain once it isn't, as Windows does.
+        let strip = if self.active {
+            pal.strip
+        } else if pal.dark {
+            DARK.strip
+        } else {
+            LIGHT.strip
+        };
+        let top_ink = if self.active { pal.text } else { pal.text_off };
+        p.rrect(0.0, 0.0, w, TABS_H, 0.0, strip);
+        p.rrect(0.0, TABS_H, w, BAR_H, 0.0, pal.layer);
+        p.rrect(0.0, TABS_H + BAR_H, w, h - TABS_H - BAR_H, 0.0, pal.base);
+        p.rrect(0.0, TABS_H + BAR_H - 1.0, w, 1.0, 0.0, pal.line);
+        p.rrect(0.0, TABS_H + BAR_H + CMD_H - 1.0, w, 1.0, 0.0, pal.line);
+
+        // Tabs: the one in front joins the address row; a line between the others.
+        let tw = self.tab_w(w);
+        let tab_line = if pal.dark { rgb(0x3D3D3D) } else { rgb(0xD1D1D1) };
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let tx = 8.0 + i as f32 * tw;
+            let on = i == self.cur;
+            let lit = matches!(hov, Some(Hit::Tab(j)) | Some(Hit::TabClose(j)) if j == i);
+            if on {
+                p.tab(tx, TAB_TOP, tw, TABS_H, 8.0, pal.layer);
+            } else if lit {
+                p.rrect(tx + 2.0, TAB_TOP + 2.0, tw - 4.0, TABS_H - TAB_TOP - 6.0, 6.0, pal.hover);
+            }
+            let next_quiet = i + 1 < self.tabs.len()
+                && i + 1 != self.cur
+                && !matches!(hov, Some(Hit::Tab(j)) | Some(Hit::TabClose(j)) if j == i + 1);
+            if !on && !lit && next_quiet {
+                p.line(tx + tw - 0.5, TAB_TOP + 8.0, tx + tw - 0.5, TAB_TOP + 24.0, tab_line, 1.0);
+            }
+            match pics.tabs.get(i).cloned().flatten() {
+                Some(b) => p.image(&b, tx + 9.0, TAB_TOP + 8.0, 16.0, 16.0, 1.0),
+                None => icon(0xE8B7, &ty.i16, tx + 9.0, TAB_TOP + 8.0, 16.0, 16.0, top_ink),
+            }
+            let title_ink = if on { top_ink } else { pal.text2 };
+            p.text(&tab.loc.title(), &ty.t12, tx + 33.0, TAB_TOP, tw - 33.0 - 38.0, 32.0, Align::Left, title_ink);
+            if on || lit {
+                let (bx, by) = (tx + tw - 34.0, TAB_TOP + 4.0);
+                if hov == Some(Hit::TabClose(i)) {
+                    p.rrect(bx, by, 24.0, 24.0, 4.0, pal.hover);
+                }
+                icon(0xE711, &ty.i10, bx, by, 24.0, 24.0, title_ink);
+            }
+        }
+        let px = 8.0 + self.tabs.len() as f32 * tw + 4.0;
+        if hov == Some(Hit::NewTab) {
+            p.rrect(px, TAB_TOP + 1.0, 40.0, 30.0, 6.0, pal.hover);
+        }
+        icon(0xE710, &ty.i12, px, TAB_TOP + 1.0, 40.0, 30.0, top_ink);
+        // Minimise, maximise and close, as Windows 11 draws them.
+        let maxed = appwin::maximized(self.hwnd);
+        for (b, code) in [0xE921u32, if maxed { 0xE923 } else { 0xE922 }, 0xE8BB].iter().enumerate() {
+            let x = w - (3 - b) as f32 * appwin::CAPTION_W;
+            let lit = hov == Some(Hit::Caption(b as u8));
+            let mut ink = top_ink;
+            if lit && b == 2 {
+                p.rrect(x, 0.0, appwin::CAPTION_W, CAP_H, 0.0, rgb(0xC42B1C));
+                ink = rgb(0xFFFFFF);
+            } else if lit {
+                p.rrect(x, 0.0, appwin::CAPTION_W, CAP_H, 0.0, pal.hover);
+            }
+            icon(*code, &ty.i10, x, 0.0, appwin::CAPTION_W, CAP_H, ink);
+        }
+
+        // The address row: back, forward, up, refresh, then the address and search boxes.
+        let by = TABS_H + 8.0;
         let busy = self.busy();
         let can = [!t.back.is_empty(), !t.forward.is_empty(), !matches!(t.loc, Loc::Home), true];
         for (k, (code, hit)) in
             [(0xE72B, Hit::Back), (0xE72A, Hit::Forward), (0xE74A, Hit::Up), (0xE72C, Hit::Refresh)].iter().enumerate()
         {
-            let x = 8.0 + k as f32 * 36.0;
+            let x = 8.0 + k as f32 * 48.0;
             if hov == Some(*hit) && can[k] {
-                p.rrect(x, TABS_H + 7.0, 32.0, 30.0, 5.0, Color::white(0.08));
+                p.rrect(x, by, BTN_W, BTN_H, 4.0, pal.hover);
             }
-            let ink = Color::white(if can[k] { 0.85 } else { 0.3 });
+            let ink = if can[k] { pal.text } else { pal.text_off };
             if *hit == Hit::Refresh && busy {
                 // Turning while it reads the folder again.
                 let turn = self.refresh_at.map_or(0.0, |t| t.elapsed().as_secs_f32()) * 540.0;
-                p.rotated(turn % 360.0, x + 16.0, TABS_H + 22.0, || {
-                    glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, accent)
+                p.rotated(turn % 360.0, x + BTN_W / 2.0, by + BTN_H / 2.0, || {
+                    icon(*code, &ty.i16, x, by, BTN_W, BTN_H, accent)
                 });
             } else {
-                glyph_at(*code, x + 7.0, TABS_H + 12.0, 18.0, ink);
+                icon(*code, &ty.i16, x, by, BTN_W, BTN_H, ink);
             }
         }
-        // The address and search boxes, in exactly the text boxes' colour so
-        // each reads as one box (not a box in a box).
         let (ax, aw, sw) = self.box_layout(w);
-        let field = Color(48.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 1.0);
-        let addr_lit = matches!(hov, Some(Hit::Address) | Some(Hit::Crumb(_)) | Some(Hit::CrumbMenu(_)));
-        p.rrect(ax, TABS_H + 7.0, aw, 30.0, 5.0, field);
-        p.stroke_rrect(
-            ax + 0.5,
-            TABS_H + 7.5,
-            aw - 1.0,
-            29.0,
-            5.0,
-            Color::white(if addr_lit { 0.12 } else { 0.06 }),
-            1.0,
-        );
-        p.rrect(w - sw - 10.0, TABS_H + 7.0, sw, 30.0, 5.0, field);
-        p.stroke_rrect(w - sw - 9.5, TABS_H + 7.5, sw - 1.0, 29.0, 5.0, Color::white(0.06), 1.0);
+        let sx = w - sw - 10.0;
+        for (bx, bw) in [(ax, aw), (sx, sw)] {
+            p.rrect(bx, by, bw, BTN_H, 4.0, pal.field);
+            p.stroke_rrect(bx + 0.5, by + 0.5, bw - 1.0, BTN_H - 1.0, 4.0, pal.field_edge, 1.0);
+        }
+        icon(0xE721, &ty.i12, sx + sw - 37.0, by, 24.0, BTN_H, pal.text2);
         if self.editing_addr {
-            p.rrect(ax + 1.0, TABS_H + 35.0, aw - 2.0, 2.0, 1.0, accent);
+            // Typing: the accent along the bottom, as a text box in focus has.
+            p.rrect(ax + 1.0, by + BTN_H - 2.0, aw - 2.0, 2.0, 1.0, accent);
         } else {
-            // The path as parts to click, as Explorer shows it.
+            match &pics.root {
+                Some(b) => p.image(b, ax + 13.0, by + 8.0, 16.0, 16.0, 1.0),
+                None => icon(0xE721, &ty.i16, ax + 13.0, by + 8.0, 16.0, 16.0, pal.text2),
+            }
+            let crumb_hover = |x: f32, cw: f32| p.rrect(x, by + 4.0, cw, BTN_H - 8.0, 4.0, pal.hover);
+            if hov == Some(Hit::CrumbRoot) {
+                crumb_hover(ax + 39.0, CHEV);
+            }
+            icon(0xE76C, &ty.i12, ax + 39.0, by, CHEV, BTN_H, pal.text2);
             let parts = crumbs(&t.loc);
-            let layout = self.crumb_layout(w);
-            if layout.first().is_some_and(|l| l.2 > 0) {
-                glyph_at(0xE712, ax + 6.0, TABS_H + 14.0, 16.0, Color::white(0.55));
+            let (layout, hidden) = self.crumb_layout(w);
+            if hidden > 0 {
+                if hov == Some(Hit::CrumbMore) {
+                    crumb_hover(ax + 65.0, 32.0);
+                }
+                icon(0xE712, &ty.i12, ax + 65.0, by, 32.0, BTN_H, pal.text);
             }
-            for (n, (cx, cwid, i)) in layout.iter().enumerate() {
-                if hov == Some(Hit::Crumb(*i)) {
-                    p.rrect(*cx, TABS_H + 10.0, *cwid, 24.0, 4.0, Color::white(0.08));
+            for (cx, cwid, i) in layout {
+                if hov == Some(Hit::Crumb(i)) {
+                    crumb_hover(cx, cwid);
                 }
-                let last = n + 1 == layout.len();
-                if hov == Some(Hit::CrumbMenu(*i)) {
-                    p.rrect(*cx + *cwid, TABS_H + 10.0, 14.0, 24.0, 4.0, Color::white(0.08));
+                if hov == Some(Hit::CrumbMenu(i)) {
+                    crumb_hover(cx + cwid, CHEV);
                 }
-                p.text(
-                    &parts[*i].0,
-                    &f.body,
-                    cx + 6.0,
-                    TABS_H + 7.0,
-                    cwid - 6.0,
-                    30.0,
-                    Align::Left,
-                    Color::white(if last { 0.95 } else { 0.78 }),
-                );
-                glyph_at(0xE76C, cx + cwid + 1.0, TABS_H + 17.0, 10.0, Color::white(if last { 0.3 } else { 0.5 }));
+                p.text(&parts[i].0, &ty.t14, cx + 8.0, by, cwid - 16.0, BTN_H, Align::Left, pal.text);
+                icon(0xE76C, &ty.i12, cx + cwid, by, CHEV, BTN_H, pal.text2);
             }
         }
-        // Commands.
-        p.rrect(0.0, TABS_H + BAR_H - 0.5, w, 1.0, 0.0, LINE);
+
+        // The command bar.
         let cy = TABS_H + BAR_H;
+        let layout = self.cmd_layout(w);
         for (i, (code, label)) in CMDS.iter().enumerate() {
-            let (x, bw) = cmd_rect(i);
+            let (x, bw) = layout[i];
             if starts_group(i) {
-                p.line(x - 8.0, cy + 10.0, x - 8.0, cy + CMD_H - 10.0, Color::white(0.12), 1.0);
+                p.line(x - 6.5, cy + 12.0, x - 6.5, cy + 36.0, pal.sep, 1.0);
             }
-            if hov == Some(Hit::Cmd(i)) {
-                p.rrect(x, cy + 5.0, bw, 30.0, 5.0, Color::white(0.08));
-            }
-            // Explorer's colours: New in the accent, Delete in red, the rest plain.
-            let ink = match i {
-                0 => accent,
-                5 => Color(0.36, 0.62, 1.0, 1.0),
-                6 => Color(0.95, 0.45, 0.42, 1.0),
-                _ => Color::white(0.85),
-            };
-            if labelled(i) {
-                glyph_at(*code, x + 8.0, cy + 12.0, 16.0, ink);
-                p.text(label, &f.body, x + 30.0, cy + 5.0, bw - 46.0, 30.0, Align::Left, Color::white(0.88));
-                glyph_at(0xE70D, x + bw - 18.0, cy + 15.0, 10.0, Color::white(0.55));
-            } else {
-                glyph_at(*code, x + (bw - 16.0) / 2.0, cy + 12.0, 16.0, ink);
-            }
-        }
-        // Sidebar.
-        let y0 = TABS_H + BAR_H + CMD_H;
-        if self.nav {
-            p.rrect(0.0, y0, SIDE_W, h - y0, 0.0, Color(0.11, 0.11, 0.115, 1.0));
-        }
-        for (i, (g, name, loc)) in self.side.iter().enumerate().filter(|_| self.nav) {
-            let y = y0 + 8.0 + i as f32 * 32.0;
-            let on = *loc == t.loc;
-            if on || hov == Some(Hit::Side(i)) {
-                p.rrect(6.0, y, SIDE_W - 12.0, 30.0, 5.0, Color::white(if on { 0.09 } else { 0.05 }));
-            }
+            let enabled = self.cmd_enabled(i);
+            let on = i == 10 && self.details;
             if on {
-                p.rrect(6.0, y + 8.0, 3.0, 14.0, 1.5, accent);
+                p.rrect(x, cy + 8.0, bw, BTN_H, 4.0, pal.hover);
             }
-            match side.get(i).cloned().flatten() {
-                Some(b) => p.image(&b, 15.0, y + 6.0, 18.0, 18.0, 1.0),
-                None => glyph_at(*g as u32, 16.0, y + 7.0, 16.0, Color::white(0.8)),
+            if hov == Some(Hit::Cmd(i)) && enabled {
+                p.rrect(x, cy + 8.0, bw, BTN_H, 4.0, pal.hover);
             }
-            p.text(name, &f.body, 42.0, y, SIDE_W - 52.0, 30.0, Align::Left, Color::white(0.9));
-            // A line between your folders, the drives and the rest, as Explorer has.
-            let next = self.side.get(i + 1).map(|s| &s.2);
-            let group_ends = matches!((loc, next), (Loc::Path(_), Some(Loc::Shell(..))))
-                || (i == self.pin_n && matches!(next, Some(Loc::Shell(..)) | Some(Loc::Path(_))));
-            if group_ends {
-                p.line(16.0, y + 31.0, SIDE_W - 16.0, y + 31.0, Color::white(0.07), 1.0);
+            let ink = if enabled { pal.text } else { pal.text_off };
+            if labelled(i) {
+                icon(*code, &ty.i16, x + 11.0, cy + 8.0, 16.0, BTN_H, ink);
+                p.text(label, &ty.t12, x + 35.0, cy + 8.0, bw - 35.0, BTN_H, Align::Left, ink);
+                if dropdown(i) {
+                    icon(0xE70D, &ty.i10, x + bw - 22.0, cy + 8.0, 12.0, BTN_H, ink);
+                }
+            } else {
+                icon(*code, &ty.i16, x, cy + 8.0, bw, BTN_H, ink);
             }
         }
-        // Content.
+
+        // The navigation pane.
+        let y0 = TABS_H + BAR_H + CMD_H;
+        let foot = h - STATUS_H;
+        if self.nav {
+            p.clip(0.0, y0, SIDE_W, foot - y0);
+            let hl_w = SIDE_W - 11.0;
+            for (i, ry) in self.side_layout() {
+                let (g, name, loc) = &self.side[i];
+                let on = *loc == t.loc;
+                let lit = hov == Some(Hit::Side(i)) || (hov == Some(Hit::SideFold) && *loc == filesio::this_pc());
+                self.row_fill(p, 3.0, ry, hl_w, SIDE_ROW - 1.0, on, lit);
+                let indent = if self.side_child(i) { 8.0 } else { 0.0 };
+                if *loc == filesio::this_pc() {
+                    let code = if self.side_open { 0xE70D } else { 0xE76C };
+                    icon(code, &ty.i10, 8.0, ry, 16.0, SIDE_ROW, pal.text2);
+                }
+                match pics.side.get(i).cloned().flatten() {
+                    Some(b) => p.image(&b, 34.0 + indent, ry + 8.0, 16.0, 16.0, 1.0),
+                    None => icon(*g as u32, &ty.i16, 34.0 + indent, ry + 8.0, 16.0, 16.0, pal.text),
+                }
+                let pinned = i >= 1 && i <= self.pin_n;
+                let tw = hl_w - 52.0 - indent - if pinned { 28.0 } else { 6.0 };
+                p.text(name, &ty.t12, 55.0 + indent, ry, tw, SIDE_ROW, Align::Left, pal.text);
+                if pinned {
+                    icon(0xE718, &ty.i12, hl_w - 20.0, ry, 24.0, SIDE_ROW, pal.text2);
+                }
+                if self.side_divider(i) {
+                    p.line(16.0, ry + SIDE_ROW + 4.0, SIDE_W - 16.0, ry + SIDE_ROW + 4.0, pal.sep, 1.0);
+                }
+            }
+            p.unclip();
+        }
+
+        // The list: the columns' titles, then the rows (or tiles).
         let (x0, cy0, cw, chh) = self.content();
+        let lx = x0 + 4.0;
         p.clip(x0, cy0, cw, chh);
         let scroll = t.scroll;
         if self.view == View::Details {
-            let mut cx = x0 + 8.0;
+            let mut cx = lx;
             for (i, (name, _)) in COLS.iter().enumerate() {
                 let width = self.col_width(i, cw);
-                // The line after each column, brighter where it can be dragged.
-                {
-                    let lit =
-                        matches!(hov, Some(Hit::HeaderEdge(e)) if e == i) || self.col_drag.is_some_and(|d| d.0 == i);
-                    p.line(
-                        cx + width - 0.5,
-                        cy0 + 7.0,
-                        cx + width - 0.5,
-                        cy0 + HEAD_H - 7.0,
-                        Color::white(if lit { 0.45 } else { 0.10 }),
-                        1.0,
-                    );
-                }
                 if hov == Some(Hit::Header(i)) {
-                    p.rrect(cx, cy0 + 2.0, width, HEAD_H - 4.0, 4.0, Color::white(0.05));
+                    p.rrect(cx, cy0, width, HEAD_H - 2.0, 0.0, pal.hover);
                 }
-                let arrow = if self.sort.0 == i {
-                    if self.sort.1 {
-                        " \u{2191}"
-                    } else {
-                        " \u{2193}"
-                    }
-                } else {
-                    ""
-                };
-                p.text(
-                    &format!("{name}{arrow}"),
-                    &f.label,
-                    cx + 10.0,
-                    cy0,
-                    width - 14.0,
-                    HEAD_H,
-                    Align::Left,
-                    Color::white(0.6),
-                );
+                let dragged =
+                    matches!(hov, Some(Hit::HeaderEdge(e)) if e == i) || self.col_drag.is_some_and(|d| d.0 == i);
+                let edge = if dragged { pal.text2 } else { pal.head_sep };
+                p.line(cx + width - 0.5, cy0, cx + width - 0.5, cy0 + HEAD_H - 5.0, edge, 1.0);
+                let tx = if i == 0 { cx + 25.0 } else { cx + 7.0 };
+                p.text(name, &ty.t12, tx, cy0, width - (tx - cx) - 6.0, HEAD_H - 2.0, Align::Left, pal.text2);
+                // The sort arrow: a small chevron over the middle of the title.
+                if self.sort.0 == i {
+                    let code = if self.sort.1 { 0xE70E } else { 0xE70D };
+                    icon(code, &ty.i10, cx, cy0 - 3.0, width, 12.0, pal.text2);
+                }
                 cx += width;
             }
-            p.rrect(x0 + 8.0, cy0 + HEAD_H - 1.0, cw - 24.0, 1.0, 0.0, LINE);
         }
         p.unclip();
         let top = self.rows_top();
         p.clip(x0, top, cw, chh - (top - cy0));
-        let biggest = t.items.iter().filter(|i| i.folder).filter_map(|i| i.size).max().unwrap_or(0);
         // Group headings (Group by), above each group's first row.
         for (k, (_, name, count)) in t.heads.iter().enumerate() {
             let hy = top + self.head_y(k) - scroll;
@@ -2255,37 +2652,28 @@ impl State {
                 continue;
             }
             let label = format!("{name} ({count})");
-            p.text(&label, &f.label, x0 + 16.0, hy + 4.0, cw - 40.0, GROUP_H - 4.0, Align::Left, accent);
-            let lw = p.measure(&label, &f.label);
-            p.line(
-                x0 + 24.0 + lw,
-                hy + GROUP_H / 2.0 + 2.0,
-                x0 + cw - 24.0,
-                hy + GROUP_H / 2.0 + 2.0,
-                Color::white(0.08),
-                1.0,
-            );
+            p.text(&label, &ty.t12, lx + 10.0, hy + 4.0, cw - 40.0, GROUP_H - 4.0, Align::Left, pal.group);
+            let lw = p.measure(&label, &ty.t12);
+            let ly = hy + GROUP_H / 2.0 + 2.0;
+            p.line(lx + 20.0 + lw, ly, x0 + cw - 20.0, ly, pal.sep, 1.0);
         }
-        for (pos, bmp) in icons {
+        for (pos, bmp) in &pics.items {
             let i = t.order[*pos];
             let item = &t.items[i];
             let (ix, iy, iw, ih) = self.item_rect(*pos);
             let iy = iy - scroll;
             let selected = t.sel.get(i) == Some(&true);
             let lit = hov == Some(Hit::Item(*pos));
-            if selected || lit {
-                let bg = if selected { accent.alpha(if lit { 0.38 } else { 0.28 }) } else { Color::white(0.06) };
-                p.rrect(ix, iy + 1.0, iw, ih - 2.0, 5.0, bg);
-            }
+            self.row_fill(p, ix, iy, iw, ih, selected, lit);
             let alpha = if item.hidden { 0.55 } else { 1.0 };
             match self.view {
                 View::Details => {
                     if let Some(b) = bmp {
-                        p.image(b, ix + 8.0, iy + (ih - 18.0) / 2.0, 18.0, 18.0, alpha);
+                        p.image(b, ix + 14.0, iy + (ih - 16.0) / 2.0, 16.0, 16.0, alpha);
                     }
                     let widths = self.col_widths(cw);
                     let nw = widths[0];
-                    p.text(&item.name, &f.body, ix + 34.0, iy, nw - 40.0, ih, Align::Left, Color::white(0.95 * alpha));
+                    p.text(&item.name, &ty.t12, ix + 32.0, iy, nw - 38.0, ih, Align::Left, pal.text.alpha(alpha));
                     let mut cx = ix + nw;
                     let size = match (item.size, item.space) {
                         (_, Some((free, total))) => format!("{} free of {}", size_text(free), size_text(total)),
@@ -2294,22 +2682,8 @@ impl State {
                     };
                     for (k, text) in [&item.date, &item.kind, &size].iter().enumerate() {
                         let cwid = widths[k + 1];
-                        if k == 2 {
-                            // TreeSize's bars: a folder's share of the biggest here; a drive's fill.
-                            let (bx, bw) = (cx + 8.0, cwid - 14.0);
-                            if let Some((free, total)) = item.space {
-                                let used = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
-                                let c = if used > 0.9 { Color(0.9, 0.3, 0.28, 1.0) } else { accent };
-                                p.rrect(bx, iy + ih - 7.0, bw, 3.0, 1.5, Color::white(0.1));
-                                p.rrect(bx, iy + ih - 7.0, bw * used, 3.0, 1.5, c);
-                            } else if let (true, Some(sz)) = (item.folder, item.size) {
-                                let share = sz as f32 / biggest.max(1) as f32;
-                                p.rrect(bx, iy + 5.0, (bw * share).max(2.0), ih - 10.0, 3.0, accent.alpha(0.22));
-                            }
-                        }
                         let align = if k == 2 && item.space.is_none() { Align::Right } else { Align::Left };
-                        let ink = if k == 2 && item.folder && item.size.is_some() { 0.8 } else { 0.6 };
-                        p.text(text, &f.small, cx + 10.0, iy, cwid - 18.0, ih, align, Color::white(ink));
+                        p.text(text, &ty.t12, cx + 7.0, iy, cwid - 19.0, ih, align, pal.text2.alpha(alpha));
                         cx += cwid;
                     }
                 }
@@ -2319,122 +2693,133 @@ impl State {
                         p.image(b, ix + (iw - s) / 2.0, iy + 6.0, s, s, alpha);
                     }
                     if let Some((free, total)) = item.space {
+                        // A drive's bar, as Explorer shows it: red when it's nearly full.
                         let frac = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
-                        p.rrect(ix + 12.0, iy + 8.0 + s, iw - 24.0, 4.0, 2.0, Color::white(0.12));
-                        let c = if frac > 0.9 { Color(0.9, 0.3, 0.28, 1.0) } else { accent };
-                        p.rrect(ix + 12.0, iy + 8.0 + s, (iw - 24.0) * frac, 4.0, 2.0, c);
+                        let track = if pal.dark { rgb(0x3A3A3A) } else { rgb(0xE6E6E6) };
+                        p.rrect(ix + 12.0, iy + 8.0 + s, iw - 24.0, 5.0, 0.0, track);
+                        let c = if frac > 0.9 { rgb(0xDA2626) } else { accent };
+                        p.rrect(ix + 12.0, iy + 8.0 + s, (iw - 24.0) * frac, 5.0, 0.0, c);
                     }
-                    p.text_wrap(
-                        &item.name,
-                        &f.small,
-                        ix + 4.0,
-                        iy + 14.0 + s,
-                        iw - 8.0,
-                        30.0,
-                        Color::white(0.95 * alpha),
-                    );
+                    p.text_wrap(&item.name, &ty.t12, ix + 4.0, iy + 16.0 + s, iw - 8.0, 32.0, pal.text.alpha(alpha));
                 }
             }
         }
         if t.order.is_empty() {
             let msg = if t.loading {
-                "Loading\u{2026}"
+                "Working on it\u{2026}"
             } else if !t.filter.is_empty() {
-                "Nothing here matches"
+                "No items match your search."
             } else {
-                "This folder is empty"
+                "This folder is empty."
             };
-            p.text(msg, &f.body, x0, top + 30.0, cw, 24.0, Align::Center, Color::white(0.45));
+            p.text(msg, &ty.t12, x0, top + 16.0, cw, 24.0, Align::Center, pal.text2);
         }
         // The box being dragged.
-        if let Some(((ax_, ay_), (bx, by))) = self.band {
+        if let Some(((ax_, ay_), (bx, by_))) = self.band {
             // Kept in the content's coordinates (it scrolls with it).
-            let (ay_, by) = (ay_ - scroll, by - scroll);
-            let (l, tp) = (ax_.min(bx), ay_.min(by));
-            let (bw, bh) = ((ax_ - bx).abs(), (ay_ - by).abs());
-            p.rrect(l, tp, bw, bh, 2.0, accent.alpha(0.2));
-            p.stroke_rrect(l + 0.5, tp + 0.5, bw - 1.0, bh - 1.0, 2.0, accent.alpha(0.8), 1.0);
+            let (ay_, by_) = (ay_ - scroll, by_ - scroll);
+            let (l, tp) = (ax_.min(bx), ay_.min(by_));
+            let (bw, bh) = ((ax_ - bx).abs(), (ay_ - by_).abs());
+            p.rrect(l, tp, bw, bh, 0.0, accent.alpha(0.25));
+            p.stroke_rrect(l + 0.5, tp + 0.5, bw - 1.0, bh - 1.0, 0.0, accent, 1.0);
         }
-        // Scrollbar.
+        // Scrollbar: Windows 11's thin one.
         let maxs = self.max_scroll();
         if maxs > 0.0 {
             let track = chh - (top - cy0);
             let thumb = (track * track / (track + maxs)).max(30.0);
-            let ty = top + (track - thumb) * (scroll / maxs);
-            p.rrect(x0 + cw - 8.0, ty, 4.0, thumb, 2.0, Color::white(0.25));
+            let ty_ = top + (track - thumb) * (scroll / maxs);
+            p.rrect(x0 + cw - 7.0, ty_ + 2.0, 3.0, thumb - 4.0, 1.5, pal.scroll);
         }
         p.unclip();
-        // Status.
+
+        // The status bar, across the bottom: how many, what's selected, and the view buttons.
+        let sy = h - STATUS_H;
         let sel = t.selected();
-        let mut status = format!("{} item{}", t.order.len(), if t.order.len() == 1 { "" } else { "s" });
-        if busy {
-            status = "Refreshing\u{2026}".to_string();
-            // A bar runs along the bottom of the command bar.
-            let secs = self.refresh_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
-            let (seg, by) = (w * 0.3, TABS_H + BAR_H + CMD_H - 3.0);
-            let at = -seg + (secs * 0.9 % 1.0) * (w + seg);
-            let (l, r) = (at.max(0.0), (at + seg).min(w));
-            p.rrect(0.0, by, w, 3.0, 0.0, accent.alpha(0.18));
-            if r > l {
-                p.rrect(l, by, r - l, 3.0, 1.5, accent);
-            }
-        }
+        let n = t.order.len();
+        let mut parts = vec![if busy {
+            "Refreshing\u{2026}".to_string()
+        } else {
+            format!("{n} item{}", if n == 1 { "" } else { "s" })
+        }];
         if !sel.is_empty() {
             let bytes: u64 = sel.iter().filter_map(|&i| t.items[i].size).sum();
-            status += &format!(
-                "  \u{b7}  {} selected{}",
+            parts.push(format!(
+                "{} item{} selected{}",
                 sel.len(),
-                if bytes > 0 { format!(", {}", size_text(bytes)) } else { String::new() }
-            );
+                if sel.len() == 1 { "" } else { "s" },
+                if bytes > 0 { format!("  {}", size_text(bytes)) } else { String::new() }
+            ));
         }
-        let side = self.side_w();
-        p.text(
-            &status,
-            &f.small,
-            side + 12.0,
-            h - STATUS_H,
-            w - side - 24.0,
-            STATUS_H,
-            Align::Left,
-            Color::white(0.55),
-        );
+        let mut x = 12.0;
+        for (k, part) in parts.iter().enumerate() {
+            if k > 0 {
+                p.line(x + 0.5, sy + 7.0, x + 0.5, sy + STATUS_H - 7.0, pal.text_off, 1.0);
+                x += 13.0;
+            }
+            let pw = p.measure(part, &ty.t12);
+            p.text(part, &ty.t12, x, sy, pw + 4.0, STATUS_H, Align::Left, pal.text);
+            x += pw + 12.0;
+        }
+        for (k, code) in [0xE8FDu32, 0xE8A9].iter().enumerate() {
+            let vx = status_view_x(w, k as u8);
+            let on = (k == 0) == (self.view == View::Details);
+            if on || hov == Some(Hit::ViewButton(k as u8)) {
+                p.rrect(vx, sy + 3.0, 24.0, STATUS_H - 6.0, 3.0, pal.hover);
+            }
+            if on {
+                p.stroke_rrect(vx + 0.5, sy + 3.5, 23.0, STATUS_H - 7.0, 3.0, pal.text_off, 1.0);
+            }
+            icon(*code, &ty.i12, vx, sy, 24.0, STATUS_H, pal.text);
+        }
+        if busy {
+            // A bar runs along the bottom of the command bar.
+            let secs = self.refresh_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
+            let (seg, bar_y) = (w * 0.3, TABS_H + BAR_H + CMD_H - 3.0);
+            let at = -seg + (secs * 0.9 % 1.0) * (w + seg);
+            let (l, r) = (at.max(0.0), (at + seg).min(w));
+            p.rrect(0.0, bar_y, w, 3.0, 0.0, accent.alpha(0.18));
+            if r > l {
+                p.rrect(l, bar_y, r - l, 3.0, 1.5, accent);
+            }
+        }
         if self.details {
-            self.draw_pane(p, f, w, h, pane_icon);
+            self.draw_pane(p, w, h, &pics.pane);
         }
     }
 
     /// The details pane: a big picture of what's selected (its thumbnail or
     /// icon) with its name, kind, size, dates and where it is; or, with
     /// several selected, how many and how big; or, with none, the folder.
-    fn draw_pane(&self, p: &Painter, f: &crate::gfx::Fonts, w: f32, h: f32, pic: &Option<ID2D1Bitmap>) {
+    fn draw_pane(&self, p: &Painter, w: f32, h: f32, pic: &Option<ID2D1Bitmap>) {
+        let (pal, ty) = (&self.pal, &self.ty);
         let t = self.t();
         let x = w - PANE_W;
         let y0 = TABS_H + BAR_H + CMD_H;
-        p.rrect(x, y0, PANE_W, h - y0, 0.0, Color(0.11, 0.11, 0.115, 1.0));
-        p.line(x, y0, x, h, Color::white(0.07), 1.0);
+        let foot = h - STATUS_H;
+        p.rrect(x, y0, PANE_W, foot - y0, 0.0, pal.base);
+        p.line(x + 0.5, y0, x + 0.5, foot, pal.sep, 1.0);
         let sel = t.selected();
         let line = |label: &str, value: &str, y: &mut f32| {
             if value.is_empty() {
                 return;
             }
-            p.text(label, &f.small, x + 18.0, *y, PANE_W - 36.0, 16.0, Align::Left, Color::white(0.45));
-            let lines = ((p.measure(value, &f.small) * 1.1 / (PANE_W - 36.0)).ceil() as usize).clamp(1, 4) as f32;
-            p.text_wrap(value, &f.small, x + 18.0, *y + 16.0, PANE_W - 36.0, 16.0 * lines, Color::white(0.88));
-            *y += 22.0 + 16.0 * lines;
+            p.text(label, &ty.t12, x + 18.0, *y, PANE_W - 36.0, 16.0, Align::Left, pal.text2);
+            let lines = ((p.measure(value, &ty.t12) * 1.1 / (PANE_W - 36.0)).ceil() as usize).clamp(1, 4) as f32;
+            p.text_wrap(value, &ty.t12, x + 18.0, *y + 17.0, PANE_W - 36.0, 16.0 * lines, pal.text);
+            *y += 24.0 + 16.0 * lines;
         };
         let mut y = y0 + 22.0;
         match sel[..] {
             [i] => {
                 let item = &t.items[i];
-                let box_h = 150.0;
-                let (bw, bh) = (PANE_W - 36.0, box_h);
-                p.rrect(x + 18.0, y, bw, bh, 8.0, Color::white(0.04));
+                let (bw, bh) = (PANE_W - 36.0, 150.0);
                 if let Some(b) = pic {
                     let s = 96.0f32.min(bh - 16.0);
                     p.image(b, x + 18.0 + (bw - s) / 2.0, y + (bh - s) / 2.0, s, s, 1.0);
                 }
                 y += bh + 14.0;
-                p.text_wrap(&item.name, &f.body, x + 18.0, y, PANE_W - 36.0, 44.0, Color::white(0.95));
+                p.text_wrap(&item.name, &ty.t14, x + 18.0, y, PANE_W - 36.0, 40.0, pal.text);
                 y += 46.0;
                 let size = match (item.size, item.space) {
                     (_, Some((free, total))) => format!("{} free of {}", size_text(free), size_text(total)),
@@ -2450,7 +2835,7 @@ impl State {
             }
             [] => {
                 let n = t.order.len();
-                p.text(&t.loc.title(), &f.body, x + 18.0, y, PANE_W - 36.0, 28.0, Align::Left, Color::white(0.95));
+                p.text(&t.loc.title(), &ty.t14, x + 18.0, y, PANE_W - 36.0, 28.0, Align::Left, pal.text);
                 y += 40.0;
                 line("Items", &format!("{n}"), &mut y);
                 let files: u64 = t.items.iter().filter(|i| !i.folder).filter_map(|i| i.size).sum();
@@ -2458,28 +2843,20 @@ impl State {
                     line("Files' size", &size_text(files), &mut y);
                 }
                 p.text(
-                    "Select a file to see its details.",
-                    &f.small,
+                    "Select a single file to get more information.",
+                    &ty.t12,
                     x + 18.0,
                     y + 6.0,
                     PANE_W - 36.0,
                     20.0,
                     Align::Left,
-                    Color::white(0.4),
+                    pal.text2,
                 );
             }
             _ => {
                 let bytes: u64 = sel.iter().filter_map(|&i| t.items[i].size).sum();
-                p.text(
-                    &format!("{} items selected", sel.len()),
-                    &f.body,
-                    x + 18.0,
-                    y,
-                    PANE_W - 36.0,
-                    28.0,
-                    Align::Left,
-                    Color::white(0.95),
-                );
+                let label = format!("{} items selected", sel.len());
+                p.text(&label, &ty.t14, x + 18.0, y, PANE_W - 36.0, 28.0, Align::Left, pal.text);
                 y += 40.0;
                 if bytes > 0 {
                     line("Total size", &size_text(bytes), &mut y);
@@ -2493,37 +2870,42 @@ impl State {
 
     /// The address box's x and width, and the search box's width.
     fn box_layout(&self, w: f32) -> (f32, f32, f32) {
-        let ax = 8.0 + 4.0 * 36.0 + 6.0;
-        let sw = 240.0f32.min(w * 0.25);
-        (ax, w - ax - sw - 22.0, sw)
+        let ax = 8.0 + 4.0 * 48.0;
+        let sw = (w * 0.22).clamp(160.0, 360.0);
+        (ax, (w - ax - sw - 20.0).max(80.0), sw)
     }
 
-    /// Where the path's parts go in the address bar: (x, width, part), the
-    /// first ones left out when the path is too long for it.
-    fn crumb_layout(&self, w: f32) -> Vec<(f32, f32, usize)> {
+    /// Where the path's parts go in the address bar: (x, width, part) each,
+    /// with its arrow after it, and how many of the first parts are left out
+    /// (behind the "..." button) when the path is too long for the bar.
+    fn crumb_layout(&self, w: f32) -> (Vec<(f32, f32, usize)>, usize) {
         let (ax, aw, _) = self.box_layout(w);
         let parts = crumbs(&self.t().loc);
-        let width = |s: &str| self.measure.as_ref().map_or(s.len() as f32 * 7.5, |m| m.width(s, &m.body)) + 12.0;
+        let width = |s: &str| self.measure.as_ref().map_or(s.len() as f32 * 8.0, |m| m.width(s, &self.ty.t14)) + 16.0;
         let widths: Vec<f32> = parts.iter().map(|(name, _)| width(name)).collect();
-        const CHEVRON: f32 = 14.0;
-        let room = aw - 32.0;
+        // The place's icon and the arrow after it come first.
+        const LEAD: f32 = 65.0;
+        let room = aw - LEAD - 6.0;
         let mut first = 0;
-        while first + 1 < parts.len() && widths[first..].iter().map(|w| w + CHEVRON).sum::<f32>() > room {
+        let need =
+            |first: usize| widths[first..].iter().map(|w| w + CHEV).sum::<f32>() + if first > 0 { 32.0 } else { 0.0 };
+        while first + 1 < parts.len() && need(first) > room {
             first += 1;
         }
-        let mut x = ax + if first > 0 { 26.0 } else { 6.0 };
+        let mut x = ax + LEAD + if first > 0 { 32.0 } else { 0.0 };
         let mut out = Vec::new();
         for (i, wd) in widths.iter().enumerate().skip(first) {
             out.push((x, *wd, i));
-            x += wd + CHEVRON;
+            x += wd + CHEV;
         }
-        out
+        (out, first)
     }
 
     fn place_boxes(&self) {
         let (w, _) = appwin::client(self.hwnd);
         let k = appwin::scale(self.hwnd);
         let (ax, aw, sw) = self.box_layout(w);
+        let sx = w - sw - 10.0;
         unsafe {
             // The address box only while it's typed in; the path's parts show otherwise.
             let shown = if self.editing_addr { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
@@ -2532,18 +2914,18 @@ impl State {
             let _ = SetWindowPos(
                 self.addr,
                 None,
-                ((ax + 8.0) * k) as i32,
-                ((TABS_H + 13.0) * k) as i32,
-                ((aw - 16.0) * k) as i32,
+                ((ax + 12.0) * k) as i32,
+                ((TABS_H + 14.0) * k) as i32,
+                ((aw - 24.0) * k) as i32,
                 (20.0 * k) as i32,
                 flags,
             );
             let _ = SetWindowPos(
                 self.search,
                 None,
-                ((w - sw - 2.0) * k) as i32,
-                ((TABS_H + 13.0) * k) as i32,
-                ((sw - 16.0) * k) as i32,
+                ((sx + 12.0) * k) as i32,
+                ((TABS_H + 14.0) * k) as i32,
+                ((sw - 50.0) * k) as i32,
                 (20.0 * k) as i32,
                 flags,
             );
@@ -2564,7 +2946,18 @@ impl State {
             Some(Hit::Forward) => self.forward(),
             Some(Hit::Up) => self.up(),
             Some(Hit::Refresh) => self.refresh(),
-            Some(Hit::Cmd(i)) => self.command(i),
+            Some(Hit::Cmd(i)) if self.cmd_enabled(i) => self.command(i),
+            Some(Hit::Cmd(_)) => {}
+            Some(Hit::ViewButton(k)) => {
+                if k == 0 {
+                    self.view_size(6);
+                } else {
+                    self.view_size(2);
+                }
+            }
+            Some(Hit::SideFold) => self.side_open = !self.side_open,
+            Some(Hit::CrumbRoot) => self.root_menu(),
+            Some(Hit::CrumbMore) => self.hidden_crumbs_menu(),
             Some(Hit::Caption(b)) => appwin::caption_press(self.hwnd, b),
             Some(Hit::Side(i)) => {
                 let loc = self.side[i].2.clone();
@@ -3248,10 +3641,25 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_CTLCOLOREDIT => {
             let dc = HDC(wp.0 as *mut _);
-            SetTextColor(dc, COLORREF(0x00F0F0F0));
-            SetBkColor(dc, COLORREF(0x00303030));
-            if let Some(b) = with(|s| s.brush) {
+            if let Some((b, pal)) = with(|s| (s.brush, s.pal)) {
+                SetTextColor(dc, Pal::colorref(pal.text));
+                SetBkColor(dc, Pal::colorref(pal.field));
                 return LRESULT(b.0 as isize);
+            }
+        }
+        // Mica shows behind the tabs only while the window's in front, as in Explorer.
+        WM_ACTIVATE => {
+            with(|s| {
+                s.active = wp.0 & 0xFFFF != 0;
+                appwin::redraw(s.hwnd);
+            });
+        }
+        // Windows' app mode (light or dark) or the wallpaper changed.
+        WM_SETTINGCHANGE => {
+            let what =
+                if lp.0 != 0 { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } else { String::new() };
+            if what == "ImmersiveColorSet" || wp.0 == SPI_SETDESKWALLPAPER.0 as usize {
+                with(|s| s.apply_theme());
             }
         }
         WM_COMMAND => {
@@ -3299,6 +3707,9 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         ICONS => {
             with(|s| s.icons_arrived());
+        }
+        MICA => {
+            with(|s| s.mica_arrived());
         }
         SIZED => {
             with(|s| s.sized());
@@ -3414,6 +3825,7 @@ unsafe extern "system" fn proc(hwnd: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
 pub fn run(start: Option<String>) {
     appwin::init();
     let Ok(gfx) = Gfx::new() else { return };
+    let ty = Type::new(&gfx);
     let Some(hwnd) = appwin::create(w!("CascadeFiles"), "Files", 1200, 760, Some(proc)) else { return };
     appwin::frameless(hwnd);
     appwin::identity(hwnd, "Cascade.Files");
@@ -3487,7 +3899,7 @@ pub fn run(start: Option<String>) {
                 addr,
                 search,
                 font,
-                brush: CreateSolidBrush(COLORREF(0x00303030)),
+                brush: HBRUSH::default(),
                 hovered: None,
                 band: None,
                 press: None,
@@ -3510,10 +3922,15 @@ pub fn run(start: Option<String>) {
                 undo: Vec::new(),
                 redo: Vec::new(),
                 store,
+                pal: DARK,
+                ty,
+                active: true,
+                side_open: true,
             })
         });
     }
     with(|s| {
+        s.apply_theme();
         s.place_boxes();
         s.load();
     });
