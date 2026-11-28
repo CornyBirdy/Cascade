@@ -211,8 +211,13 @@ fn draw_count(c: &mut Count) {
         let r = 92.0;
         glass(p, cx - r, cy - r, 2.0 * r, 2.0 * r, r, 1.0);
         p.stroke_circle(cx, cy, r - 10.0, Color::white(0.08), 4.0);
-        let sweep = 360.0 * left / total;
-        p.arc(cx, cy, r - 10.0, 0.0, sweep, accent, 4.0);
+        // Radians, from twelve o'clock. A full turn would start and end on
+        // the same point (nothing drawn), so stop a hair short.
+        let sweep = (std::f32::consts::TAU * left / total).clamp(0.0, std::f32::consts::TAU - 0.002);
+        let top = -std::f32::consts::FRAC_PI_2;
+        if sweep > 0.01 {
+            p.arc(cx, cy, r - 10.0, top, top + sweep, accent, 4.0);
+        }
         let a = ease(phase * 5.0);
         p.scaled(2.8 * pop, cx, cy, || {
             p.text(&n.to_string(), &f.big, cx - 40.0, cy - 22.0, 80.0, 44.0, Align::Center, Color::white(a));
