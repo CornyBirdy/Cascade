@@ -13,8 +13,12 @@
 //!   what's behind it like a lens: within 24 px of the rim, the light is
 //!   shifted by up to 30 px, falling off with the square of the distance in
 //!   (the filter's displacement map). The bending is the one part that reads
-//!   the screen (see `lens`); it can be turned off (Refraction), leaving a
-//!   drawn band of light in its place, which costs no more than Acrylic.
+//!   the screen; it can be turned off (Refraction), leaving a drawn band of
+//!   light in its place, which costs no more than Acrylic. With Refraction on
+//!   the glass is drawn on the GPU (see `glass`): what's behind each panel,
+//!   bent by its curved edge, lightly blurred and lit along the rim, so the
+//!   drawn band, fringes and shade step aside; where that can't work, DWM's
+//!   blur with a ring of bent light round the edge (see `lens`).
 //!
 //! The accent colour (highlights: the app in front, toggles, progress,
 //! today) is your Windows accent by default, or one picked from Windows'
@@ -95,8 +99,11 @@ pub struct Theme {
     pub film: (Color, Color),
     pub rim: Rim,
     pub light: Light,
-    /// How the edge bends what's behind it, with Refraction on (see `lens`).
+    /// How the edge bends what's behind it, with Refraction on, where the
+    /// GPU glass can't be used (see `lens`).
     pub refract: Option<crate::lens::Lens>,
+    /// The glass drawn on the GPU, with Refraction on (see `glass`).
+    pub gpu: Option<crate::glassmath::Look>,
     /// Highlights: the app in front, toggles, progress, today (filled in
     /// from the accent colour by `resolve`).
     pub accent: Color,
@@ -124,6 +131,7 @@ pub const THEMES: [Theme; 2] = [
         rim: Rim::Lit(white(0.14), white(0.06)),
         light: NONE,
         refract: None,
+        gpu: None,
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
     Theme {
@@ -149,6 +157,21 @@ pub const THEMES: [Theme; 2] = [
         // 28 px of curved edge (all of a taskbar's height), bent up to 39 px,
         // with what's bent in softened first, colours split a little.
         refract: Some(crate::lens::Lens { band: 28.0, bend: 1.4, split: 0.08, soften: 5.0 }),
+        // A 24 px curved edge (all of a taskbar's height) bending what's
+        // behind up to 11 px in, its colours split a little; a light blur,
+        // softer in the curve; a fine line of light where the curve faces
+        // the top left (and fainter at the bottom right); a touch more vivid.
+        gpu: Some(crate::glassmath::Look {
+            band: 24.0,
+            bend: 0.45,
+            split: 0.06,
+            blur: 0.8,
+            edge_blur: 1.2,
+            key: 1.0,
+            back: 0.5,
+            ambient: 0.14,
+            vivid: 1.12,
+        }),
         accent: Color(0.38, 0.67, 1.0, 1.0),
     },
 ];
@@ -332,10 +355,31 @@ fn lens_of(t: &Theme) -> Option<crate::lens::Lens> {
     (k > 0.0).then_some(crate::lens::Lens { bend: lens.bend * k.min(1.5), split: lens.split * k, ..lens })
 }
 
-/// Whether panels bend light (and so their rings need refreshing as what's
-/// behind them changes). `acrylic` is the Blur setting.
+/// How `t`'s glass is drawn on the GPU, if it is and Refraction is on. The
+/// Edge setting scales how far it bends and how much light the rim catches.
+fn gpu_of(t: &Theme) -> Option<crate::glassmath::Look> {
+    let k = f32::from_bits(EDGE.load(Ordering::Relaxed));
+    let look = t.gpu.filter(|_| REFRACT.load(Ordering::Relaxed) && matches!(t.glass, Glass::Blur | Glass::Clear))?;
+    (k > 0.0).then_some(crate::glassmath::Look {
+        bend: look.bend * k.min(1.5),
+        split: look.split * k,
+        key: look.key * k,
+        back: look.back * k,
+        ambient: look.ambient * k,
+        ..look
+    })
+}
+
+/// Whether panels bend light (and so their rings, or their GPU glass, need
+/// refreshing as what's behind them changes). `acrylic` is the Blur setting.
 pub fn refracts(acrylic: bool) -> bool {
     blurs(acrylic) && lens_of(&current()).is_some()
+}
+
+/// Whether the glass is drawn on the GPU now (its edge is bent and lit
+/// there, so the panel doesn't draw stand-ins for it).
+fn gpu_live(t: &Theme) -> bool {
+    gpu_of(t).is_some() && crate::glass::ready()
 }
 
 pub fn accent() -> Color {
@@ -370,6 +414,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
         _ => pack(t.tint, 0.0),
     };
     b.set_lens(lens_of(&t).filter(|_| blur));
+    b.set_glass(gpu_of(&t).filter(|_| blur && crate::glass::usable()));
     b.style(if blur { t.glass } else { Glass::Solid }, tint, radius);
     blur
 }
@@ -378,6 +423,7 @@ pub fn style_backdrop(b: &Backdrop, acrylic: bool, opacity: f32, radius: f32) ->
 /// backdrop also hosts the live previews, so it must always be there).
 pub fn style_opaque(b: &Backdrop, radius: f32) {
     b.set_lens(None);
+    b.set_glass(None);
     b.style(Glass::Acrylic, pack(current().solid, 1.0), radius);
 }
 
@@ -402,7 +448,16 @@ pub fn panel(
     alpha: f32,
 ) {
     use std::hash::{Hash, Hasher};
-    let t = current();
+    let mut t = current();
+    if blurred && gpu_live(&t) {
+        // The GPU glass bends and lights the edge itself: no drawn band,
+        // fringes or shade, and only a faint outline (for screenshots,
+        // which leave the GPU glass out).
+        t.light = Light { sheen: t.light.sheen, ..NONE };
+        if let Rim::Shine { hairline, .. } = t.rim {
+            t.rim = Rim::Shine { lit: 0.0, back: 0.0, hairline: hairline * 0.4 };
+        }
+    }
     let mut key = std::collections::hash_map::DefaultHasher::new();
     (look(), w.to_bits(), h.to_bits(), r.to_bits(), blurred, opacity.to_bits(), solid_alpha.to_bits()).hash(&mut key);
     p.cached(key.finish(), x, y, w, h, alpha, |p, x, y, a| {
@@ -420,6 +475,7 @@ fn look() -> u64 {
         ACCENT_GLASS.load(Ordering::Relaxed) as u64,
         EDGE.load(Ordering::Relaxed) as u64,
         REFRACT.load(Ordering::Relaxed) as u64,
+        crate::glass::ready() as u64,
     ];
     parts.iter().fold(0xcbf2_9ce4_8422_2325, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3))
 }

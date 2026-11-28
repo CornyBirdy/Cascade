@@ -6,9 +6,12 @@
 //! DWM, the same way the Windows taskbar does it, and keeps working while the
 //! window is inactive (unlike the newer system backdrops).
 //!
-//! Liquid Glass with Refraction on (see `lens`) gets a second window between
-//! the two: a click-through layered ring holding the light bent round the
-//! panel's edge, over the blur.
+//! Liquid Glass with Refraction on is drawn on the GPU instead (see `glass`):
+//! a window of its own under the panel that shows what's behind it bent by
+//! its curved edge, in place of DWM's blur. Where that can't work (an old
+//! Windows, no Direct3D 11, a screen that can't be duplicated) it falls back
+//! to DWM's blur with a second window between the two: a click-through
+//! layered ring holding the light bent round the panel's edge (see `lens`).
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -23,6 +26,8 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::glass::{Pane, Shown};
+use crate::glassmath::Look;
 use crate::lens::{self, Lens};
 use crate::theme::Glass;
 
@@ -102,6 +107,15 @@ pub struct Backdrop {
     lens: Cell<Option<Lens>>,
     /// The layered window that ring is drawn in, made when first needed.
     ring: Cell<Option<HWND>>,
+    /// Liquid Glass drawn on the GPU, if the theme asks for it (sizes at
+    /// 100% scaling), its pane (made when first shown), whether it's what's
+    /// on screen now, and whether it failed here (so DWM's blur is used).
+    glass: Cell<Option<Look>>,
+    pane: Option<Pane>,
+    glass_on: bool,
+    glass_failed: Cell<bool>,
+    /// The glass asked for one more frame of the panel (see `track`).
+    again: bool,
 }
 
 impl Backdrop {
@@ -138,13 +152,21 @@ impl Backdrop {
                 content: Cell::new(HWND::default()),
                 lens: Cell::new(None),
                 ring: Cell::new(None),
+                glass: Cell::new(None),
+                pane: None,
+                glass_on: false,
+                glass_failed: Cell::new(false),
+                again: false,
             })
         }
     }
 
-    /// DWM's corner radius in pixels at this window's scaling.
+    /// DWM's corner radius in pixels at the panel's scaling (its own window's,
+    /// once known: this one stays hidden, so unmoved, under the GPU glass).
     fn corner_px(&self) -> i32 {
-        let dpi = match unsafe { GetDpiForWindow(self.hwnd) } {
+        let content = self.content.get();
+        let at = if content.is_invalid() { self.hwnd } else { content };
+        let dpi = match unsafe { GetDpiForWindow(at) } {
             0 => 96,
             d => d,
         };
@@ -196,6 +218,12 @@ impl Backdrop {
     /// Puts the blur back directly under `content` (after `content` was
     /// brought to the top), where it is.
     pub fn restack(&self, content: HWND) {
+        if self.glass_on {
+            if let Some(p) = &self.pane {
+                p.restack(content);
+            }
+            return;
+        }
         if !self.shown {
             return;
         }
@@ -210,6 +238,24 @@ impl Backdrop {
                 None => {
                     let _ = SetWindowPos(self.hwnd, Some(content), 0, 0, 0, 0, flags);
                 }
+            }
+        }
+    }
+
+    /// Draws the panel's glass on the GPU (see `glass`), looking like `look`,
+    /// instead of DWM's blur, or (`None`) goes back to DWM's blur. Where the
+    /// GPU glass can't work the blur (and the ring of `set_lens`) stays.
+    /// Call before `style`.
+    pub fn set_glass(&self, look: Option<Look>) {
+        if look == self.glass.get() {
+            return;
+        }
+        self.glass.set(look);
+        // A new look is worth another try.
+        self.glass_failed.set(false);
+        if look.is_none() {
+            if let Some(p) = &self.pane {
+                p.hide();
             }
         }
     }
@@ -286,6 +332,16 @@ impl Backdrop {
 
     /// Puts the blur at `r` (screen px), directly under `content`.
     pub fn place(&mut self, r: RECT, content: HWND) {
+        if self.place_glass(r, content) {
+            return;
+        }
+        if self.glass_on {
+            // The GPU glass gave up: DWM's blur takes over.
+            self.glass_on = false;
+            if let Some(p) = &self.pane {
+                p.hide();
+            }
+        }
         if r == self.rect && self.shown {
             return;
         }
@@ -304,6 +360,45 @@ impl Backdrop {
             );
         }
         self.rect_changed();
+    }
+
+    /// Shows the GPU glass at `r` in place of DWM's blur, if the theme asks for
+    /// it and it works here. False to use DWM's blur.
+    fn place_glass(&mut self, r: RECT, content: HWND) -> bool {
+        let Some(look) = self.glass.get() else { return false };
+        if self.glass_failed.get() {
+            return false;
+        }
+        if self.pane.is_none() {
+            self.pane = Pane::new();
+        }
+        self.content.set(content);
+        let radius = self.corner_px();
+        let shown = match &self.pane {
+            Some(p) => p.show(r, self.shape, radius, look, content),
+            None => Shown::No,
+        };
+        match shown {
+            Shown::Yes { again } => {
+                if self.shown {
+                    // DWM's blur and the ring step aside.
+                    self.shown = false;
+                    self.hide_ring();
+                    unsafe {
+                        let _ = ShowWindow(self.hwnd, SW_HIDE);
+                    }
+                }
+                self.rect = r;
+                self.content.set(content);
+                self.glass_on = true;
+                self.again |= again;
+                true
+            }
+            Shown::No => {
+                self.glass_failed.set(true);
+                false
+            }
+        }
     }
 
     /// Like `place`, but cut to a rounded rect `shape` (window-relative px,
@@ -362,7 +457,7 @@ impl Backdrop {
             None => None,
         };
         self.place_shaped(inner, shape, content);
-        moving
+        moving || std::mem::take(&mut self.again)
     }
 
     /// Hides the blur while the panel at `r` is shown without it, keeping
@@ -378,6 +473,12 @@ impl Backdrop {
     }
 
     fn hide_blur(&mut self) {
+        if self.glass_on {
+            self.glass_on = false;
+            if let Some(p) = &self.pane {
+                p.hide();
+            }
+        }
         if self.shown {
             self.shown = false;
             self.hide_ring();
