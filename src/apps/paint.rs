@@ -324,8 +324,66 @@ struct Floating {
     piece: Canvas,
     /// Its top left on the canvas.
     at: (f32, f32),
+    /// How big it's shown on the canvas (resized with the handles; the
+    /// piece itself is only scaled to this when it's put down).
+    size: (f32, f32),
     /// Where in it the pointer holds it, while it's dragged.
     grab: Option<(f32, f32)>,
+    /// A handle being dragged (0..8, left to right then top to bottom, the
+    /// middle one unused) and the piece's (left, top, right, bottom) when
+    /// the drag began.
+    resize: Option<(usize, (f32, f32, f32, f32))>,
+}
+
+/// The size of a handle on a pasted picture, in pixels (a bit more to hit).
+const HANDLE: f32 = 10.0;
+
+impl Floating {
+    /// The handle at screen point (x, y), the picture drawn at (px, py) at `s`.
+    fn handle_at(&self, px: f32, py: f32, s: f32, x: f32, y: f32) -> Option<usize> {
+        let (w, h) = (self.size.0 * s, self.size.1 * s);
+        let (fx, fy) = (px + self.at.0 * s, py + self.at.1 * s);
+        (0..9).filter(|i| *i != 4).find(|i| {
+            let (hx, hy) = (fx + w * (*i % 3) as f32 / 2.0, fy + h * (*i / 3) as f32 / 2.0);
+            (x - hx).abs() <= HANDLE && (y - hy).abs() <= HANDLE
+        })
+    }
+
+    /// Drags handle `i` (from the picture's `start` rectangle) to canvas
+    /// point `at`: the corners keep its shape (Shift lets them go), the
+    /// sides move one edge.
+    fn drag_handle(&mut self, i: usize, start: (f32, f32, f32, f32), at: (f32, f32), free: bool) {
+        let (mut l, mut t, mut r, mut b) = start;
+        let (hx, hy) = (i % 3, i / 3);
+        match hx {
+            0 => l = at.0.min(r - 1.0),
+            2 => r = at.0.max(l + 1.0),
+            _ => {}
+        }
+        match hy {
+            0 => t = at.1.min(b - 1.0),
+            2 => b = at.1.max(t + 1.0),
+            _ => {}
+        }
+        if hx != 1 && hy != 1 && !free {
+            // A corner: both sides by the same factor, from the opposite corner.
+            let (w0, h0) = (start.2 - start.0, start.3 - start.1);
+            let k = ((r - l) / w0).max((b - t) / h0).max(1.0 / w0.min(h0));
+            let (w, h) = (w0 * k, h0 * k);
+            if hx == 0 {
+                l = r - w;
+            } else {
+                r = l + w;
+            }
+            if hy == 0 {
+                t = b - h;
+            } else {
+                b = t + h;
+            }
+        }
+        self.at = (l, t);
+        self.size = (r - l, b - t);
+    }
 }
 
 /// The Resize canvas box: what's typed in each side, which is being typed in,
@@ -411,7 +469,12 @@ impl Paint {
     fn commit(&mut self) {
         if let Some(f) = self.floating.take() {
             self.snapshot();
-            self.canvas.blit(&f.piece, f.at.0.round() as i32, f.at.1.round() as i32);
+            let (w, h) = ((f.size.0.round() as i32).max(1), (f.size.1.round() as i32).max(1));
+            if (w, h) == (f.piece.w, f.piece.h) {
+                self.canvas.blit(&f.piece, f.at.0.round() as i32, f.at.1.round() as i32);
+            } else {
+                self.canvas.blit(&f.piece.resized(w, h, true), f.at.0.round() as i32, f.at.1.round() as i32);
+            }
             self.float_bmp = None;
             self.changed();
         }
@@ -434,7 +497,8 @@ impl Paint {
             ((BAR + 20.0 - vy) / s).max(0.0).min((self.canvas.h - piece.h) as f32),
         );
         self.float_bmp = None;
-        self.floating = Some(Floating { piece, at, grab: None });
+        let size = (piece.w as f32, piece.h as f32);
+        self.floating = Some(Floating { piece, at, size, grab: None, resize: None });
     }
 
     /// The picture on the clipboard (a pasted piece waiting is put down first).
@@ -716,13 +780,19 @@ impl App for Paint {
                 self.float_bmp = p.bitmap(fl.piece.w as u32, fl.piece.h as u32, &fl.piece.bytes());
             }
             let (fx, fy) = (dx + fl.at.0 * s, dy + fl.at.1 * s);
-            let (fw, fh) = (fl.piece.w as f32 * s, fl.piece.h as f32 * s);
+            let (fw, fh) = (fl.size.0 * s, fl.size.1 * s);
             p.clip(20.0, BAR + 20.0, aw, ah);
             if let Some(b) = &self.float_bmp {
                 p.image(b, fx, fy, fw, fh, 1.0);
             }
             p.stroke_rrect(fx - 0.5, fy - 0.5, fw + 1.0, fh + 1.0, 0.0, crate::theme::accent(), 1.5);
             p.unclip();
+            // Handles to resize it by: the corners and the middle of each side.
+            for i in (0..9).filter(|i| *i != 4) {
+                let (hx, hy) = (fx + fw * (i % 3) as f32 / 2.0, fy + fh * (i / 3) as f32 / 2.0);
+                p.circle(hx, hy, 6.5, Color::white(1.0));
+                p.circle(hx, hy, 4.5, crate::theme::accent());
+            }
         }
         let name = self
             .path
@@ -737,7 +807,7 @@ impl App for Paint {
             s * 100.0
         );
         let status = if self.floating.is_some() {
-            format!("{status}   \u{b7}   Drag the picture into place, Enter puts it down, Esc drops it")
+            format!("{status}   \u{b7}   Drag the picture into place or by its handles to resize it (Shift for any shape), Enter puts it down, Esc drops it")
         } else {
             status
         };
@@ -839,18 +909,30 @@ impl App for Paint {
             return false;
         }
         // A pasted picture: dragged where it's held; a click elsewhere puts it down.
+        let (vx, vy, vs) = self.view;
         if let Some(fl) = &mut self.floating {
             match ev {
                 Mouse::Down if y >= BAR => {
+                    if let Some(i) = fl.handle_at(vx, vy, vs, x, y) {
+                        fl.resize = Some((i, (fl.at.0, fl.at.1, fl.at.0 + fl.size.0, fl.at.1 + fl.size.1)));
+                        return true;
+                    }
                     let inside = at.0 >= fl.at.0
                         && at.1 >= fl.at.1
-                        && at.0 < fl.at.0 + fl.piece.w as f32
-                        && at.1 < fl.at.1 + fl.piece.h as f32;
+                        && at.0 < fl.at.0 + fl.size.0
+                        && at.1 < fl.at.1 + fl.size.1;
                     if inside {
                         fl.grab = Some((at.0 - fl.at.0, at.1 - fl.at.1));
                         return true;
                     }
                     self.commit();
+                }
+                Mouse::Move if fl.resize.is_some() => {
+                    if let Some((i, start)) = fl.resize {
+                        let free = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                        fl.drag_handle(i, start, at, free);
+                    }
+                    return true;
                 }
                 Mouse::Move if fl.grab.is_some() => {
                     if let Some((gx, gy)) = fl.grab {
@@ -858,8 +940,9 @@ impl App for Paint {
                     }
                     return true;
                 }
-                Mouse::Up if fl.grab.is_some() => {
+                Mouse::Up if fl.grab.is_some() || fl.resize.is_some() => {
                     fl.grab = None;
+                    fl.resize = None;
                     return true;
                 }
                 _ => {}

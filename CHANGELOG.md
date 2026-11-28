@@ -7,6 +7,8 @@ Settings > Updates > What's new opens the list.
 ## 2026-11-28
 
 **New**
+- **Paint, a pasted picture can be resized**: it has handles on its corners and sides before it's put down (corners keep its shape, hold Shift to stretch it any way); drag it to move it, Enter or a click elsewhere puts it down scaled to its new size.
+- **Paint has a new icon**: a brush and a swoosh of colour, in the flat style of the other apps.
 - **Photos can edit**: right-click > *Edit...* (or press **E**) opens the picture in an editor with a pen, highlighter, eraser, **crop** and **rotate** (R); *Save* writes over the file, *Save copy* makes a new one, and closing asks about unsaved changes. The picture in Photos shows the edited version when you come back to it.
 - **Files, Group by in icon views**: groups now show their headings (and counts) over the tiles in Extra large to Small icons, as in Details, and the arrow keys move between groups.
 - **A file's menu is shorter**: the everyday commands (Open, Open with, Cut, Copy, Rename, Delete, Properties...) stay, and what other apps add (7-Zip, WinRAR, Resize, Share...) is under **More options**.

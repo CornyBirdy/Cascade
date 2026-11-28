@@ -238,14 +238,14 @@ fn design(id: &str) -> Option<Design> {
             (Line(0.5, 0.62, 0.5, 0.80, 0.06), hex(0x9AA3AE)),
             (Line(0.34, 0.84, 0.66, 0.84, 0.06), hex(0x9AA3AE)),
         ],
-        // A painter's palette with its paints.
+        // A paintbrush mid-stroke: a swoosh of colour and the brush that made it.
         "cascade.paint" => vec![
-            (Circle(0.5, 0.5, 0.40), hex(0xF1D7AE)),
-            (Circle(0.62, 0.66, 0.09), C(0.0, 0.0, 0.0, 0.0)),
-            (Circle(0.33, 0.40, 0.07), hex(0xE53935)),
-            (Circle(0.50, 0.28, 0.07), hex(0xFDD835)),
-            (Circle(0.67, 0.38, 0.07), hex(0x43A047)),
-            (Circle(0.34, 0.62, 0.07), hex(0x1E88E5)),
+            (Ring(0.5, 0.52, 0.32, 0.13, 0.14 * pi, 0.44 * pi), hex(0xE53935)),
+            (Ring(0.5, 0.52, 0.32, 0.13, 0.40 * pi, 0.70 * pi), hex(0xFDD835)),
+            (Ring(0.5, 0.52, 0.32, 0.13, 0.66 * pi, 0.88 * pi), hex(0x1E88E5)),
+            (Line(0.84, 0.10, 0.54, 0.44, 0.10), hex(0xA0714F)),
+            (Line(0.56, 0.42, 0.45, 0.55, 0.11), hex(0xB0BEC5)),
+            (Line(0.45, 0.55, 0.37, 0.64, 0.12), hex(0x43A047)),
         ],
         // A light bulb, lit.
         "cascade.lighting" => vec![
